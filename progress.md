@@ -70,3 +70,15 @@
 
 - Sessio 코드의 `index/sessions.jsonl`·저장소 이름·브랜치·웹 라우트 형식을 확인하고, 설정 가능한 인덱스 경로와 로컬 웹 주소로 PR 상세 연결을 추가했다. 단일 후보이며 현재 gh 사용자와 작성자가 일치할 때만 링크·세션 ID를 표시한다.
 - 인덱스 누락/손상·복수 후보·인증 실패·잘못된 링크는 숨기며 offline에서는 외부 조회를 하지 않는다. fixture 인덱스와 fake gh로 unittest 83개가 통과했다. 실제 LLM·네트워크 호출, GitHub 쓰기와 커밋은 하지 않았다.
+
+## PR6 — 2026-10-31
+
+- 한국어 README에 설치·사용·보안·Mac 실행 순서와 현재 분석 격리 제한을 정리했다. setup.sh는 사용자 PATH 링크와 선택적 launchd/systemd --user 웹 자동 시작·제거를 제공한다.
+- doctor에 gh 인증·Codex 설치·격리 계약·로컬 권한 점검 및 SSO·팀 권한 안내를 추가했다. 진단은 권한을 고치거나 자격 증명 출력을 노출하지 않는다.
+- 임시 홈과 fake 서비스 관리자·CLI로 unittest 89개 및 git diff --check가 통과했다. 실제 LLM·외부 네트워크·GitHub 쓰기·커밋은 하지 않았다. macOS/systemd 실제 로그인 서비스 동작은 미검증이다.
+
+## PR6 리뷰 수정 — 2026-10-31
+
+- 설계의 MVP 범위를 유지하도록 setup의 launchd/systemd 자동 시작 옵션·구현·README 안내·서비스 테스트를 제거했다. 서비스 journal의 진입 토큰 노출 경로와 임시 파일 잔존·제거 시 설치·중복 시작·잠금 충돌 문제도 해당 코드 제거로 해소했다.
+- doctor는 SKIM_HOME 루트 권한을 검사하고 검사 중 사라진 파일은 건너뛴다. stdout·stderr 비밀값 비노출 검증과 권한·파일 삭제 회귀 테스트를 보완했다.
+- 실제 LLM·네트워크 호출 없이 unittest 88개와 git diff --check가 통과했다. GitHub 쓰기와 커밋은 하지 않았다.
