@@ -4,6 +4,7 @@ import io
 import json
 import os
 from pathlib import Path
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -118,7 +119,7 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(self.count('pr_sources'), 0)
         self.fake.state = 'closed'
         self.collector.collect()
-        self.assertEqual(self.conn.execute('SELECT state FROM pull_requests').fetchone()[0], 'closed')
+        self.assertEqual(self.conn.execute('SELECT state FROM pull_requests').fetchone()[0], 'merged')
 
     def test_race_retry_and_failure_preserves_data(self):
         self.fake.race = 1
@@ -127,7 +128,7 @@ class CollectionTests(unittest.TestCase):
         self.fake.race = 2
         with self.assertRaises(CollectionError):
             self.collector.collect()
-        self.assertEqual(self.count('snapshots'), 2)
+        self.assertEqual(self.count('snapshots'), 3)  # 다른 PR은 계속 갱신한다.
         self.fake.fail = True
         with self.assertRaises(CollectionError) as raised:
             self.collector.collect()
@@ -179,6 +180,151 @@ class CollectionTests(unittest.TestCase):
         with self.assertRaises(CollectionError):
             self.collector.collect()
         self.assertEqual(self.count('snapshots'), 2)
+
+    def test_per_pr_http_failures_keep_snapshot_and_allow_reconciliation(self):
+        for status in (404, 403, 406):
+            with self.subTest(status=status):
+                self.fake.personal = self.fake.team = True
+                self.fake.state = 'open'
+                self.collector.gh.runner = self.fake
+                self.collector.collect()
+                before = self.conn.execute("SELECT s.* FROM snapshots s JOIN pull_requests p ON p.id=s.pr_id WHERE p.number=2").fetchone()
+                original = Path(before['diff_path']).read_bytes()
+                def runner(command, **kwargs):
+                    if command[7] == 'repos/org/outside/pulls/2':
+                        return subprocess.CompletedProcess(command, 1, f'HTTP/2.0 {status} Error\n\n{{}}', '비밀')
+                    return self.fake(command, **kwargs)
+                self.collector.gh.runner = runner
+                self.fake.state = 'closed'
+                with self.assertRaises(CollectionError):
+                    self.collector.collect()
+                states = {r['number']: r['state'] for r in self.conn.execute('SELECT number,state FROM pull_requests')}
+                self.assertEqual(states, {1: 'closed', 2: 'open'})
+                coverage = json.loads(self.conn.execute('SELECT coverage FROM snapshots WHERE id=?', (before['id'],)).fetchone()[0])
+                self.assertEqual(coverage['status'], 'inaccessible' if status == 404 else 'incomplete')
+                self.assertNotIn('비밀', coverage['collection_error'])
+                self.assertEqual(Path(before['diff_path']).read_bytes(), original)
+                self.assertEqual(self.count('pr_sources'), 1)
+        self.collector.gh.runner = self.fake
+        self.fake.state = 'open'
+        self.collector.collect()
+        coverage = json.loads(self.conn.execute('SELECT coverage FROM snapshots WHERE id=?', (before['id'],)).fetchone()[0])
+        self.assertEqual(coverage['status'], 'collected')
+        self.assertNotIn('collection_error', coverage)
+
+    def test_closed_pr_is_not_requested_again(self):
+        self.fake.personal = self.fake.team = False
+        self.collector.collect()
+        self.fake.state = 'closed'
+        self.collector.collect()
+        self.fake.calls.clear()
+        self.collector.collect()
+        self.assertFalse(any(c[7] == 'repos/org/repo/pulls/1' for c in self.fake.calls))
+
+    def test_malformed_pr_does_not_prevent_review_removal(self):
+        self.collector.collect()
+        self.fake.personal = self.fake.team = False
+        def runner(command, **kwargs):
+            if command[7] == 'repos/org/repo/pulls/1':
+                return subprocess.CompletedProcess(command, 0, '{}', '')
+            return self.fake(command, **kwargs)
+        self.collector.gh.runner = runner
+        with self.assertRaises(CollectionError):
+            self.collector.collect()
+        self.assertEqual(self.count('pull_requests'), 1)
+        coverage = json.loads(self.conn.execute('SELECT coverage FROM snapshots').fetchone()[0])
+        self.assertEqual(coverage['status'], 'incomplete')
+
+    def test_deleted_tracked_repo_does_not_block_other_pr(self):
+        self.collector.collect()
+        self.fake.body = '새 설명'
+        def runner(command, **kwargs):
+            if command[7].startswith('repos/org/repo/'):
+                return subprocess.CompletedProcess(command, 1, 'HTTP/2.0 404 Error\n\n{}', '')
+            return self.fake(command, **kwargs)
+        self.collector.gh.runner = runner
+        with self.assertRaises(CollectionError):
+            self.collector.collect()
+        self.assertEqual(self.count('snapshots'), 3)
+        self.assertEqual(self.count('pr_sources'), 2)
+
+    def test_failed_repository_listing_preserves_repository_source(self):
+        self.collector.collect()
+        def runner(command, **kwargs):
+            if command[7].startswith('repos/org/repo/pulls?'):
+                return subprocess.CompletedProcess(command, 1, 'HTTP/2.0 403 Error\n\n{}', '')
+            return self.fake(command, **kwargs)
+        self.collector.gh.runner = runner
+        with self.assertRaises(CollectionError):
+            self.collector.collect()
+        self.assertEqual(self.count('pull_requests'), 2)
+        self.assertEqual(self.count('pr_sources'), 2)
+
+    def test_case_preserved_and_lost_candidate_removed(self):
+        self.fake.review_repo = 'MixedCase'
+        self.collector.collect()
+        row = self.conn.execute("SELECT r.name,p.url FROM repositories r JOIN pull_requests p ON p.repo_id=r.id WHERE r.name='mixedcase'").fetchone()
+        self.assertEqual(row['name'], 'MixedCase')
+        self.assertIn('/org/MixedCase/pull/', row['url'])
+        original = self.fake
+        def runner(command, **kwargs):
+            if command[7].startswith('user/repos?'):
+                return subprocess.CompletedProcess(command, 0, '[]', '')
+            return original(command, **kwargs)
+        self.collector.gh.runner = runner
+        self.collector.collect()
+        self.assertEqual(self.conn.execute("SELECT source FROM repositories WHERE name='candidate'").fetchone()[0], 'responsible')
+
+    def test_scheduler_recovers_crashed_job_and_unexpected_errors(self):
+        now = [1000]
+        scheduler = CollectionScheduler(self.conn, clock=lambda: now[0])
+        scheduler.request()
+        with self.conn:
+            self.conn.execute("UPDATE jobs SET status='running'")
+        for exc in (KeyError('비밀'), TypeError('비밀'), sqlite3.OperationalError('비밀')):
+            with self.subTest(exc=type(exc).__name__):
+                with patch.object(self.collector, 'collect', side_effect=exc):
+                    self.assertTrue(scheduler.tick(self.collector))
+                row = self.conn.execute('SELECT * FROM jobs').fetchone()
+                self.assertEqual(row['status'], 'pending')
+                self.assertNotIn('비밀', row['last_error'])
+                now[0] += 400
+        self.assertTrue(scheduler.tick(self.collector))
+        self.assertEqual(self.conn.execute('SELECT status FROM jobs').fetchone()[0], 'completed')
+
+    def test_scheduler_recovers_even_if_failure_record_could_not_be_saved(self):
+        scheduler = CollectionScheduler(self.conn, clock=lambda: 1000)
+        with self.conn:
+            self.conn.execute("CREATE TRIGGER fail_pending BEFORE UPDATE ON jobs WHEN NEW.status='pending' BEGIN SELECT RAISE(FAIL,'DB 실패'); END")
+        with patch.object(self.collector, 'collect', side_effect=ValueError('오류')):
+            with self.assertRaises(sqlite3.Error):
+                scheduler.tick(self.collector)
+        self.assertEqual(self.conn.execute('SELECT status FROM jobs').fetchone()[0], 'running')
+        with self.conn:
+            self.conn.execute('DROP TRIGGER fail_pending')
+        self.assertTrue(scheduler.tick(self.collector))
+        self.assertEqual(self.conn.execute('SELECT status FROM jobs').fetchone()[0], 'completed')
+
+    def test_atomic_diff_replacement_and_process_lock(self):
+        self.collector.collect()
+        path = Path(self.conn.execute('SELECT diff_path FROM snapshots').fetchone()[0])
+        with path.open() as reader:
+            old_inode = os.fstat(reader.fileno()).st_ino
+            self.collector.collect()
+            self.assertNotEqual(old_inode, path.stat().st_ino)
+            self.assertEqual(reader.read(), path.read_text())
+        original = path.read_bytes()
+        with patch('skim.collect.os.replace', side_effect=OSError('교체 실패')):
+            with self.assertRaises(OSError):
+                self.collector.collect()
+        self.assertEqual(path.read_bytes(), original)
+        self.assertFalse(list(path.parent.glob('*.tmp')))
+        code = "import fcntl,sys; f=open(sys.argv[1]); fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)"
+        with self.collector.lock():
+            result = subprocess.run([sys.executable, '-c', code, str(self.config.data_dir / 'collection.lock')], capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
+        result = subprocess.run([sys.executable, '-c', code, str(self.config.data_dir / 'collection.lock')], capture_output=True)
+        self.assertEqual(result.returncode, 0)
 
     def test_rate_limit_and_retry_after(self):
         for headers, code, expected in [('Retry-After: 120', 429, 1120),

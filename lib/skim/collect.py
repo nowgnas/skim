@@ -1,4 +1,9 @@
 """기존 gh 인증으로 읽기 전용 수집과 프로세스 내 작업 예약을 수행한다."""
+import fcntl
+import os
+import tempfile
+import threading
+from contextlib import contextmanager
 import hashlib
 import json
 import re
@@ -15,10 +20,23 @@ class CollectionError(ValueError):
     """원문 CLI 출력을 노출하지 않는 수집 오류."""
 
 
+def error_message(exc):
+    # 예상하지 못한 예외의 원문에는 응답이나 비밀값이 포함될 수 있다.
+    if isinstance(exc, CollectionError):
+        return str(exc)
+    if isinstance(exc, OSError):
+        return '네트워크·파일 접근 실패: 연결과 로컬 저장소를 확인하세요'
+    return '수집 내부 오류: 응답 형식과 로컬 DB를 확인하세요'
+
+
+class Inaccessible(CollectionError):
+    """삭제되었거나 현재 인증으로 접근할 수 없는 PR."""
+
+
 class Deferred(CollectionError):
     def __init__(self, retry_at):
         self.retry_at = retry_at
-        super().__init__(f'GitHub 요청을 {datetime.fromtimestamp(retry_at, timezone.utc).isoformat()} 이후 재개합니다')
+        super().__init__(f'GitHub 요청 제한: 요청을 {datetime.fromtimestamp(retry_at, timezone.utc).isoformat()} 이후 재개합니다')
 
 
 class GitHub:
@@ -36,7 +54,7 @@ class GitHub:
         try:
             result = self.runner(command, capture_output=True, text=True, timeout=120)
         except (OSError, subprocess.TimeoutExpired) as exc:
-            raise CollectionError('gh 실행 실패: 설치와 로그인을 확인하세요') from exc
+            raise CollectionError('gh 실행·연결 실패: 설치와 네트워크 연결을 확인하세요') from exc
         raw = result.stdout
         headers = {}
         status = 200
@@ -61,7 +79,11 @@ class GitHub:
         if result.returncode or status >= 400:
             if self.not_before > self.clock():
                 raise Deferred(self.not_before)
-            raise CollectionError('GitHub 조회 실패: gh 인증과 저장소 접근 권한을 확인하세요')
+            if status == 404:
+                raise Inaccessible('GitHub 접근 불가: 저장소 삭제 또는 접근 권한을 확인하세요')
+            if status in (401, 403):
+                raise CollectionError('GitHub 인증·권한 실패: gh auth login과 저장소 권한을 확인하세요')
+            raise CollectionError('GitHub 조회 실패: 네트워크 연결과 GitHub 상태를 확인하세요')
         return raw if diff else json.loads(raw)
 
     def pages(self, endpoint, **params):
@@ -93,8 +115,36 @@ class Collector:
     def __init__(self, conn, config, runner=None, clock=time.time):
         self.conn, self.config = conn, config
         self.gh = GitHub(runner, clock)
+        self._mutex = threading.RLock()
+        self._lock_depth = 0
+
+    @contextmanager
+    def lock(self):
+        # 수집·추적 해제·캐시 정리는 같은 프로세스 간 잠금을 공유한다.
+        with self._mutex:
+            if self._lock_depth:
+                self._lock_depth += 1
+                try:
+                    yield
+                finally:
+                    self._lock_depth -= 1
+                return
+            path = self.config.data_dir / 'collection.lock'
+            private_file(path)
+            with path.open('r+') as handle:
+                fcntl.flock(handle, fcntl.LOCK_EX)
+                self._lock_depth = 1
+                try:
+                    yield
+                finally:
+                    self._lock_depth = 0
+                    fcntl.flock(handle, fcntl.LOCK_UN)
 
     def collect(self):
+        with self.lock():
+            return self._collect()
+
+    def _collect(self):
         gh, conn = self.gh, self.conn
         login = gh.get('user')['login']
         discovered = gh.pages('user/repos', affiliation='owner,organization_member,collaborator')
@@ -104,10 +154,19 @@ class Collector:
             if owned or repo.get('permissions', {}).get('admin'):
                 candidates.append((*repo_parts(repo['full_name']), 'owned' if owned else 'managed'))
         targets = {}
+        names = {}
+        listing_failures = []
         for row in conn.execute('SELECT * FROM repositories WHERE tracked=1 AND enabled=1'):
             full = row['owner'] + '/' + row['name']
-            for pr in gh.pages(f'repos/{full}/pulls', state='open'):
-                targets.setdefault((full.lower(), pr['number']), set()).add('repository')
+            names[full.lower()] = full
+            try:
+                for pr in gh.pages(f'repos/{full}/pulls', state='open'):
+                    targets.setdefault((full.lower(), pr['number']), set()).add('repository')
+            except Exception as exc:
+                listing_failures.append(exc)
+                # 목록 조회 실패를 PR 삭제·출처 해제로 오인하지 않는다.
+                for previous in conn.execute("SELECT p.number FROM pull_requests p JOIN pr_sources s ON s.pr_id=p.id WHERE p.repo_id=? AND p.state='open' AND s.source='repository'", (row['id'],)):
+                    targets.setdefault((full.lower(), previous['number']), set()).add('repository')
         queries = [f'is:open is:pr review-requested:{login}']
         for team in gh.pages('user/teams'):
             queries.append(f"is:open is:pr team-review-requested:{team['organization']['login']}/{team['slug']}")
@@ -115,37 +174,52 @@ class Collector:
             for item in gh.pages('search/issues', q=query):
                 full = '/'.join(item['repository_url'].split('/')[-2:])
                 repo_parts(full)
+                names.setdefault(full.lower(), full)
                 targets.setdefault((full.lower(), item['number']), set()).add('review_request')
         # 목록에서 사라진 PR도 상세 조회하여 닫힘·머지를 구분한다.
         old = {(r['owner'].lower() + '/' + r['name'].lower(), r['number']) for r in conn.execute(
-            'SELECT r.owner,r.name,p.number FROM pull_requests p JOIN repositories r ON p.repo_id=r.id')}
+            "SELECT r.owner,r.name,p.number FROM pull_requests p JOIN repositories r ON p.repo_id=r.id WHERE p.state='open'")}
+        for r in conn.execute("SELECT owner,name FROM repositories"):
+            names.setdefault((r['owner'] + '/' + r['name']).lower(), r['owner'] + '/' + r['name'])
         collected = []
+        failures = []
         for (full, number) in sorted(set(targets) | old):
             endpoint = f'repos/{full}/pulls/{int(number)}'
-            for attempt in range(2):
-                pr = gh.get(endpoint)
-                state = 'merged' if pr.get('merged_at') else pr['state']
-                snapshot = None
-                if state == 'open' and (full, number) in targets:
-                    files = gh.pages(endpoint + '/files')
-                    if len(files) != pr.get('changed_files', len(files)):
-                        raise CollectionError('GitHub 파일 목록이 불완전하여 기존 결과를 보존합니다')
-                    diff = gh.get(endpoint, diff=True)
-                    after = gh.get(endpoint)
-                    if (pr['head']['sha'], pr['base']['sha']) != (after['head']['sha'], after['base']['sha']) or after['state'] != 'open':
-                        if attempt == 0:
-                            continue
-                        raise CollectionError('수집 도중 PR이 변경되어 기존 스냅샷을 보존합니다')
-                    snapshot = (files, diff)
-                collected.append((full, number, pr, state, snapshot))
-                break
+            try:
+                for attempt in range(2):
+                    pr = gh.get(endpoint)
+                    # 저장 단계까지 잘못된 응답이 흘러가 다른 PR을 막지 않게 검증한다.
+                    for value in (pr['title'], pr['user']['login'], pr['head']['ref'],
+                                  pr['head']['sha'], pr['base']['sha'], pr['updated_at']):
+                        if not isinstance(value, str):
+                            raise CollectionError('GitHub PR 응답 형식이 잘못되었습니다')
+                    if pr['state'] not in ('open', 'closed'):
+                        raise CollectionError('GitHub PR 상태가 잘못되었습니다')
+                    state = 'merged' if pr.get('merged_at') else pr['state']
+                    snapshot = None
+                    if state == 'open' and (full, number) in targets:
+                        files = gh.pages(endpoint + '/files')
+                        if len(files) != pr.get('changed_files', len(files)):
+                            raise CollectionError('GitHub 파일 목록이 불완전하여 기존 결과를 보존합니다')
+                        diff = gh.get(endpoint, diff=True)
+                        after = gh.get(endpoint)
+                        if (pr['head']['sha'], pr['base']['sha']) != (after['head']['sha'], after['base']['sha']) or after['state'] != 'open':
+                            if attempt == 0:
+                                continue
+                            raise CollectionError('수집 도중 PR이 변경되어 기존 스냅샷을 보존합니다')
+                        snapshot = (files, diff)
+                    collected.append((full, number, pr, state, snapshot))
+                    break
+            except Exception as exc:
+                failures.append((full, number, exc))
         now = datetime.now(timezone.utc).isoformat()
         cache = private_dir(self.config.data_dir / 'cache' / 'diffs')
-        # 모든 원격 조회가 성공한 뒤 한 트랜잭션으로 출처와 스냅샷을 교체한다.
+        # 성공한 PR만 교체하고 실패한 PR의 스냅샷과 출처는 보존한다.
         with conn:
+            conn.execute("UPDATE repositories SET source='responsible' WHERE tracked=0 AND source IN ('owned','managed')")
             conn.executemany('INSERT INTO repositories(owner,name,source) VALUES(?,?,?) ON CONFLICT(owner,name) DO UPDATE SET source=excluded.source WHERE repositories.tracked=0', candidates)
-            conn.execute('DELETE FROM pr_sources')
-            for full, number, pr, state, snapshot in collected:
+            for key, number, pr, state, snapshot in collected:
+                full = names[key]
                 conn.execute('INSERT INTO repositories(owner,name) VALUES(?,?) ON CONFLICT(owner,name) DO NOTHING', repo_parts(full))
                 repo_id = conn.execute('SELECT id FROM repositories WHERE owner=? AND name=?', repo_parts(full)).fetchone()[0]
                 conn.execute('INSERT INTO pull_requests(repo_id,number,url,title,body,author,state,draft,head_branch,base_sha,head_sha,updated_at,last_seen_at) '
@@ -155,7 +229,8 @@ class Collector:
                              (repo_id, number, f'https://github.com/{full}/pull/{number}', pr['title'], pr.get('body') or '', pr['user']['login'], state,
                               int(pr.get('draft', False)), pr['head']['ref'], pr['base']['sha'], pr['head']['sha'], pr['updated_at'], now))
                 pr_id = conn.execute('SELECT id FROM pull_requests WHERE repo_id=? AND number=?', (repo_id, number)).fetchone()[0]
-                for source in targets.get((full, number), ()):
+                conn.execute('DELETE FROM pr_sources WHERE pr_id=?', (pr_id,))
+                for source in targets.get((key, number), ()):
                     if state == 'open':
                         conn.execute('INSERT INTO pr_sources VALUES(?,?)', (pr_id, source))
                 if snapshot:
@@ -164,20 +239,52 @@ class Collector:
                     material = dict(title=pr['title'], body=pr.get('body') or '', files=files, diff=diff, policy='raw-v1')
                     input_hash = hashlib.sha256(json.dumps(material, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
                     path = cache / (diff_hash + '.diff')
-                    private_file(path)
-                    path.write_text(diff, encoding='utf-8')
+                    fd, temporary = tempfile.mkstemp(dir=cache, suffix='.tmp')
+                    try:
+                        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+                            handle.write(diff)
+                        os.replace(temporary, path)
+                    finally:
+                        if os.path.exists(temporary):
+                            os.unlink(temporary)
                     existing = conn.execute('SELECT 1 FROM snapshots WHERE pr_id=? AND base_sha=? AND head_sha=? AND input_hash=?',
                                             (pr_id, pr['base']['sha'], pr['head']['sha'], input_hash)).fetchone()
-                    if not existing:
+                    if existing:
+                        for row in conn.execute('SELECT id,coverage FROM snapshots WHERE pr_id=? AND base_sha=? AND head_sha=? AND input_hash=?',
+                                                (pr_id, pr['base']['sha'], pr['head']['sha'], input_hash)):
+                            coverage = json.loads(row['coverage'])
+                            coverage.pop('collection_error', None)
+                            coverage['status'] = 'collected'
+                            conn.execute('UPDATE snapshots SET coverage=? WHERE id=?', (json.dumps(coverage, ensure_ascii=False), row['id']))
+                    else:
                         coverage = json.dumps(dict(files=files, status='collected', policy='raw-v1'), ensure_ascii=False)
                         conn.execute('INSERT INTO snapshots(pr_id,base_sha,head_sha,diff_hash,input_hash,diff_path,coverage) VALUES(?,?,?,?,?,?,?)',
                                      (pr_id, pr['base']['sha'], pr['head']['sha'], diff_hash, input_hash, str(path), coverage))
+            for full, number, exc in failures:
+                row = conn.execute('SELECT p.id FROM pull_requests p JOIN repositories r ON p.repo_id=r.id WHERE r.owner=? AND r.name=? AND p.number=?',
+                                   (*repo_parts(full), number)).fetchone()
+                if row:
+                    for snapshot in conn.execute('SELECT id,coverage FROM snapshots WHERE pr_id=?', (row['id'],)):
+                        coverage = json.loads(snapshot['coverage'])
+                        coverage.update(status='inaccessible' if isinstance(exc, Inaccessible) else 'incomplete', collection_error=error_message(exc))
+                        conn.execute('UPDATE snapshots SET coverage=? WHERE id=?', (json.dumps(coverage, ensure_ascii=False), snapshot['id']))
             conn.execute("DELETE FROM pull_requests WHERE state='open' AND NOT EXISTS (SELECT 1 FROM pr_sources WHERE pr_id=pull_requests.id)")
             conn.execute('UPDATE repositories SET last_synced_at=? WHERE tracked=1 AND enabled=1', (now,))
         self.clean_cache()
+        deferred = [exc.retry_at for exc in listing_failures + [f[2] for f in failures] if isinstance(exc, Deferred)]
+        if deferred:
+            raise Deferred(max(deferred))
+        if listing_failures:
+            raise CollectionError('저장소 목록 수집 실패: ' + error_message(listing_failures[0]))
+        if failures:
+            raise CollectionError(f'PR {len(failures)}개 수집 실패: ' + error_message(failures[0][2]))
         return len(targets)
 
     def clean_cache(self):
+        with self.lock():
+            self._clean_cache()
+
+    def _clean_cache(self):
         live = {r[0] for r in self.conn.execute('SELECT diff_path FROM snapshots WHERE diff_path IS NOT NULL')}
         for path in (self.config.data_dir / 'cache' / 'diffs').glob('*.diff'):
             if str(path) not in live:
@@ -195,6 +302,14 @@ class CollectionScheduler:
             self.conn.execute("INSERT OR IGNORE INTO jobs(type,target_id) VALUES('collect',0)")
 
     def tick(self, collector):
+        with collector.lock():
+            # 잠금을 확보했으므로 이전 running 작업을 실행하는 수집기는 없다.
+            # 프로세스 중단·DB 기록 실패 후에도 다음 tick에서 복구한다.
+            with self.conn:
+                self.conn.execute("UPDATE jobs SET status='pending',next_run_at=NULL,last_error='중단된 수집 작업을 복구했습니다' WHERE type='collect' AND status='running'")
+            return self._tick(collector)
+
+    def _tick(self, collector):
         now = self.clock()
         if now >= self.next_poll:
             self.request()
@@ -206,11 +321,11 @@ class CollectionScheduler:
             return False
         try:
             collector.collect()
-        except (CollectionError, OSError, ValueError) as exc:
+        except Exception as exc:
             retry = exc.retry_at if isinstance(exc, Deferred) else now + min(3600, 30 * 2 ** min(row['attempts'] - 1, 7))
             with self.conn:
                 self.conn.execute("UPDATE jobs SET status='pending',next_run_at=?,last_error=? WHERE id=?",
-                                  (datetime.fromtimestamp(retry, timezone.utc).isoformat(), '수집 실패: 인증·연결 또는 요청 제한을 확인하세요', row['id']))
+                                  (datetime.fromtimestamp(retry, timezone.utc).isoformat(), error_message(exc), row['id']))
         else:
             with self.conn:
                 self.conn.execute("UPDATE jobs SET status='completed',last_error=NULL WHERE id=?", (row['id'],))
