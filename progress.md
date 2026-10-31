@@ -58,3 +58,10 @@
 - 분석 저장 트랜잭션에서 최신 coverage를 다시 읽어 수집 실패 상태·오류를 보존하며 분석 통계만 합친다. 값만 가린 hunk에도 secrets 후보를 붙이고 민감 경로 제외와 가림 통계의 중복을 없앴다.
 - 정제 후 모델 출력 재검증, 동일 준비 실패 기록 중복 방지, 일반 diff 422 오류 분류, 크기 초과 후 SHA 재확인, 이름별 중첩 잠금과 의존성 후보를 보완했다. tests/app.py 대응은 기존 동작을 회귀 테스트로 확인했다.
 - fake gh/LLM·별도 SQLite 연결로 unittest 70개와 git diff --check가 통과했다. 실제 LLM·네트워크 호출, GitHub 쓰기와 커밋은 하지 않았다.
+
+## PR4 — 2026-10-31
+
+- 127.0.0.1 전용 `skim web`, 60초·일회용 fragment 토큰과 세션 쿠키, 상수 시간 비교, Host·Origin·CSRF 검사, 엄격한 CSP와 보안 헤더를 구현했다. 단일 실행 잠금과 0600 Unix 소켓으로 기존 서버에서 새 URL을 발급한다.
+- Sessio와 어울리는 어두운 서버 렌더링 목록·필터·상세 화면, 규칙 후보·미분석·high 우선 펼침, mid/low 접힘, 이전 SHA·수집/분석 상태, 전체 diff·GitHub 링크와 수동 갱신 큐·내장 워커를 추가했다.
+- 외부 통신 없는 가짜 데이터 생성기 `scripts/demo_seed.py`, `web --offline`, 한국어 사용 문서를 추가했다. HTTP 루프백 쿠키는 Secure 없이 정확한 Origin 검사를 사용하며, 브라우저별 Secure 동작과 Sessio 인덱스 연동은 미검증·미구현으로 문서에 명시했다.
+- 메모리 HTTP 연결과 fake 모델·소켓으로 unittest 80개 및 `git diff --check`가 통과했다. 실제 LLM·외부 네트워크·GitHub 쓰기·커밋은 수행하지 않았다.
