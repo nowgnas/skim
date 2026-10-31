@@ -1,5 +1,6 @@
 """SQLite 스키마와 트랜잭션 마이그레이션."""
 import sqlite3
+from contextlib import closing
 from datetime import datetime, timezone
 from .config import private_file
 
@@ -8,6 +9,7 @@ CREATE TABLE repositories (
  id INTEGER PRIMARY KEY, owner TEXT NOT NULL COLLATE NOCASE,
  name TEXT NOT NULL COLLATE NOCASE, source TEXT NOT NULL DEFAULT 'responsible'
  CHECK(source IN ('owned','managed','responsible')),
+ tracked INTEGER NOT NULL DEFAULT 0 CHECK(tracked IN (0,1)),
  enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
  analysis_policy TEXT NOT NULL DEFAULT 'inherit' CHECK(analysis_policy IN ('inherit','allow','deny')),
  last_synced_at TEXT, UNIQUE(owner,name));
@@ -64,7 +66,7 @@ def migrate(conn, path):
         stamp = datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')
         backup_path = path.with_name(path.name + f'.v{version}.{stamp}.bak')
         private_file(backup_path)
-        with sqlite3.connect(backup_path) as backup:
+        with closing(sqlite3.connect(backup_path)) as backup:
             conn.backup(backup)
     for index in range(version, len(MIGRATIONS)):
         try:

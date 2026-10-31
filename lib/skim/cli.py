@@ -7,8 +7,11 @@ from .config import Config
 from .db import analysis_allowed, connect
 
 
+OWNER_PATTERN = r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?"
+
+
 def repository(value):
-    if not re.fullmatch(r'[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?/[A-Za-z0-9_.-]+', value):
+    if not re.fullmatch(OWNER_PATTERN + r'/[A-Za-z0-9_.-]+', value):
         raise argparse.ArgumentTypeError('owner/repo 형식이 필요합니다')
     owner, name = value.split('/')
     if name in ('.', '..'):
@@ -49,24 +52,35 @@ def main(argv=None):
         conn = connect(config)
         try:
             with conn:
+                if args.command == 'analysis' and args.action == 'allow':
+                    print('허용된 코드가 선택한 LLM CLI의 모델 서비스로 전송될 수 있습니다.', flush=True)
                 if args.command == 'repo':
                     if args.action == 'list':
                         print('저장소\t출처\t활성\t분석 정책\t분석 허용')
-                        for row in conn.execute('SELECT * FROM repositories ORDER BY owner,name'):
+                        for row in conn.execute('SELECT * FROM repositories WHERE tracked=1 ORDER BY owner,name'):
                             print(f"{row['owner']}/{row['name']}\t{row['source']}\t{row['enabled']}\t"
                                   f"{row['analysis_policy']}\t{int(analysis_allowed(conn, row['id']))}")
                     elif args.action == 'add':
-                        conn.execute('INSERT INTO repositories(owner,name,source) VALUES(?,?,?) '
-                                     'ON CONFLICT(owner,name) DO UPDATE SET source=excluded.source,enabled=1',
+                        conn.execute('INSERT INTO repositories(owner,name,source,tracked) VALUES(?,?,?,1) '
+                                     'ON CONFLICT(owner,name) DO UPDATE SET source=excluded.source,enabled=1,tracked=1',
                                      (*args.repository, args.source))
                         print('저장소를 등록했습니다. 분석은 별도 허용이 필요합니다.')
                     else:
-                        result = conn.execute('DELETE FROM repositories WHERE owner=? AND name=?', args.repository)
+                        result = conn.execute('UPDATE repositories SET tracked=0 WHERE owner=? AND name=? AND tracked=1',
+                                              args.repository)
                         if not result.rowcount:
                             raise ValueError('등록되지 않은 저장소입니다')
-                        print('저장소를 삭제했습니다.')
+                        # 리뷰 요청 출처와 그 스냅샷·분석은 추적 해제 후에도 보존한다.
+                        conn.execute("DELETE FROM pr_sources WHERE source='repository' AND pr_id IN "
+                                     '(SELECT p.id FROM pull_requests p JOIN repositories r ON r.id=p.repo_id '
+                                     'WHERE r.owner=? AND r.name=?)', args.repository)
+                        conn.execute('DELETE FROM pull_requests WHERE repo_id IN '
+                                     '(SELECT id FROM repositories WHERE owner=? AND name=?) '
+                                     'AND NOT EXISTS (SELECT 1 FROM pr_sources WHERE pr_id=pull_requests.id)',
+                                     args.repository)
+                        print('저장소 추적을 해제했습니다.')
                 elif args.org is not None:
-                    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9-]*', args.org):
+                    if not re.fullmatch(OWNER_PATTERN, args.org):
                         raise ValueError('잘못된 조직 이름입니다')
                     if args.action == 'reset':
                         conn.execute('DELETE FROM organization_policies WHERE owner=?', (args.org,))
@@ -81,8 +95,6 @@ def main(argv=None):
                     if not result.rowcount:
                         raise ValueError('등록되지 않은 저장소입니다')
                     print('저장소 분석 정책을 변경했습니다.')
-                if args.command == 'analysis' and args.action == 'allow':
-                    print('허용된 코드가 선택한 LLM CLI의 모델 서비스로 전송될 수 있습니다.')
         finally:
             conn.close()
     except (OSError, ValueError, sqlite3.Error) as exc:

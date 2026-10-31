@@ -22,6 +22,8 @@ def private_file(path):
 class Config:
     config_dir: Path
     data_dir: Path
+    poll_interval_seconds: int = 300
+    retention_days: int = 30
 
     @classmethod
     def load(cls):
@@ -29,7 +31,6 @@ class Config:
         if home:
             root = Path(home).expanduser().resolve()
             config_dir, data_dir = root / "config", root / "data"
-            private_dir(root)
         else:
             config_dir = Path.home() / ".config/skim"
             data_dir = Path.home() / ".local/share/skim"
@@ -44,9 +45,15 @@ class Config:
         settings = json.loads(path.read_text())
         if not isinstance(settings, dict):
             raise ValueError("설정은 JSON 객체여야 합니다")
+        values = {}
+        for name, default in (("poll_interval_seconds", 300), ("retention_days", 30)):
+            value = settings.get(name, default)
+            if type(value) is not int or value <= 0:
+                raise ValueError(f"{name} 설정은 양의 정수여야 합니다")
+            values[name] = value
         for name in ("cache", "logs"):
             private_dir(data_dir / name)
-        return cls(config_dir, data_dir)
+        return cls(config_dir, data_dir, **values)
 
     @property
     def db_path(self):
