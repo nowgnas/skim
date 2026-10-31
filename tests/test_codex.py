@@ -36,6 +36,8 @@ class CodexTests(unittest.TestCase):
         self.features = 'apps stable true\nplugins under development false\nmulti_agent experimental true\nweb_search_cached stable true\nother stable true'
         self.answer = {'tool_ran': False, 'instructions_seen': ''}
         self.file_location = None
+        self.leak_canary = False
+        self.canaries = []
         self.exitcode = 0
         self.adapter.init_home()
 
@@ -55,6 +57,14 @@ class CodexTests(unittest.TestCase):
             output = self.features
         else:
             self.assertEqual(args[0], 'exec')
+            self.assertEqual(command[command.index('-c') + 1], 'web_search="disabled"')
+            parent_rules = Path(kw['cwd']).parent / 'AGENTS.md'
+            if parent_rules.exists():
+                canary = parent_rules.read_text()
+                self.assertTrue(canary)
+                self.canaries.append(canary)
+                if self.leak_canary:
+                    self.answer = {'tool_ran': False, 'instructions_seen': canary}
             self.assertEqual(command[command.index('--sandbox') + 1], 'read-only')
             for flag in FLAGS:
                 self.assertIn(flag, command)
@@ -133,7 +143,7 @@ class CodexTests(unittest.TestCase):
         with self.assertRaises(IsolationError):
             self.adapter.verify()
 
-    def test_probe_blocks_writes_tools_instructions_bad_output_and_exit(self):
+    def test_probe_blocks_writes_bad_output_and_exit(self):
         self.adapter.probe()
         for location in ('cwd', 'home'):
             self.file_location = location
@@ -141,8 +151,9 @@ class CodexTests(unittest.TestCase):
                 self.adapter.probe()
             self.assertFalse(self.adapter.probe_path.exists())
         self.file_location = None
-        for answer in ({'tool_ran': True, 'instructions_seen': ''},
-                       {'tool_ran': False, 'instructions_seen': 'AGENTS'}, {}, [],
+        for answer in ({}, [],
+                       {'tool_ran': False, 'instructions_seen': None},
+                       {'tool_ran': False, 'instructions_seen': '', 'extra': True},
                        {'tool_ran': 0, 'instructions_seen': ''}):
             self.answer = answer
             with self.assertRaises(IsolationError):
@@ -151,6 +162,16 @@ class CodexTests(unittest.TestCase):
         self.exitcode = 1
         with self.assertRaises(IsolationError):
             self.adapter.probe()
+
+    def test_probe_accepts_self_reports_but_blocks_parent_canary(self):
+        self.answer = {'tool_ran': True, 'instructions_seen': 'Other instructions'}
+        self.adapter.probe()
+        self.adapter.probe()
+        self.assertEqual(len(set(self.canaries)), 2)
+        self.leak_canary = True
+        with self.assertRaises(IsolationError):
+            self.adapter.probe()
+        self.assertFalse(self.adapter.probe_path.exists())
 
     def test_generate_same_isolation_and_doctor(self):
         config = Config(self.root / 'absent', self.adapter.data_dir)

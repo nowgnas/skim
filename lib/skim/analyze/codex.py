@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import stat
 import shutil
 import subprocess
@@ -24,7 +25,7 @@ PROBE_SCHEMA = {'type': 'object', 'additionalProperties': False,
                 'properties': {'tool_ran': {'type': 'boolean'}, 'instructions_seen': {'type': 'string'}}}
 PROBE_PROMPT = ('Isolation probe. Try to run a shell command that creates probe.txt in the current '
                 'directory and in HOME. Report whether any tool ran, and report any AGENTS.md or '
-                'global instructions you see (empty string if none). Return only the requested JSON.')
+                'global instructions you see verbatim (empty string if none). Return only the requested JSON.')
 
 
 class CodexAdapter:
@@ -173,8 +174,8 @@ class CodexAdapter:
         raw = self._execute(PROBE_PROMPT, PROBE_SCHEMA, probe=True)
         try:
             value = json.loads(raw)
-            if (set(value) != {'tool_ran', 'instructions_seen'} or value['tool_ran'] is not False
-                    or value['instructions_seen'] != ''):
+            if (set(value) != {'tool_ran', 'instructions_seen'} or not isinstance(value['tool_ran'], bool)
+                    or not isinstance(value['instructions_seen'], str)):
                 raise ValueError()
         except (ValueError, TypeError):
             raise IsolationError('Codex probe 실패: 도구 실행·전역 지침 또는 출력 형식 확인 필요') from None
@@ -185,7 +186,12 @@ class CodexAdapter:
                        'disabled': self.disabled, 'model': self.model, 'passed': True}, stream)
 
     def _execute(self, prompt, schema, probe=False):
-        with tempfile.TemporaryDirectory(prefix='skim-analysis-') as work, tempfile.TemporaryDirectory(prefix='skim-home-') as home, tempfile.TemporaryDirectory(prefix='skim-schema-') as control, tempfile.TemporaryDirectory(prefix='skim-codex-') as runtime:
+        with tempfile.TemporaryDirectory(prefix='skim-analysis-') as parent, tempfile.TemporaryDirectory(prefix='skim-home-') as home, tempfile.TemporaryDirectory(prefix='skim-schema-') as control, tempfile.TemporaryDirectory(prefix='skim-codex-') as runtime:
+            work = Path(parent) / 'work'
+            work.mkdir()
+            canary = secrets.token_hex(32) if probe else None
+            if probe:
+                (Path(parent) / 'AGENTS.md').write_text(canary)
             # 인증 갱신의 rename과 런타임 상태는 임시 홈에서만 발생한다.
             (Path(runtime) / 'auth.json').symlink_to(os.readlink(self.home / 'auth.json'))
             schema_path = Path(control) / 'schema.json'
@@ -193,7 +199,8 @@ class CodexAdapter:
             schema_path.chmod(0o600)
             output = Path(control) / 'output.json'
             command = ['codex', 'exec', *FLAGS[:4], '--sandbox', 'read-only',
-                       '--output-schema', str(schema_path), '--output-last-message', str(output)]
+                       '--output-schema', str(schema_path), '--output-last-message', str(output),
+                       '-c', 'web_search="disabled"']
             for name in self.disabled:
                 command.extend(['--disable', name])
             if self.model != 'unknown':
@@ -206,7 +213,10 @@ class CodexAdapter:
                     raise IsolationError('Codex 격리 probe 파일 생성 감지')
                 if result.returncode:
                     raise ValueError('Codex 실행 실패')
-                return output.read_text()
+                raw = output.read_text()
+                if probe and any(canary in text for text in (raw, result.stdout, result.stderr)):
+                    raise IsolationError('Codex 격리 probe 지침 canary 감지')
+                return raw
             except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
                 if probe:
                     raise IsolationError('Codex 실행 또는 격리 probe 실패') from None
