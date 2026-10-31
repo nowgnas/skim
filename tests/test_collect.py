@@ -53,7 +53,7 @@ class FakeGH:
         elif path.endswith('/pulls'):
             value = [{'number': 1}] if self.state == 'open' else []
         elif path.endswith('/files'):
-            value = [{'filename': 'a.py', 'status': 'modified'}]
+            value = [{'filename': 'a.py', 'status': 'modified', 'patch': '+중복 저장 금지'}]
         elif '-H' in command:
             if self.race:
                 self.head += 'x'
@@ -104,6 +104,7 @@ class CollectionTests(unittest.TestCase):
             self.assertIn('변경', Path(row['diff_path']).read_text())
             self.assertEqual(len(row['input_hash']), 64)
             self.assertEqual(json.loads(row['coverage'])['files'][0]['filename'], 'a.py')
+            self.assertNotIn('patch', json.loads(row['coverage'])['files'][0])
 
     def test_recollect_after_analysis_does_not_duplicate_snapshot(self):
         from skim.analyze import Analyzer
@@ -190,40 +191,72 @@ class CollectionTests(unittest.TestCase):
     def test_incomplete_files_preserve_previous_snapshot(self):
         self.collector.collect()
         self.fake.file_count = 3001
-        with self.assertRaises(CollectionError):
-            self.collector.collect()
-        self.assertEqual(self.count('snapshots'), 2)
+        self.assertEqual(self.collector.collect(), 0)
+        self.assertEqual(self.count('snapshots'), 4)
+        old = list(self.conn.execute('SELECT coverage FROM snapshots WHERE id<=2'))
+        self.assertTrue(all(json.loads(r[0])['status'] == 'collected' for r in old))
+        self.assertTrue(all('omitted' not in json.loads(r[0]) for r in old))
+        latest = list(self.conn.execute('SELECT coverage FROM snapshots WHERE id>2'))
+        self.assertTrue(all(json.loads(r[0])['omitted'] == 3001 for r in latest))
 
     def test_per_pr_http_failures_keep_snapshot_and_allow_reconciliation(self):
-        for status in (404, 403, 406):
-            with self.subTest(status=status):
-                self.fake.personal = self.fake.team = True
-                self.fake.state = 'open'
-                self.collector.gh.runner = self.fake
-                self.collector.collect()
-                before = self.conn.execute("SELECT s.* FROM snapshots s JOIN pull_requests p ON p.id=s.pr_id WHERE p.number=2").fetchone()
-                original = Path(before['diff_path']).read_bytes()
-                def runner(command, **kwargs):
-                    if command[7] == 'repos/org/outside/pulls/2':
-                        return subprocess.CompletedProcess(command, 1, f'HTTP/2.0 {status} Error\n\n{{}}', '비밀')
-                    return self.fake(command, **kwargs)
-                self.collector.gh.runner = runner
-                self.fake.state = 'closed'
-                with self.assertRaises(CollectionError):
-                    self.collector.collect()
-                states = {r['number']: r['state'] for r in self.conn.execute('SELECT number,state FROM pull_requests')}
-                self.assertEqual(states, {1: 'closed', 2: 'open'})
-                coverage = json.loads(self.conn.execute('SELECT coverage FROM snapshots WHERE id=?', (before['id'],)).fetchone()[0])
-                self.assertEqual(coverage['status'], 'inaccessible' if status == 404 else 'incomplete')
-                self.assertNotIn('비밀', coverage['collection_error'])
-                self.assertEqual(Path(before['diff_path']).read_bytes(), original)
-                self.assertEqual(self.count('pr_sources'), 1)
+        self.collector.collect()
+        before = self.conn.execute('SELECT s.* FROM snapshots s JOIN pull_requests p ON p.id=s.pr_id WHERE p.number=2').fetchone()
+        def runner(command, **kwargs):
+            if command[7] == 'repos/org/outside/pulls/2':
+                return subprocess.CompletedProcess(command, 1, 'HTTP/2.0 403 Error\n\n{}', '비밀')
+            return self.fake(command, **kwargs)
+        self.collector.gh.runner = runner
+        self.fake.state = 'closed'
+        with self.assertRaisesRegex(CollectionError, '인증·권한'):
+            self.collector.collect()
+        self.assertEqual(self.count('pr_sources'), 1)
+        coverage = json.loads(self.conn.execute('SELECT coverage FROM snapshots WHERE id=?', (before['id'],)).fetchone()[0])
+        self.assertEqual(coverage['status'], 'incomplete')
+        self.assertNotIn('비밀', coverage['collection_error'])
         self.collector.gh.runner = self.fake
         self.fake.state = 'open'
         self.collector.collect()
         coverage = json.loads(self.conn.execute('SELECT coverage FROM snapshots WHERE id=?', (before['id'],)).fetchone()[0])
         self.assertEqual(coverage['status'], 'collected')
-        self.assertNotIn('collection_error', coverage)
+
+    def test_404_and_diff_limit_do_not_backoff_scheduler(self):
+        self.collector.collect()
+        def runner(command, **kwargs):
+            if command[7] == 'repos/org/outside/pulls/2':
+                code = 406 if '-H' in command else 404
+                return subprocess.CompletedProcess(command, 1, f'HTTP/2.0 {code} Error\n\n{{}}', '')
+            if command[7] == 'repos/org/repo/pulls/1' and '-H' in command:
+                return subprocess.CompletedProcess(command, 1, 'HTTP/2.0 406 Error\n\n{}', '')
+            return self.fake(command, **kwargs)
+        self.collector.gh.runner = runner
+        now = [1000]
+        scheduler = CollectionScheduler(self.conn, clock=lambda: now[0])
+        self.assertTrue(scheduler.tick(self.collector))
+        self.assertEqual(self.conn.execute('SELECT status FROM jobs').fetchone()[0], 'completed')
+        self.assertEqual(self.count('pull_requests'), 1)
+        latest = self.conn.execute('SELECT coverage FROM snapshots ORDER BY id DESC').fetchone()[0]
+        self.assertIn('한도 초과', latest)
+        now[0] += 300
+        self.assertTrue(scheduler.tick(self.collector))
+
+    def test_manual_request_expedites_backoff_and_preserves_running_refresh(self):
+        scheduler = CollectionScheduler(self.conn, clock=lambda: 1000)
+        self.fake.fail = True
+        scheduler.tick(self.collector)
+        scheduler.request()
+        self.fake.fail = False
+        with patch.object(self.collector, 'collect', side_effect=lambda: scheduler.request()):
+            self.assertTrue(scheduler.tick(self.collector))
+        self.assertEqual([r[0] for r in self.conn.execute('SELECT status FROM jobs ORDER BY id')], ['completed', 'pending'])
+        self.assertTrue(scheduler.tick(self.collector))
+
+    def test_invalid_and_naive_retry_after(self):
+        for date, expected in [('broken', 1060), ('Thu, 01 Jan 1970 00:20:00', 1200)]:
+            runner = lambda c, **kw: subprocess.CompletedProcess(c, 1, f'HTTP/2 429 Error\nRetry-After: {date}\n\n{{}}', '')
+            with self.assertRaises(Deferred) as caught:
+                GitHub(runner, lambda: 1000).get('user')
+            self.assertEqual(caught.exception.retry_at, expected)
 
     def test_closed_pr_is_not_requested_again(self):
         self.fake.personal = self.fake.team = False
@@ -256,10 +289,10 @@ class CollectionTests(unittest.TestCase):
                 return subprocess.CompletedProcess(command, 1, 'HTTP/2.0 404 Error\n\n{}', '')
             return self.fake(command, **kwargs)
         self.collector.gh.runner = runner
-        with self.assertRaises(CollectionError):
+        with self.assertRaisesRegex(CollectionError, '저장소 목록.*접근 불가'):
             self.collector.collect()
-        self.assertEqual(self.count('snapshots'), 3)
-        self.assertEqual(self.count('pr_sources'), 2)
+        self.assertEqual(self.count('snapshots'), 2)
+        self.assertEqual(self.count('pr_sources'), 1)
 
     def test_failed_repository_listing_preserves_repository_source(self):
         self.collector.collect()
@@ -374,6 +407,95 @@ class CollectionTests(unittest.TestCase):
         runner = lambda c, **kw: subprocess.CompletedProcess(c, 0, json.dumps(dict(total_count=1001, items=[])), '')
         with self.assertRaises(CollectionError):
             GitHub(runner).pages('search/issues', q='is:pr')
+
+
+    def test_new_pr_failures_remain_visible_in_job(self):
+        for status in (500, 403):
+            with self.subTest(status=status):
+                def runner(command, **kwargs):
+                    if command[7] == 'repos/org/outside/pulls/2':
+                        return subprocess.CompletedProcess(command, 1, f'HTTP/2 {status} Error\n\n{{}}', '비밀')
+                    return self.fake(command, **kwargs)
+                self.collector.gh.runner = runner
+                scheduler = CollectionScheduler(self.conn, clock=lambda: 1000)
+                scheduler.request()
+                self.assertTrue(scheduler.tick(self.collector))
+                row = self.conn.execute("SELECT * FROM jobs WHERE status='pending'").fetchone()
+                self.assertIn('org/outside#2', row['last_error'])
+                self.assertNotIn('비밀', row['last_error'])
+                self.assertEqual(row['next_run_at'], '1970-01-01T00:17:10+00:00')
+                self.assertEqual(self.count('pull_requests'), 1)
+                with self.conn:
+                    self.conn.execute('DELETE FROM jobs')
+
+    def test_manual_refresh_preserves_retry_after_across_restart(self):
+        scheduler = CollectionScheduler(self.conn, clock=lambda: 1000)
+        def deferred_collect():
+            scheduler.request()
+            raise Deferred(1300)
+        with patch.object(self.collector, 'collect', side_effect=deferred_collect):
+            self.assertTrue(scheduler.tick(self.collector))
+        row = self.conn.execute('SELECT * FROM jobs').fetchone()
+        self.assertEqual(row['next_run_at'], '1970-01-01T00:21:40+00:00')
+        self.assertEqual(row['refresh_requested'], 0)
+        restarted_conn = connect(self.config)
+        self.addCleanup(restarted_conn.close)
+        restarted = CollectionScheduler(restarted_conn, clock=lambda: 1001)
+        restarted.request()
+        collector = Collector(restarted_conn, self.config, self.fake)
+        self.assertFalse(restarted.tick(collector))
+        self.assertEqual(self.fake.calls, [])
+        restarted.clock = lambda: 1300
+        self.assertTrue(restarted.tick(collector))
+
+
+    def test_diff_422_is_a_collection_failure(self):
+        self.collector.collect()
+        def runner(command, **kwargs):
+            if '-H' in command:
+                return subprocess.CompletedProcess(command, 1, 'HTTP/2 422 Error\n\n{}', '')
+            return self.fake(command, **kwargs)
+        self.collector.gh.runner = runner
+        with self.assertRaises(CollectionError):
+            self.collector.collect()
+        self.assertEqual(self.count('snapshots'), 2)
+        for row in self.conn.execute('SELECT coverage FROM snapshots'):
+            coverage = json.loads(row[0])
+            self.assertEqual(coverage['status'], 'incomplete')
+            self.assertNotIn('omission_reason', coverage)
+
+    def test_oversized_diff_rechecks_sha_before_storing(self):
+        def runner(command, **kwargs):
+            if '-H' in command:
+                self.fake.head += 'x'
+                return subprocess.CompletedProcess(command, 1, 'HTTP/2 406 Error\n\n{}', '')
+            return self.fake(command, **kwargs)
+        self.collector.gh.runner = runner
+        with self.assertRaises(CollectionError):
+            self.collector.collect()
+        self.assertEqual(self.count('snapshots'), 0)
+        self.fake.head = 'stable'
+        def stable_runner(command, **kwargs):
+            if '-H' in command:
+                return subprocess.CompletedProcess(command, 1, 'HTTP/2 406 Error\n\n{}', '')
+            return self.fake(command, **kwargs)
+        self.collector.gh.runner = stable_runner
+        self.assertEqual(self.collector.collect(), 0)
+        self.assertEqual(self.count('snapshots'), 2)
+        self.assertEqual({r[0] for r in self.conn.execute('SELECT head_sha FROM snapshots')}, {'stable'})
+
+    def test_nested_different_lock_names_are_both_held(self):
+        code = "import fcntl,sys; f=open(sys.argv[1]); fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)"
+        def available(name):
+            return subprocess.run([sys.executable, '-c', code, str(self.config.data_dir / name)], capture_output=True).returncode == 0
+        with self.collector.lock():
+            with self.collector.lock('analysis.lock'):
+                with self.collector.lock('analysis.lock'):
+                    self.assertFalse(available('collection.lock'))
+                    self.assertFalse(available('analysis.lock'))
+            self.assertTrue(available('analysis.lock'))
+            self.assertFalse(available('collection.lock'))
+        self.assertTrue(available('collection.lock'))
 
 
 if __name__ == '__main__':

@@ -55,7 +55,7 @@ class ScaffoldTests(unittest.TestCase):
     def test_schema_constraints_and_permissions(self):
         config = Config.load()
         with contextlib.closing(connect(config)) as conn:
-            self.assertEqual(conn.execute('PRAGMA user_version').fetchone()[0], 2)
+            self.assertEqual(conn.execute('PRAGMA user_version').fetchone()[0], 3)
             self.assertEqual(conn.execute('PRAGMA journal_mode').fetchone()[0], 'wal')
             conn.execute("INSERT INTO jobs(type,target_id,input_hash) VALUES('analyze',1,'a')")
             with self.assertRaises(sqlite3.IntegrityError):
@@ -70,6 +70,22 @@ class ScaffoldTests(unittest.TestCase):
                 self.assertTrue(fields <= {r[1] for r in conn.execute(f'PRAGMA table_info({table})')})
         for path in Path(self.temp.name).rglob('*'):
             self.assertEqual(path.stat().st_mode & 0o777, 0o700 if path.is_dir() else 0o600)
+
+    def test_job_migration_preserves_pending_retry_and_backup(self):
+        from skim.db import MIGRATIONS
+        config = Config.load()
+        with patch('skim.db.MIGRATIONS', MIGRATIONS[:2]):
+            with contextlib.closing(connect(config)) as conn, conn:
+                conn.execute("INSERT INTO jobs(type,target_id,next_run_at,last_error) VALUES('collect',0,'2026-11-01T00:00:00+00:00','요청 제한')")
+        with contextlib.closing(connect(config)) as conn:
+            row = conn.execute('SELECT * FROM jobs').fetchone()
+            self.assertEqual(row['retry_not_before'], row['next_run_at'])
+            self.assertEqual(row['refresh_requested'], 0)
+            self.assertEqual(row['last_error'], '요청 제한')
+        backup = next(config.data_dir.glob('*.v2.*.bak'))
+        with contextlib.closing(sqlite3.connect(backup)) as conn:
+            self.assertEqual(conn.execute('PRAGMA user_version').fetchone()[0], 2)
+            self.assertEqual(conn.execute('SELECT last_error FROM jobs').fetchone()[0], '요청 제한')
 
     def test_backup_and_rollback(self):
         config = Config.load()

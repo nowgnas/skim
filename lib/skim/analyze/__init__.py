@@ -50,8 +50,16 @@ class Analyzer:
                     value = strict_json(raw)
                     validate(value, schema)
                 # 모델 출력에도 비밀값을 저장하거나 합성 입력으로 넘기지 않는다.
-                if sanitize(encode(value)) != encode(value):
-                    raise ValueError('분석 출력에서 민감 정보가 감지되었습니다')
+                def clean(value):
+                    if isinstance(value, str):
+                        return sanitize(value, assignments=False)
+                    if isinstance(value, list):
+                        return [clean(item) for item in value]
+                    if isinstance(value, dict):
+                        return {key: clean(item) for key, item in value.items()}
+                    return value
+                value = clean(value)
+                validate(value, schema)
                 return value
             except (IsolationError, BudgetExceeded):
                 raise
@@ -61,32 +69,61 @@ class Analyzer:
 
     def run(self, snapshot_id=None, include_drafts=False):
         results = []
-        # 수집·정리와 같은 잠금으로 diff 수명 및 계정 동시 호출 1개를 보장한다.
-        with Collector(self.conn, self.config).lock():
+        # 별도 분석 잠금으로 계정 동시 호출 1개를 보장한다.
+        with Collector(self.conn, self.config).lock("analysis.lock"):
             rows = self.conn.execute('SELECT s.*,p.repo_id,p.title,p.body,p.draft,p.state,p.base_sha AS current_base,'
                                      'p.head_sha AS current_head FROM snapshots s JOIN pull_requests p ON p.id=s.pr_id '
-                                     'WHERE s.id IN (SELECT MAX(id) FROM snapshots GROUP BY pr_id) '
-                                     'AND (? IS NULL OR s.id=?) ORDER BY s.id', (snapshot_id, snapshot_id)).fetchall()
+                                     'WHERE (? IS NOT NULL OR s.id IN (SELECT MAX(id) FROM snapshots GROUP BY pr_id)) '
+                                     'AND (? IS NULL OR s.id=?) ORDER BY s.id', (snapshot_id, snapshot_id, snapshot_id)).fetchall()
             for row in rows:
+                row = dict(row)
                 if row['state'] != 'open' or (row['draft'] and not include_drafts):
                     continue
                 if not analysis_allowed(self.conn, row['repo_id']):
                     continue
-                if row['base_sha'] != row['current_base'] or row['head_sha'] != row['current_head']:
+                latest_id = self.conn.execute(
+                    'SELECT MAX(id) FROM snapshots WHERE pr_id=?', (row['pr_id'],)).fetchone()[0]
+                if (row['base_sha'] != row['current_base'] or
+                        row['head_sha'] != row['current_head'] or row['id'] != latest_id):
+                    if snapshot_id is not None:
+                        results.append(self._failure(row, '최신 SHA의 최신 스냅샷이 아닙니다', 'blocked', persist=False))
                     continue
-                results.append(self._analyze(row))
+                try:
+                    results.append(self._analyze(row))
+                except Exception:
+                    self.conn.rollback()
+                    results.append(self._failure(row, '분석 실패: diff 캐시 또는 로컬 DB를 확인하세요'))
         return results
+
+    def _failure(self, row, error, status='failed', persist=True):
+        result = dict(snapshot_id=row['id'], status=status, error=error, items=[], intent=None)
+        if not persist:
+            return result
+        with self.conn:
+            # 존재 확인부터 저장까지 삭제와 경합하지 않도록 쓰기 잠금을 잡는다.
+            self.conn.execute('BEGIN IMMEDIATE')
+            if not self.conn.execute('SELECT 1 FROM snapshots WHERE id=?', (row['id'],)).fetchone():
+                return dict(result, status='cancelled', error='분석 도중 스냅샷이 삭제되었습니다')
+            previous = self.conn.execute(
+                'SELECT output_json FROM analyses WHERE snapshot_id=? AND input_hash=? AND provider=? AND model=? AND cli_version=? AND prompt_version=? AND schema_version=? ORDER BY id DESC LIMIT 1',
+                (row['id'], row.get('analysis_input_hash', ''), self.adapter.provider, self.adapter.model, self.adapter.cli_version, PROMPT_VERSION, SCHEMA_VERSION)).fetchone()
+            if previous and previous['output_json'] == encode(result):
+                return result
+            self.conn.execute('INSERT INTO analyses(snapshot_id,input_hash,provider,model,cli_version,prompt_version,schema_version,status,output_json,error) VALUES(?,?,?,?,?,?,?,?,?,?)',
+                              (row['id'], row.get('analysis_input_hash', ''), self.adapter.provider, self.adapter.model, self.adapter.cli_version, PROMPT_VERSION, SCHEMA_VERSION, status, encode(result), error))
+        return result
 
     def _analyze(self, row):
         source_coverage = json.loads(row['coverage'])
         source_coverage.setdefault('raw_input_hash', row['input_hash'])
         if source_coverage.get('status') in ('incomplete', 'inaccessible'):
-            return dict(snapshot_id=row['id'], status='blocked', error='수집이 불완전한 스냅샷')
+            return self._failure(row, '수집이 불완전한 스냅샷', 'blocked')
         diff_path = Path(row['diff_path']).resolve()
         cache_dir = (self.config.data_dir / 'cache').resolve()
         if not diff_path.is_relative_to(cache_dir):
             raise ValueError('diff 캐시 경로가 데이터 디렉터리 밖입니다')
-        diff = diff_path.read_text()
+        with Collector(self.conn, self.config).lock():
+            diff = diff_path.read_text()
         units, tests = parse_diff(diff, source_coverage.get('files', []))
         metadata = dict(title=sanitize(row['title']), body=sanitize(row['body']), tests=[sanitize(t) for t in tests])
         # 정제 전 1 MiB 한도는 후보 우선 순서로 배정한다.
@@ -100,8 +137,9 @@ class Analyzer:
                 used += unit['raw_bytes']
         eligible = [u for u in units if not u.get('omission_reason')]
         chunks = chunk_units(eligible, metadata)
-        material = dict(metadata=metadata, units=units, policy='exclude-v1/limits-v1', prompt_version=PROMPT_VERSION)
+        material = dict(metadata=metadata, units=units, policy='redact-v2/limits-v1', prompt_version=PROMPT_VERSION)
         input_hash = hashlib.sha256(encode(material).encode()).hexdigest()
+        row['analysis_input_hash'] = input_hash
         adapter = self.adapter
         key = (row['id'], input_hash, adapter.provider, adapter.model, adapter.cli_version, PROMPT_VERSION, SCHEMA_VERSION)
         if adapter.model != 'unknown':
@@ -109,7 +147,8 @@ class Analyzer:
             if cached:
                 return json.loads(cached['output_json'])
         coverage = dict(total=len(units), analyzed=0, excluded=sum(u['excluded'] for u in units),
-                        omitted=sum(bool(u.get('omission_reason')) for u in units))
+                        omitted=sum(bool(u.get('omission_reason')) for u in units),
+                        redacted=sum(u.get('redacted', False) for u in units))
         result = dict(snapshot_id=row['id'], status='partial', intent=None, items=[], files=[],
                       units=units, uncertainties=[], coverage=coverage,
                       notice='민감 정보 탐지는 완전하지 않습니다',
@@ -127,7 +166,7 @@ class Analyzer:
                 synthesis = self._call('synthesis', dict(metadata=metadata, items=collected, uncertainties=uncertainties), SYNTHESIS_SCHEMA)
                 result.update(intent=synthesis['intent'], items=collected, uncertainties=uncertainties)
                 coverage['analyzed'] = len(collected)
-                result['status'] = 'partial' if coverage['excluded'] or coverage['omitted'] else 'completed'
+                result['status'] = 'partial' if coverage['excluded'] or coverage['omitted'] or coverage['redacted'] else 'completed'
         except (ValueError, OSError, subprocess.SubprocessError) as exc:
             result['status'] = 'deferred' if isinstance(exc, BudgetExceeded) else 'blocked' if isinstance(exc, IsolationError) else 'failed'
             result['error'] = str(exc) if isinstance(exc, (BudgetExceeded, IsolationError)) else '분석 실패: 입력 또는 응답 계약을 확인하세요'
@@ -141,10 +180,17 @@ class Analyzer:
             importance = [by_id[u['change_id']]['importance'] for u in members if u['change_id'] in by_id]
             result['files'].append(dict(file_path=path, importance=max(importance, key=ranks.get) if importance else None,
                                         candidates=sorted({flag for u in members for flag in u['candidates']}),
-                                        partial=any(u['change_id'] not in by_id for u in members)))
+                                        partial=any(u['change_id'] not in by_id or u.get('redacted') for u in members)))
         with self.conn:
+            self.conn.execute('BEGIN IMMEDIATE')
+            current = self.conn.execute('SELECT coverage FROM snapshots WHERE id=?', (row['id'],)).fetchone()
+            if current is None:
+                return dict(result, status='cancelled', error='분석 도중 스냅샷이 삭제되었습니다')
             self.conn.execute('UPDATE snapshots SET input_hash=? WHERE id=?', (input_hash, row['id']))
-            stored_coverage = dict(source_coverage, analysis=coverage)
+            # 수집기가 갱신한 상태·오류를 보존하고 분석 통계만 합친다.
+            stored_coverage = json.loads(current['coverage'])
+            stored_coverage.setdefault('raw_input_hash', source_coverage['raw_input_hash'])
+            stored_coverage['analysis'] = coverage
             self.conn.execute('UPDATE snapshots SET coverage=? WHERE id=?', (encode(stored_coverage), row['id']))
             # 기존 성공 분석을 남겨 실패 시에도 이전 결과를 볼 수 있게 한다.
             analysis_id = self.conn.execute('INSERT INTO analyses(snapshot_id,input_hash,provider,model,cli_version,prompt_version,schema_version,status,intent,output_json,error) VALUES(?,?,?,?,?,?,?,?,?,?,?)',

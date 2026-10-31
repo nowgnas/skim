@@ -57,6 +57,11 @@ ALTER TABLE changes ADD COLUMN unit_key TEXT;
 CREATE UNIQUE INDEX changes_unit_key ON changes(snapshot_id,unit_key) WHERE unit_key IS NOT NULL;
 CREATE TABLE analysis_budget (
  day TEXT PRIMARY KEY, calls INTEGER NOT NULL DEFAULT 0 CHECK(calls BETWEEN 0 AND 20));
+""", """
+ALTER TABLE jobs ADD COLUMN refresh_requested INTEGER NOT NULL DEFAULT 0 CHECK(refresh_requested IN (0,1));
+ALTER TABLE jobs ADD COLUMN retry_not_before TEXT;
+-- 기존 대기 시각도 보존해 업그레이드 직후 요청 제한을 무시하지 않는다.
+UPDATE jobs SET retry_not_before=next_run_at WHERE status='pending';
 """)
 
 
