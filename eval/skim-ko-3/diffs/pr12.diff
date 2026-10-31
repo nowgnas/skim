@@ -1,0 +1,31 @@
+diff --git a/progress.md b/progress.md
+index 5909271..03e1fdd 100644
+--- a/progress.md
++++ b/progress.md
+@@ -101,3 +101,8 @@
+ - init --reset은 본인 소유 디렉터리의 0700 권한을 복구하며 probe 기록을 폐기한다. 링크·일반 파일·타인 소유 경로와 CODEX_HOME 환경 차이는 doctor에서 별도 조치를 안내한다.
+ - 모델별 probe 기록 분리, 목록 밖 활성 기능 경고와 refresh token 교체 시 원본 로그인 무효화 가능성 안내를 추가했다. 호출마다 검증하는 기존 경계는 유지했다.
+ - unittest 106개 및 git diff --check가 통과했다. 실제 LLM·네트워크 호출, GitHub 쓰기와 커밋은 하지 않았다.
++
++## Codex 실제 CLI 검증 — 2026-10-31
++- codex-cli 0.165.0 실환경에서 doctor --probe 통과. 빈 CODEX_HOME 생성, 점 포함 기능명 허용, 웹 검색 비활성(-c web_search="disabled"), 위험 기능 차단 목록 확장.
++- 모델 자기보고(tool_ran)는 실제로 부정확해 --json 이벤트 스트림으로 도구 호출을 객관 판정한다. 분석 실행에도 같은 검사를 적용한다.
++- 음성 검증: --disable 없이 실행하면 command_execution 이벤트가 나타나 검사에 걸림을 확인했다.
+diff --git a/tests/test_codex.py b/tests/test_codex.py
+index ac316c0..d0a33c2 100644
+--- a/tests/test_codex.py
++++ b/tests/test_codex.py
+@@ -69,11 +69,9 @@ def runner(self, command, **kw):
+                 directory = kw['cwd'] if self.file_location == 'cwd' else kw['env']['HOME']
+                 (Path(directory) / 'probe.txt').touch()
+             Path(command[command.index('--output-last-message') + 1]).write_text(json.dumps(self.answer))
+-            stdout = ''
+             self.assertIn('--json', command)
+-            if True:
+-                events = self.events + [{'type': 'turn.completed'}]
+-                stdout = '\n'.join(json.dumps(e) for e in events)
++            events = self.events + [{'type': 'turn.completed'}]
++            stdout = '\n'.join(json.dumps(e) for e in events)
+             return subprocess.CompletedProcess(command, self.exitcode, stdout, '')
+         return subprocess.CompletedProcess(command, 0, output, '')
+ 

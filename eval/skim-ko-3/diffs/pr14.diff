@@ -1,0 +1,407 @@
+diff --git a/lib/skim/analyze/__init__.py b/lib/skim/analyze/__init__.py
+index 08ccf25..57fa834 100644
+--- a/lib/skim/analyze/__init__.py
++++ b/lib/skim/analyze/__init__.py
+@@ -137,7 +137,7 @@ def _analyze(self, row):
+                 used += unit['raw_bytes']
+         eligible = [u for u in units if not u.get('omission_reason')]
+         chunks = chunk_units(eligible, metadata)
+-        material = dict(metadata=metadata, units=units, policy='redact-v2/limits-v1', prompt_version=PROMPT_VERSION)
++        material = dict(metadata=metadata, units=units, policy='redact-v2/limits-v1/rules-v3', prompt_version=PROMPT_VERSION)
+         input_hash = hashlib.sha256(encode(material).encode()).hexdigest()
+         row['analysis_input_hash'] = input_hash
+         adapter = self.adapter
+diff --git a/lib/skim/analyze/units.py b/lib/skim/analyze/units.py
+index ef4ab42..b73b22d 100644
+--- a/lib/skim/analyze/units.py
++++ b/lib/skim/analyze/units.py
+@@ -27,20 +27,92 @@ def is_test(path):
+     return bool(re.search(r'(^|/)(tests?|__tests__)(/|$)|(^|/)(test_[^/]+|[^/]+[._](test|spec)\.[^/]+)$|_test\.', path, re.I))
+ 
+ 
++def changed_spans(text):
++    """헤더를 제외한 변경 내용의 원문 오프셋을 돌려준다."""
++    offset = 0
++    in_hunk = False
++    for line in text.splitlines(keepends=True):
++        if line.startswith('@@ '):
++            in_hunk = True
++        elif line.startswith(('+', '-')):
++            if in_hunk or not line.startswith(('+++ ', '--- ')):
++                yield offset + 1, offset + len(line.rstrip('\r\n'))
++        offset += len(line)
++
++
++def changed_lines(text):
++    """문맥과 헤더를 제외하되 hunk 안의 헤더 모양 변경 줄은 보존한다."""
++    return '\n'.join(text[start:end] for start, end in changed_spans(text))
++
++
++def changed_secrets(text):
++    """개인 키 전체의 가림 범위와 변경 줄이 겹치는지도 검사한다."""
++    spans = list(changed_spans(text))
++    if any(start < match.end() and match.start() < end
++           for match in SECRET_VALUE.finditer(text) for start, end in spans):
++        return True
++    changed = changed_lines(text)
++    return sanitize(changed) != changed
++
++
++def payment_candidate(parts, code):
++    return any(re.fullmatch(r'checkout|(?:payments?|refunds?|charges?|billing|stripe)(?:_.+)?', part)
++               for part in parts) or bool(re.search(
++        r'\b(?:stripe|braintree|paypal|adyen|razorpay)(?:\.[a-z_]\w*)+\s*\(', code))
++
++
++def schema_candidate(parts, path, name, code):
++    return (any(part in ('migration', 'migrations', 'migrate') for part in parts)
++            or 'alembic/versions/' in path.lower() or name.endswith('.sql')
++            or name == 'schema.prisma' or path.lower().endswith('db/schema.rb')
++            or bool(re.search(r'\b(?:(?:create|alter|drop)\s+table|(?:add|drop)\s+column|create\s+(?:unique\s+)?index)\b', code)))
++
++
++def config_candidate(parts, path, name):
++    return (any(part in ('config', 'configs', 'settings') for part in parts)
++            or name.endswith(('.toml', '.ini', '.conf', '.tf')) or name.startswith('.env')
++            or name in ('compose.yaml', 'compose.yml', 'docker-compose.yaml', 'docker-compose.yml',
++                        'dockerfile', 'values.yaml', 'values.yml', 'tsconfig.json',
++                        'application.yml', 'application.properties')
++            or name.startswith('dockerfile.')
++            or path.lower() in ('.github/dependabot.yml', '.github/dependabot.yaml'))
++
++
++def auth_candidate(parts, name, code):
++    auth_names = (r'auth|authn|authz|authenticate|authenticated|authentication|'
++                  r'authorize|authorized|authorization|is_authenticated|'
++                  r'check_permission|check_permissions|verify_token|login|logout|oauth|jwt')
++    auth_identifier = r'(?:[a-z0-9]+_)*(?:auth|oauth|permission|permissions|login|jwt)(?:_[a-z0-9]+)*'
++    auth_path = any(re.fullmatch(
++        r'auth|authn|authz|authentication|authorization|authenticate|authenticated|'
++        r'authorize|is_authenticated|check_permission|permissions?|sessions?|login|logout|oauth|acl'
++        r'|(?:auth|oauth|jwt|permissions?|login)_.+', part) for part in parts)
++    middleware_auth = ('middleware' in parts and bool(re.fullmatch(r'auth(?:_.+)?\.[^.]+', name)) or
++                       bool(re.fullmatch(r'auth_?middleware\.[^.]+', name)))
++    return auth_path or middleware_auth or bool(re.search(
++            r'\b(?:' + auth_names + r')\s*(?:\(|\.\s*[a-z_]\w*\s*\()', code)) or bool(re.search(
++                r'\b' + auth_identifier + r'\s*\(|@' + auth_identifier + r'\b', code))
++
++
+ def candidates(path, text, tests):
+-    # camelCase도 단어 경계로 취급해 인증 함수 이름을 놓치지 않는다.
+-    value = re.sub(r'([a-z])([A-Z])', r'\1_\2', path + '\n' + text).lower()
+-    flags = []
+-    rules = {'auth': r'(?<![a-z])(?:auth(?:entication|enticated|enticate|orization|orized|orize|z|n)?|permissions?|oauth|sessions?|acl)(?![a-z])', 'payments': r'payment|billing|checkout|refund|charge',
+-             'db_schema_migration': r'migration|schema|\b(?:drop|alter) table',
+-             'config': r'config|settings|\.toml$|\.ini$|\.env',
+-             'ci_workflow': r'\.github/workflows/',
+-             'dependency': r'(^|/)(package(-lock)?\.json|(?:[^/]+[.-])?lock|requirements[^/]*|pyproject\.toml|go\.(?:mod|sum)|pnpm-lock\.yaml|gemfile|cargo\.toml)(\n|$)',
+-             'secrets': r'secret|password|private.key|token|credentials'}
+-    for flag, pattern in rules.items():
+-        target = path.lower() if flag == 'dependency' else value
+-        if re.search(pattern, target, re.M):
+-            flags.append(flag)
++    location = PurePosixPath(path.lower())
++    # 경로 조각은 camelCase를 분리하고 확장자를 뗀 이름으로 통일한다.
++    parts = tuple(re.sub(r'([a-z])([A-Z])', r'\1_\2', part).lower().split('.')[0]
++                  for part in PurePosixPath(path).parts)
++    name = location.name
++    changed = changed_lines(text)
++    # camelCase 호출도 동일한 식별자로 검사하되 일반 단어 언급은 근거로 쓰지 않는다.
++    code = re.sub(r'([a-z])([A-Z])', r'\1_\2', changed).lower()
++    rules = {
++        'auth': auth_candidate(parts, name, code),
++        'payments': payment_candidate(parts, code),
++        'db_schema_migration': schema_candidate(parts, path, name, code),
++        'config': config_candidate(parts, path, name),
++        'ci_workflow': path.lower().startswith('.github/workflows/'),
++        'dependency': bool(re.search(r'(^|/)(package(-lock)?\.json|(?:[^/]+[.-])?lock|requirements[^/]*|pyproject\.toml|go\.(?:mod|sum)|pnpm-lock\.yaml|gemfile|cargo\.toml)$', path.lower())),
++        'secrets': secret_path(path) or 'secrets' in parts or changed_secrets(text),
++    }
++    flags = [flag for flag, matches in rules.items() if matches]
+     if not is_test(path) and PurePosixPath(path).suffix in ('.py', '.js', '.ts', '.tsx', '.go', '.rs', '.java', '.rb', '.c', '.cpp'):
+         stem = PurePosixPath(path).stem
+         if not any(stem == re.sub(r'^(?:test_|spec_)|(?:[._](?:test|spec)|_test)$', '', PurePosixPath(t).stem) for t in tests):
+@@ -95,7 +167,7 @@ def parse_diff(diff, files=()):
+             flags = candidates(path, text, tests)
+             cleaned = sanitize(text)
+             redacted = not excluded and cleaned != text
+-            if (excluded or redacted) and 'secrets' not in flags:
++            if excluded and 'secrets' not in flags:
+                 flags.append('secrets')
+             units.append(dict(change_id=f'h{len(units)+1}', file_path=sanitize(path), kind='hunk' if old else 'synthetic',
+                               old_range=old, new_range=new, binary='GIT binary patch' in body or 'Binary files ' in body,
+diff --git a/progress.md b/progress.md
+index 03e1fdd..ff7c0ee 100644
+--- a/progress.md
++++ b/progress.md
+@@ -106,3 +106,21 @@
+ - codex-cli 0.165.0 실환경에서 doctor --probe 통과. 빈 CODEX_HOME 생성, 점 포함 기능명 허용, 웹 검색 비활성(-c web_search="disabled"), 위험 기능 차단 목록 확장.
+ - 모델 자기보고(tool_ran)는 실제로 부정확해 --json 이벤트 스트림으로 도구 호출을 객관 판정한다. 분석 실행에도 같은 검사를 적용한다.
+ - 음성 검증: --disable 없이 실행하면 command_execution 이벤트가 나타나 검사에 걸림을 확인했다.
++
++## 위험 후보 오탐 수정 — 2026-10-31
++
++- 위험 후보를 경로 구조와 추가·삭제 줄의 DDL·인증 호출·결제 SDK 호출·비밀값 할당 근거로 제한했다. 문맥·hunk 헤더와 일반 schema/config 단어는 근거에서 제외하고 logic_without_tests는 유지했다.
++- PR #13의 provider_schema/auth.json 문맥 회귀와 양성 사례를 추가했다. 당시 분석 캐시용 prompt_version을 skim-ko-2로 올렸으나 아래 후속 수정에서 복원했다. doctor 테스트는 외부 SKIM_HOME을 격리했다.
++- 실제 LLM·네트워크 호출 없이 unittest 113개와 git diff --check가 통과했다. 이 변경은 기존 커밋 6ec263d에 포함되어 있으므로 당시의 “커밋은 하지 않았다” 기록을 정정한다.
++
++## 위험 후보 누락 리뷰 수정 — 2026-10-31
++
++- 변경 줄의 민감 정보 가림을 secrets 후보에 연결하고 인증 데코레이터·복합 호출, 확장자와 camelCase를 정규화한 인증·결제·설정 경로를 보완했다. 문맥 가림만으로는 후보를 붙이지 않는다.
++- hunk 내부의 헤더 모양 변경 줄과 루트 schema.prisma를 보존하고 YAML 전체의 config 판정을 좁혔다. 프롬프트 버전은 skim-ko-1로 복원하고 규칙 버전은 입력 해시의 policy에 기록한다.
++- fake 기반 회귀 검증으로 모델의 low 판정에도 후보가 단위·파일에 유지됨을 확인했다. unittest 117개와 git diff --check가 통과했다. 이번 작업에서 실제 LLM·외부 네트워크 호출, GitHub 쓰기 및 새 커밋은 하지 않았다.
++
++## 위험 후보 가림 범위 리뷰 수정 — 2026-10-31
++
++- 개인 키 탐지 범위와 변경 줄 오프셋의 겹침으로 secrets 후보를 판정해 문맥의 BEGIN/END 사이 본문 교체·추가·삭제 누락을 고쳤다. 문맥만 가린 경우는 계속 제외하며 전송 가림 규칙은 유지한다.
++- 리터럴 할당 중심으로 비밀값 후보를 좁히고 경로 접두사 오탐, 단수 migration, Dockerfile·Terraform·values.yaml·Dependabot 설정과 oauth_client 호출을 보완했다. 규칙별 헬퍼와 policy rules-v3를 적용하고 중복 빈 줄을 정리했다.
++- 회귀 테스트를 포함한 unittest 121개와 git diff --check가 통과했다. 실제 LLM·네트워크 호출, GitHub 쓰기와 커밋은 하지 않았다.
+diff --git a/tests/test_analyze.py b/tests/test_analyze.py
+index 9fd340b..b634374 100644
+--- a/tests/test_analyze.py
++++ b/tests/test_analyze.py
+@@ -349,7 +349,11 @@ def test_auth_variants_and_dependency_paths(self):
+                      'isAuthenticated', 'checkPermission', 'authz', 'OAuth', 'authentication'):
+             with self.subTest(term=term):
+                 self.assertIn('auth', candidates(term, '', []))
+-                self.assertIn('auth', candidates('app.py', '+' + term, []))
++        for term in ('authorize', 'authenticated', 'isAuthenticated', 'checkPermission',
++                     'authz', 'OAuth', 'authentication', 'requires_auth',
++                     'permission_required', 'login_required', 'jwt_required'):
++            with self.subTest(call=term):
++                self.assertIn('auth', candidates('app.py', '+' + term + '()', []))
+         for path in ('clock', 'src/clock', 'src/author.py'):
+             self.assertNotIn('dependency', candidates(path, '', []))
+             self.assertNotIn('auth', candidates(path, '', []))
+@@ -415,7 +419,8 @@ def generate(request, schema):
+         self.assertEqual(self.analyzer.run()[0]['status'], 'blocked')
+ 
+     def test_value_only_secrets_keep_candidates_even_when_model_says_low(self):
+-        for token in ('AKIA' + 'A' * 16, 'ghp_abc', 'sk_live_abc', 'xoxb-abc'):
++        for token in ('AKIA' + 'A' * 16, 'ghp_abc', 'sk_live_abc', 'xoxb-abc',
++                      'export API_TOKEN=abcd1234', 'DB_PASSWORD=hunter2'):
+             with self.subTest(token=token):
+                 self.snapshot('diff --git a/a.txt b/a.txt\n@@ -1 +1 @@\n+' + token)
+                 result = self.analyzer.run()[0]
+diff --git a/tests/test_risk_candidates.py b/tests/test_risk_candidates.py
+new file mode 100644
+index 0000000..312c493
+--- /dev/null
++++ b/tests/test_risk_candidates.py
+@@ -0,0 +1,200 @@
++"""경로와 실제 변경 줄에 근거한 위험 후보 회귀 검사."""
++import sys
++import unittest
++from pathlib import Path
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))
++from skim.analyze.units import candidates, changed_lines, parse_diff
++
++
++class RiskCandidatesTests(unittest.TestCase):
++    def test_pr13_provider_schema(self):
++        diff = '''diff --git a/lib/skim/analyze/codex.py b/lib/skim/analyze/codex.py
++--- a/lib/skim/analyze/codex.py
+++++ b/lib/skim/analyze/codex.py
++@@ -1,4 +1,8 @@
+++UNSUPPORTED_SCHEMA_KEYS = {'$schema', 'maxItems'}
+++def provider_schema(schema):
+++    return {k: v for k, v in schema.items() if k not in UNSUPPORTED_SCHEMA_KEYS}
++ (Path(runtime) / 'auth.json').symlink_to(auth_path)
++-schema_path.write_text(encode(schema))
+++schema_path.write_text(encode(provider_schema(schema)))
++'''
++        units, _ = parse_diff(diff)
++        self.assertNotIn('auth', units[0]['candidates'])
++        self.assertNotIn('db_schema_migration', units[0]['candidates'])
++
++    def test_positive_paths(self):
++        for path, flag in (
++            ('migrations/0001_init.py', 'db_schema_migration'),
++            ('db/migrate/001.py', 'db_schema_migration'),
++            ('alembic/versions/001.py', 'db_schema_migration'),
++            ('schema.sql', 'db_schema_migration'),
++            ('prisma/schema.prisma', 'db_schema_migration'),
++            ('db/schema.rb', 'db_schema_migration'),
++            ('auth/login.py', 'auth'), ('middleware/auth_guard.py', 'auth'),
++            ('.github/workflows/ci.yml', 'ci_workflow'),
++            ('package.json', 'dependency'), ('.env', 'config'), ('.env', 'secrets'),
++            ('settings.py', 'config'), ('config/app.json', 'config'),
++            ('secrets/value.txt', 'secrets'), ('private.pem', 'secrets'),
++            ('payments/client.py', 'payments')):
++            with self.subTest(path=path, flag=flag):
++                self.assertIn(flag, candidates(path, '', []))
++
++    def test_changed_evidence_only(self):
++        for line, flag in (
++            ('ALTER TABLE users ADD COLUMN x', 'db_schema_migration'),
++            ('CREATE INDEX idx ON users (x)', 'db_schema_migration'),
++            ('def authenticate(user, password):', 'auth'),
++            ('authorize(user)', 'auth'), ('checkPermission(user)', 'auth'),
++            ('jwt.decode(value)', 'auth'),
++            ('stripe.PaymentIntent.create(amount=100)', 'payments'),
++            ('API_KEY = "literal"', 'secrets')):
++            for sign in ('+', '-'):
++                with self.subTest(line=line, sign=sign):
++                    self.assertIn(flag, candidates('app.py', sign + line, []))
++            self.assertNotIn(flag, candidates('app.py', ' ' + line, []))
++            self.assertNotIn(flag, candidates('app.py', '@@ -1 +1 @@ ' + line, []))
++
++    def test_bare_words_and_file_mentions(self):
++        flags = candidates('lib/provider_schema.py', '''+schema = provider_schema(schema)
+++config = settings
+++message = "payment billing checkout refund charge"
+++path = Path('auth.json')
+++path = Path('schema.sql')
+++++ b/auth/login.py
++--- a/migrations/001.py
++''', [])
++        self.assertEqual(flags, ['logic_without_tests'])
++
++    def test_redacted_context_is_not_secret_evidence(self):
++        units, _ = parse_diff('''diff --git a/app.py b/app.py
++--- a/app.py
+++++ b/app.py
++@@ -1,2 +1,2 @@
++ PASSWORD = "fixture"
++-old()
+++new()
++''')
++        self.assertTrue(units[0]['redacted'])
++        self.assertNotIn('secrets', units[0]['candidates'])
++
++    def test_common_file_paths(self):
++        for path, flag in (
++            ('src/billing.py', 'payments'), ('payment.py', 'payments'),
++            ('billingService.ts', 'payments'), ('config.py', 'config'),
++            ('settings/production.py', 'config'),
++            ('nginx.conf', 'config'), ('compose.yaml', 'config'),
++            ('src/auth_service.py', 'auth'), ('oauth_client.py', 'auth'),
++            ('src/authService.py', 'auth'), ('schema.prisma', 'db_schema_migration')):
++            with self.subTest(path=path):
++                self.assertIn(flag, candidates(path, '', []))
++        for path in ('openapi.yaml', 'fixtures/example.yml', 'src/author.py'):
++            with self.subTest(path=path):
++                self.assertNotIn('config', candidates(path, '', []))
++                self.assertNotIn('auth', candidates(path, '', []))
++
++    def test_auth_decorator_removal_and_compound_calls(self):
++        for line in ('@requires_auth', '@permission_required("x")',
++                     '@login_required', '@jwt_required()', 'requires_auth(user)',
++                     'permission_required("x")', 'loginRequired(user)'):
++            for sign in ('+', '-'):
++                with self.subTest(line=line, sign=sign):
++                    self.assertIn('auth', candidates('app.py', sign + line, []))
++            self.assertNotIn('auth', candidates('app.py', ' ' + line, []))
++        for line in ('author()', 'authorship()', 'message = "auth"', 'auth', 'requires_auth'):
++            self.assertNotIn('auth', candidates('app.py', '+' + line, []))
++
++    def test_changed_literal_assignments(self):
++        for line in ('export API_TOKEN=abcd1234', 'DB_PASSWORD=hunter2',
++                     'password = "fixture"', 'token = "fixture"'):
++            for sign in ('+', '-'):
++                with self.subTest(line=line, sign=sign):
++                    self.assertIn('secrets', candidates('compose.yml', sign + line, []))
++            self.assertNotIn('secrets', candidates('compose.yml', ' ' + line, []))
++
++    def test_private_key_body_replacement(self):
++        for path in ('deploy/k.yaml', 'app.py'):
++            for change in ('-MIIEold\n+MIIEnew', '+MIIEnew', '-MIIEold'):
++                with self.subTest(path=path, change=change):
++                    units, _ = parse_diff(f"""diff --git a/{path} b/{path}
++--- a/{path}
+++++ b/{path}
++@@ -1,3 +1,3 @@
++ -----BEGIN RSA PRIVATE KEY-----
++{change}
++ -----END RSA PRIVATE KEY-----
++""")
++                    self.assertTrue(units[0]['redacted'])
++                    self.assertIn('secrets', units[0]['candidates'])
++                    self.assertNotIn('MIIE', units[0]['diff'])
++
++    def test_private_key_context_only(self):
++        text = """@@ -1,4 +1,4 @@
++ -----BEGIN RSA PRIVATE KEY-----
++ MIIEfixture
++ -----END RSA PRIVATE KEY-----
++-old()
+++new()
++"""
++        self.assertNotIn('secrets', candidates('app.py', text, []))
++
++    def test_sanitized_changed_lines_are_secrets(self):
++        for path, line in (
++            ('deploy/secret.yaml', '  password: hunter2'),
++            ('app.py', 'DB_PASSWORD=changeme'),
++            ('app.py', 'SECRET_KEY=Pa$$w0rd!'),
++            ('app.py', 'Authorization: Bearer eyJabc.def.ghi'),
++            ('app.py', 'max_tokens=100'),
++            ('app.py', 'csrf_token = generate_token()'),
++            ('app.py', 'csrf_token = "fixture"'),
++            ('app.py', 'token = get_token()'),
++            ('app.py', 'password = user.password'),
++            ('app.py', 'Authorization: Bearer ${TOKEN}')):
++            for sign in ('+', '-'):
++                with self.subTest(path=path, line=line, sign=sign):
++                    units, _ = parse_diff(f"""diff --git a/{path} b/{path}
++--- a/{path}
+++++ b/{path}
++@@ -1 +1 @@
++{sign}{line}
++""")
++                    self.assertTrue(units[0]['redacted'])
++                    self.assertIn('secrets', units[0]['candidates'])
++                    self.assertIn('secrets', candidates(path, sign + line, []))
++
++    def test_config_stems_and_payment_directories(self):
++        for path in ('refund/handler.py', 'refunds/handler.py',
++                     'charge/handler.py', 'charges/handler.py'):
++            with self.subTest(path=path):
++                self.assertIn('payments', candidates(path, '', []))
++        for path in ('configs/app.json', 'configs.py', 'settings.py',
++                     'config/app.json', 'config.py', 'settings/app.json',
++                     'tsconfig.json', 'app/application.yml', 'application.properties'):
++            with self.subTest(path=path):
++                self.assertIn('config', candidates(path, '', []))
++        for path in ('configurable.ts', 'configurable/app.ts', 'config_prod.py',
++                     'settings_extra.py', 'configuration/app.json'):
++            with self.subTest(path=path):
++                self.assertNotIn('config', candidates(path, '', []))
++
++    def test_review_path_boundaries_and_config(self):
++        for path, flag in (
++            ('db/migration/V1.py', 'db_schema_migration'),
++            ('src/migration/AddUser.ts', 'db_schema_migration'),
++            ('Dockerfile', 'config'), ('deploy/Dockerfile.prod', 'config'),
++            ('infra/main.tf', 'config'), ('helm/app/values.yaml', 'config'),
++            ('.github/dependabot.yml', 'config')):
++            with self.subTest(path=path):
++                self.assertIn(flag, candidates(path, '', []))
++        for path, flag in (
++            ('scripts/checkout_repo.sh', 'payments'),
++            ('striped_table.py', 'payments'), ('middleware/author.py', 'auth')):
++            with self.subTest(path=path):
++                self.assertNotIn(flag, candidates(path, '', []))
++        self.assertIn('auth', candidates('app.py', '+oauth_client(value)', []))
++
++    def test_header_like_changes_inside_hunk(self):
++        text = '--- a/app.sql\n+++ b/app.sql\n@@ -1 +1 @@\n--- removed SQL comment\n+++ added comment'
++        self.assertEqual(changed_lines(text), '-- removed SQL comment\n++ added comment')
++        self.assertIn('secrets', candidates('app.py', '@@ -1 +1 @@\n+++ API_TOKEN=abcd1234', []))
+diff --git a/tests/test_setup_doctor.py b/tests/test_setup_doctor.py
+index 330aa05..cea9634 100644
+--- a/tests/test_setup_doctor.py
++++ b/tests/test_setup_doctor.py
+@@ -17,6 +17,11 @@
+ 
+ class SetupDoctorTests(unittest.TestCase):
+     def setUp(self):
++        # 실행 환경의 실제 데이터 디렉터리 대신 테스트 임시 홈만 검사한다.
++        env = patch.dict(os.environ)
++        env.start()
++        self.addCleanup(env.stop)
++        os.environ.pop('SKIM_HOME', None)
+         self.temp = tempfile.TemporaryDirectory(prefix='skim space ')
+         self.addCleanup(self.temp.cleanup)
+         self.home = Path(self.temp.name)

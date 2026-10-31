@@ -1,0 +1,595 @@
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..43ae0e2
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,2 @@
++__pycache__/
++*.py[cod]
+diff --git a/README.md b/README.md
+index 74846d7..88061ce 100644
+--- a/README.md
++++ b/README.md
+@@ -3,3 +3,36 @@
+ 담당 레포에 올라온 PR에서 중요한 부분만 골라 보여주는 로컬 도구입니다.
+ 
+ 설계: docs/01-design.md (작성 중)
++
++## PR1 실행
++
++Python 3.11 이상과 표준 라이브러리만 사용합니다.
++
++```bash
++bin/skim repo add owner/repo --source responsible
++bin/skim repo list
++bin/skim analysis allow --org owner
++bin/skim analysis deny owner/repo
++bin/skim analysis reset owner/repo
++bin/skim repo remove owner/repo
++python3 -m unittest discover -s tests
++```
++
++`--source`는 `owned`, `managed`, `responsible` 중 하나이며 기본값은
++`responsible`입니다. 등록만으로 분석을 허용하지 않습니다. 저장소의 명시적
++allow/deny가 조직 정책보다 우선하며, `reset`은 조직 정책을 상속합니다.
++조직 정책도 `analysis reset --org owner`로 지울 수 있습니다.
++저장소 삭제는 추적을 해제하고 저장소 유입 경로만 제거합니다. 리뷰 요청이 남은
++PR·스냅샷·분석은 보존하며, 출처가 없어진 PR만 삭제합니다. 저장소 레코드와
++분석 정책은 유지합니다. 리뷰 요청만으로 발견한 저장소는 추적 목록에 나타나지 않습니다.
++
++설정 파일은 `~/.config/skim/config.json`, DB는
++`~/.local/share/skim/skim.db`입니다. `SKIM_HOME`을 지정하면 각각
++`$SKIM_HOME/config/config.json`, `$SKIM_HOME/data/skim.db`를 사용합니다.
++설정 기본값은 수집 간격 300초, 보존 기간 30일이며 실제 수집·보존 처리는
++후속 구현에서 적용합니다. 전용 config/data 디렉터리는 0700이며 SKIM_HOME 자체의 기존 권한은 바꾸지 않습니다. 설정·DB·백업 파일은 0600입니다.
++DB 버전은 `PRAGMA user_version`으로 관리하고 기존 DB 변경 전에 백업합니다.
++`SKIM_PYTHON`으로 래퍼가 사용할 Python 실행 파일을 지정할 수 있습니다.
++
++`collect`, `analyze`, `web`, `doctor`는 현재 안내와 종료 코드 2를 반환하는
++스텁입니다. PR1은 네트워크 조회나 모델 호출을 수행하지 않습니다.
+diff --git a/bin/skim b/bin/skim
+new file mode 100755
+index 0000000..edfd3ee
+--- /dev/null
++++ b/bin/skim
+@@ -0,0 +1,16 @@
++#!/usr/bin/env bash
++set -euo pipefail
++SOURCE="${BASH_SOURCE[0]}"
++while [[ -L "$SOURCE" ]]; do
++  SOURCE_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
++  SOURCE="$(readlink "$SOURCE")"
++  [[ "$SOURCE" = /* ]] || SOURCE="$SOURCE_DIR/$SOURCE"
++done
++ROOT="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
++PY="${SKIM_PYTHON:-$(command -v python3 || true)}"
++if [[ -z "$PY" ]] || ! "$PY" -c 'import sys; sys.exit(sys.version_info < (3,11))'; then
++  echo 'Python 3.11 이상이 필요합니다.' >&2
++  exit 2
++fi
++export PYTHONPATH="$ROOT/lib${PYTHONPATH:+:$PYTHONPATH}"
++exec "$PY" -m skim "$@"
+diff --git a/docs/01-design.md b/docs/01-design.md
+index 39f88ca..0c8e944 100644
+--- a/docs/01-design.md
++++ b/docs/01-design.md
+@@ -9,7 +9,7 @@
+ ## 사용자 흐름
+ 
+ 1. `skim doctor`로 `gh`·분석 CLI의 PATH·인증·격리 기능을 확인하고 `skim repo add owner/repo`로 소유/담당 저장소를 등록한다. 조직 소유·관리 권한 저장소도 추적 대상에 포함하며, 소유·관리 저장소는 후보로 제시하고 사용자가 선택한다. 담당 여부는 자동 추측하지 않고 명시적 목록으로 관리한다.
+-2. MVP는 Codex CLI를 사용한다. 코드의 모델 서비스 전송을 안내한 뒤 `skim analysis allow owner/repo` 또는 `--org owner`로 명시적으로 허용한다(저장소별 deny가 우선). 등록·리뷰 요청만으로 전송을 허용하지 않으며 별도 API 키는 받지 않는다.
++2. MVP는 Codex CLI를 사용한다. 코드의 모델 서비스 전송을 안내한 뒤 `skim analysis allow owner/repo` 또는 `--org owner`로 명시적으로 허용한다(저장소별 명시적 allow/deny가 조직 정책보다 우선). 등록·리뷰 요청만으로 전송을 허용하지 않으며 별도 API 키는 받지 않는다.
+ 3. MVP는 `skim web` 프로세스 안의 스케줄러가 기본 5분 간격으로 수집한다. 수동 새로고침도 같은 작업 큐를 사용한다. launchd/systemd daemon 등록은 이후로 미룬다.
+ 4. `skim web`이 `127.0.0.1`의 로컬 대시보드를 열고 최신 저장 결과를 즉시 표시한다. 수집·분석 중에도 기존 결과를 볼 수 있다.
+ 5. PR 의도와 위험 신호를 훑고 high 변경부터 읽는다. 규칙 기반 후보·미분석은 펼치고 나머지 mid/low는 접어 두되 전체 diff와 GitHub 원문으로 이동할 수 있다.
+@@ -40,7 +40,7 @@ SQLite를 기준 저장소로 사용한다. 설정·DB·캐시는 사용자 전
+ 
+ | 엔터티 | 주요 필드 |
+ | --- | --- |
+-| `repositories` | `id`, `owner/name`, `source`(owned/managed/responsible; 조직 소유 포함), `enabled`, `analysis_policy`(org/repo allow/deny), `last_synced_at` |
++| `repositories` | `id`, `owner/name`, `source`(owned/managed/responsible; 조직 소유 포함), `tracked`(명시적 추적 여부, 기본 0), `enabled`, `analysis_policy`(org/repo allow/deny), `last_synced_at` |
+ | `pull_requests` | `repo_id`, `number`, `url`, `title`, `author`, `state`, `draft`, `head_branch`, `base_sha`, `head_sha`, `updated_at`, `last_seen_at` |
+ | `pr_sources` | `pr_id`, `source`(repository/review_request); 여러 유입 경로 보존 |
+ | `snapshots` | `id`, `pr_id`, `base_sha`, `head_sha`, `diff_hash`, `input_hash`, `diff_path`, `coverage`, `collected_at` |
+@@ -49,6 +49,8 @@ SQLite를 기준 저장소로 사용한다. 설정·DB·캐시는 사용자 전
+ | `analysis_items` | `analysis_id`, `change_id`, `importance`, `reason`, `risk_flags`; unique `(analysis_id, change_id)`, 파일 집계는 skim이 계산 |
+ | `jobs` | `id`, `type`, `target_id`, `input_hash`, `status`, `attempts`, `next_run_at`, `last_error`; 대기/실행 중 `(type, target_id, input_hash)` unique |
+ 
++리뷰 요청만으로 발견한 저장소는 `tracked=0`으로 저장하고 추적 목록과 저장소 전체 PR 수집에서 제외한다. 명시적 등록은 `tracked=1`로 전환한다. 추적 해제는 `repository` 출처만 제거하고, 출처가 없어진 PR은 삭제하되 `review_request` 출처가 남은 PR과 스냅샷·분석은 보존한다. 저장소 레코드와 분석 정책은 유지하여 리뷰 요청과 조직 opt-in에 계속 사용한다. 삭제된 스냅샷의 diff 캐시 정리는 수집·캐시 구현 시 함께 처리한다.
++
+ 분석 캐시 키는 `repo + PR + base/head SHA + input_hash + provider/model + cli_version + prompt_version + schema_version`이다. `input_hash`는 전송할 제목·설명·정제 diff·테스트 목록·제외/분할 정책의 해시이며 스냅샷과 분석에 기록한다. 모델 식별자가 `unknown`이면 CLI 버전을 기록하고 영속 캐시는 재사용하지 않는다. `coverage`에는 전체/분석/제외/누락 단위 수와 사유를 보관한다. 기본 보존 기간은 30일이다.
+ 
+ Sessio 연동은 sangwon 본인(현재 `gh` 로그인 사용자와 PR author가 일치)이 로컬에서 만든 PR에만 적용한다. 로컬 Sessio 인덱스에서 같은 저장소 + PR 브랜치 이름으로 세션을 찾으며, 없거나 후보가 여러 개면 아무것도 표시하지 않는다. 다른 사람의 PR에는 Sessio 링크를 표시하지 않는다.
+diff --git a/lib/skim/__init__.py b/lib/skim/__init__.py
+new file mode 100644
+index 0000000..28f3307
+--- /dev/null
++++ b/lib/skim/__init__.py
+@@ -0,0 +1,3 @@
++"""로컬 PR 검토 도우미."""
++
++__version__ = "0.1.0"
+diff --git a/lib/skim/__main__.py b/lib/skim/__main__.py
+new file mode 100644
+index 0000000..fda2e96
+--- /dev/null
++++ b/lib/skim/__main__.py
+@@ -0,0 +1,4 @@
++"""python -m skim 진입점."""
++from .cli import main
++
++raise SystemExit(main())
+diff --git a/lib/skim/cli.py b/lib/skim/cli.py
+new file mode 100644
+index 0000000..4061d7b
+--- /dev/null
++++ b/lib/skim/cli.py
+@@ -0,0 +1,103 @@
++"""네트워크를 사용하지 않는 초기 CLI."""
++import argparse
++import re
++import sqlite3
++import sys
++from .config import Config
++from .db import analysis_allowed, connect
++
++
++OWNER_PATTERN = r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?"
++
++
++def repository(value):
++    if not re.fullmatch(OWNER_PATTERN + r'/[A-Za-z0-9_.-]+', value):
++        raise argparse.ArgumentTypeError('owner/repo 형식이 필요합니다')
++    owner, name = value.split('/')
++    if name in ('.', '..'):
++        raise argparse.ArgumentTypeError('잘못된 저장소 이름입니다')
++    return owner, name
++
++
++def parser():
++    root = argparse.ArgumentParser(prog='skim', description='로컬 PR 검토 도우미')
++    commands = root.add_subparsers(dest='command', required=True)
++    repo = commands.add_parser('repo', help='추적 저장소 관리')
++    actions = repo.add_subparsers(dest='action', required=True)
++    add = actions.add_parser('add')
++    add.add_argument('repository', type=repository)
++    add.add_argument('--source', choices=('owned', 'managed', 'responsible'), default='responsible')
++    actions.add_parser('list')
++    remove = actions.add_parser('remove')
++    remove.add_argument('repository', type=repository)
++    analysis = commands.add_parser('analysis', help='모델 서비스 코드 전송 허용 관리')
++    policies = analysis.add_subparsers(dest='action', required=True)
++    for action in ('allow', 'deny', 'reset'):
++        p = policies.add_parser(action)
++        group = p.add_mutually_exclusive_group(required=True)
++        group.add_argument('repository', type=repository, nargs='?')
++        group.add_argument('--org')
++    for command in ('collect', 'analyze', 'web', 'doctor'):
++        commands.add_parser(command, help='후속 PR에서 구현 예정')
++    return root
++
++
++def main(argv=None):
++    args = parser().parse_args(argv)
++    if args.command in ('collect', 'analyze', 'web', 'doctor'):
++        print(f'{args.command}: 아직 구현되지 않았습니다.', file=sys.stderr)
++        return 2
++    try:
++        config = Config.load()
++        conn = connect(config)
++        try:
++            with conn:
++                if args.command == 'analysis' and args.action == 'allow':
++                    print('허용된 코드가 선택한 LLM CLI의 모델 서비스로 전송될 수 있습니다.', flush=True)
++                if args.command == 'repo':
++                    if args.action == 'list':
++                        print('저장소\t출처\t활성\t분석 정책\t분석 허용')
++                        for row in conn.execute('SELECT * FROM repositories WHERE tracked=1 ORDER BY owner,name'):
++                            print(f"{row['owner']}/{row['name']}\t{row['source']}\t{row['enabled']}\t"
++                                  f"{row['analysis_policy']}\t{int(analysis_allowed(conn, row['id']))}")
++                    elif args.action == 'add':
++                        conn.execute('INSERT INTO repositories(owner,name,source,tracked) VALUES(?,?,?,1) '
++                                     'ON CONFLICT(owner,name) DO UPDATE SET source=excluded.source,enabled=1,tracked=1',
++                                     (*args.repository, args.source))
++                        print('저장소를 등록했습니다. 분석은 별도 허용이 필요합니다.')
++                    else:
++                        result = conn.execute('UPDATE repositories SET tracked=0 WHERE owner=? AND name=? AND tracked=1',
++                                              args.repository)
++                        if not result.rowcount:
++                            raise ValueError('등록되지 않은 저장소입니다')
++                        # 리뷰 요청 출처와 그 스냅샷·분석은 추적 해제 후에도 보존한다.
++                        conn.execute("DELETE FROM pr_sources WHERE source='repository' AND pr_id IN "
++                                     '(SELECT p.id FROM pull_requests p JOIN repositories r ON r.id=p.repo_id '
++                                     'WHERE r.owner=? AND r.name=?)', args.repository)
++                        conn.execute('DELETE FROM pull_requests WHERE repo_id IN '
++                                     '(SELECT id FROM repositories WHERE owner=? AND name=?) '
++                                     'AND NOT EXISTS (SELECT 1 FROM pr_sources WHERE pr_id=pull_requests.id)',
++                                     args.repository)
++                        print('저장소 추적을 해제했습니다.')
++                elif args.org is not None:
++                    if not re.fullmatch(OWNER_PATTERN, args.org):
++                        raise ValueError('잘못된 조직 이름입니다')
++                    if args.action == 'reset':
++                        conn.execute('DELETE FROM organization_policies WHERE owner=?', (args.org,))
++                    else:
++                        conn.execute('INSERT INTO organization_policies VALUES(?,?) '
++                                     'ON CONFLICT(owner) DO UPDATE SET policy=excluded.policy', (args.org, args.action))
++                    print('조직 분석 정책을 변경했습니다.')
++                else:
++                    policy = 'inherit' if args.action == 'reset' else args.action
++                    result = conn.execute('UPDATE repositories SET analysis_policy=? WHERE owner=? AND name=?',
++                                          (policy, *args.repository))
++                    if not result.rowcount:
++                        raise ValueError('등록되지 않은 저장소입니다')
++                    print('저장소 분석 정책을 변경했습니다.')
++        finally:
++            conn.close()
++    except (OSError, ValueError, sqlite3.Error) as exc:
++        print(f'오류: {exc}', file=sys.stderr)
++        return 1
++    return 0
+diff --git a/lib/skim/config.py b/lib/skim/config.py
+new file mode 100644
+index 0000000..24d637b
+--- /dev/null
++++ b/lib/skim/config.py
+@@ -0,0 +1,60 @@
++"""사용자 전용 경로와 JSON 설정."""
++import json
++import os
++from dataclasses import dataclass
++from pathlib import Path
++
++
++def private_dir(path):
++    path.mkdir(parents=True, exist_ok=True, mode=0o700)
++    path.chmod(0o700)
++    return path
++
++
++def private_file(path):
++    # 생성 시점부터 다른 사용자에게 공개하지 않는다.
++    fd = os.open(path, os.O_CREAT | os.O_WRONLY, 0o600)
++    os.close(fd)
++    path.chmod(0o600)
++
++
++@dataclass(frozen=True)
++class Config:
++    config_dir: Path
++    data_dir: Path
++    poll_interval_seconds: int = 300
++    retention_days: int = 30
++
++    @classmethod
++    def load(cls):
++        home = os.environ.get("SKIM_HOME")
++        if home:
++            root = Path(home).expanduser().resolve()
++            config_dir, data_dir = root / "config", root / "data"
++        else:
++            config_dir = Path.home() / ".config/skim"
++            data_dir = Path.home() / ".local/share/skim"
++        private_dir(config_dir)
++        private_dir(data_dir)
++        path = config_dir / "config.json"
++        if not path.exists():
++            private_file(path)
++            path.write_text(json.dumps({"poll_interval_seconds": 300,
++                                        "retention_days": 30}, indent=2) + "\n")
++        private_file(path)
++        settings = json.loads(path.read_text())
++        if not isinstance(settings, dict):
++            raise ValueError("설정은 JSON 객체여야 합니다")
++        values = {}
++        for name, default in (("poll_interval_seconds", 300), ("retention_days", 30)):
++            value = settings.get(name, default)
++            if type(value) is not int or value <= 0:
++                raise ValueError(f"{name} 설정은 양의 정수여야 합니다")
++            values[name] = value
++        for name in ("cache", "logs"):
++            private_dir(data_dir / name)
++        return cls(config_dir, data_dir, **values)
++
++    @property
++    def db_path(self):
++        return self.data_dir / "skim.db"
+diff --git a/lib/skim/db.py b/lib/skim/db.py
+new file mode 100644
+index 0000000..c82dff2
+--- /dev/null
++++ b/lib/skim/db.py
+@@ -0,0 +1,107 @@
++"""SQLite 스키마와 트랜잭션 마이그레이션."""
++import sqlite3
++from contextlib import closing
++from datetime import datetime, timezone
++from .config import private_file
++
++SCHEMA = """
++CREATE TABLE repositories (
++ id INTEGER PRIMARY KEY, owner TEXT NOT NULL COLLATE NOCASE,
++ name TEXT NOT NULL COLLATE NOCASE, source TEXT NOT NULL DEFAULT 'responsible'
++ CHECK(source IN ('owned','managed','responsible')),
++ tracked INTEGER NOT NULL DEFAULT 0 CHECK(tracked IN (0,1)),
++ enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
++ analysis_policy TEXT NOT NULL DEFAULT 'inherit' CHECK(analysis_policy IN ('inherit','allow','deny')),
++ last_synced_at TEXT, UNIQUE(owner,name));
++CREATE TABLE organization_policies (
++ owner TEXT PRIMARY KEY COLLATE NOCASE, policy TEXT NOT NULL CHECK(policy IN ('allow','deny')));
++CREATE TABLE pull_requests (
++ id INTEGER PRIMARY KEY, repo_id INTEGER NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
++ number INTEGER NOT NULL CHECK(number > 0), url TEXT, title TEXT, body TEXT, author TEXT,
++ state TEXT NOT NULL DEFAULT 'open' CHECK(state IN ('open','closed','merged')),
++ draft INTEGER NOT NULL DEFAULT 0 CHECK(draft IN (0,1)), head_branch TEXT,
++ base_sha TEXT, head_sha TEXT, updated_at TEXT, last_seen_at TEXT, UNIQUE(repo_id,number));
++CREATE TABLE pr_sources (
++ pr_id INTEGER NOT NULL REFERENCES pull_requests(id) ON DELETE CASCADE,
++ source TEXT NOT NULL CHECK(source IN ('repository','review_request')), PRIMARY KEY(pr_id,source));
++CREATE TABLE snapshots (
++ id INTEGER PRIMARY KEY, pr_id INTEGER NOT NULL REFERENCES pull_requests(id) ON DELETE CASCADE,
++ base_sha TEXT NOT NULL, head_sha TEXT NOT NULL, diff_hash TEXT NOT NULL, input_hash TEXT NOT NULL,
++ diff_path TEXT, coverage TEXT NOT NULL DEFAULT '{}', collected_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
++CREATE TABLE changes (
++ id INTEGER PRIMARY KEY, snapshot_id INTEGER NOT NULL REFERENCES snapshots(id) ON DELETE CASCADE,
++ file_path TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('file','hunk','synthetic')),
++ parent_id INTEGER REFERENCES changes(id) ON DELETE CASCADE, old_range TEXT, new_range TEXT,
++ binary INTEGER NOT NULL DEFAULT 0, generated INTEGER NOT NULL DEFAULT 0);
++CREATE TABLE analyses (
++ id INTEGER PRIMARY KEY, snapshot_id INTEGER NOT NULL REFERENCES snapshots(id) ON DELETE CASCADE,
++ input_hash TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, cli_version TEXT NOT NULL,
++ prompt_version TEXT NOT NULL, schema_version TEXT NOT NULL, status TEXT NOT NULL,
++ intent TEXT, output_json TEXT, error TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
++CREATE TABLE analysis_items (
++ analysis_id INTEGER NOT NULL REFERENCES analyses(id) ON DELETE CASCADE,
++ change_id INTEGER NOT NULL REFERENCES changes(id) ON DELETE CASCADE,
++ importance TEXT NOT NULL CHECK(importance IN ('high','mid','low')), reason TEXT NOT NULL,
++ risk_flags TEXT NOT NULL DEFAULT '[]', PRIMARY KEY(analysis_id,change_id));
++CREATE TABLE jobs (
++ id INTEGER PRIMARY KEY, type TEXT NOT NULL CHECK(type IN ('collect','analyze')),
++ target_id INTEGER NOT NULL, input_hash TEXT NOT NULL DEFAULT '',
++ status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','running','completed','failed','cancelled')),
++ attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0),
++ next_run_at TEXT, last_error TEXT);
++CREATE UNIQUE INDEX jobs_active_dedupe ON jobs(type,target_id,input_hash)
++ WHERE status IN ('pending','running');
++"""
++MIGRATIONS = (SCHEMA,)
++
++
++def migrate(conn, path):
++    version = conn.execute("PRAGMA user_version").fetchone()[0]
++    if version > len(MIGRATIONS):
++        raise ValueError("지원하지 않는 새 DB 버전입니다")
++    if version == len(MIGRATIONS):
++        return
++    # 기존 DB는 변경 전에 SQLite 백업 API로 일관된 사본을 남긴다.
++    if path.stat().st_size:
++        stamp = datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')
++        backup_path = path.with_name(path.name + f'.v{version}.{stamp}.bak')
++        private_file(backup_path)
++        with closing(sqlite3.connect(backup_path)) as backup:
++            conn.backup(backup)
++    for index in range(version, len(MIGRATIONS)):
++        try:
++            conn.executescript('BEGIN IMMEDIATE;\n' + MIGRATIONS[index] +
++                               f'\nPRAGMA user_version = {index + 1};\nCOMMIT;')
++        except BaseException:
++            if conn.in_transaction:
++                conn.rollback()
++            raise
++
++
++def connect(config):
++    path = config.db_path
++    private_file(path)
++    conn = sqlite3.connect(path)
++    conn.row_factory = sqlite3.Row
++    try:
++        conn.execute('PRAGMA foreign_keys = ON')
++        migrate(conn, path)
++        conn.execute('PRAGMA journal_mode = WAL')
++        for suffix in ('-wal', '-shm'):
++            sidecar = path.with_name(path.name + suffix)
++            if sidecar.exists():
++                sidecar.chmod(0o600)
++        return conn
++    except BaseException:
++        conn.close()
++        raise
++
++
++def analysis_allowed(conn, repo):
++    row = conn.execute('SELECT owner, analysis_policy FROM repositories WHERE id=?', (repo,)).fetchone()
++    if row is None:
++        return False
++    if row['analysis_policy'] != 'inherit':
++        return row['analysis_policy'] == 'allow'
++    policy = conn.execute('SELECT policy FROM organization_policies WHERE owner=?', (row['owner'],)).fetchone()
++    return policy is not None and policy['policy'] == 'allow'
+diff --git a/progress.md b/progress.md
+new file mode 100644
+index 0000000..3076ec9
+--- /dev/null
++++ b/progress.md
+@@ -0,0 +1,12 @@
++## PR1 — 2026-10-31
++
++- Sessio 스타일의 심볼릭 링크 대응 bash 래퍼와 Python CLI 골격을 구현했다.
++- JSON 설정, SKIM_HOME 경로 격리, 0700/0600 권한, 전체 초기 SQLite 스키마·WAL·트랜잭션 마이그레이션·사전 백업을 추가했다.
++- 저장소 등록/목록/삭제 및 조직·저장소 분석 allow/deny/reset을 구현했다. 등록 기본값은 전송 불허이며 저장소 정책이 우선한다.
++- collect/analyze/web/doctor는 명시적 미구현 스텁이다. 외부 통신 없이 unittest 5개가 통과했다.
++
++## 리뷰 수정 — 2026-10-31
++
++- 초기 v1 스키마에 tracked를 추가해 리뷰 요청 저장소와 명시적 추적 목록을 분리했다. 추적 해제 시 repository 출처만 지우고 리뷰 요청 PR·스냅샷·분석 및 저장소 정책을 보존한다.
++- 백업 연결을 명시적으로 닫고 SKIM_HOME 자체의 권한 변경을 없앴다. 설정 양의 정수 검증·값 노출, owner 검증 통일, 허용 전 전송 안내와 정책 우선순위 문서를 보완했다.
++- 외부 통신 없이 unittest 8개가 통과했다. diff 캐시 파일 정리는 수집·캐시 구현 시 처리하도록 설계에 명시했다. 커밋하지 않았다.
+diff --git a/tests/test_scaffold.py b/tests/test_scaffold.py
+new file mode 100644
+index 0000000..b307bb5
+--- /dev/null
++++ b/tests/test_scaffold.py
+@@ -0,0 +1,162 @@
++"""외부 CLI와 네트워크 없이 초기 골격을 검증한다."""
++import contextlib
++import io
++import os
++from pathlib import Path
++import sqlite3
++import subprocess
++import sys
++import tempfile
++import unittest
++from unittest.mock import patch
++
++ROOT = Path(__file__).resolve().parents[1]
++sys.path.insert(0, str(ROOT / 'lib'))
++from skim.cli import main
++from skim.config import Config
++from skim.db import analysis_allowed, connect, migrate
++
++
++class ScaffoldTests(unittest.TestCase):
++    def setUp(self):
++        self.temp = tempfile.TemporaryDirectory()
++        self.addCleanup(self.temp.cleanup)
++        self.env = patch.dict(os.environ, {'SKIM_HOME': self.temp.name})
++        self.env.start()
++        self.addCleanup(self.env.stop)
++
++    def cli(self, *args):
++        out = io.StringIO()
++        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
++            code = main(args)
++        return code, out.getvalue()
++
++    def test_repository_and_policy_lifecycle(self):
++        self.assertEqual(self.cli('repo', 'add', 'Org/Repo', '--source', 'managed')[0], 0)
++        config = Config.load()
++        with contextlib.closing(connect(config)) as conn:
++            self.assertFalse(analysis_allowed(conn, 1))
++        self.assertEqual(self.cli('analysis', 'allow', '--org', 'org')[0], 0)
++        self.assertIn('inherit\t1', self.cli('repo', 'list')[1])
++        self.assertEqual(self.cli('analysis', 'deny', 'org/repo')[0], 0)
++        self.assertIn('deny\t0', self.cli('repo', 'list')[1])
++        self.cli('repo', 'add', 'ORG/REPO')
++        self.assertIn('deny\t0', self.cli('repo', 'list')[1])
++        self.cli('analysis', 'reset', 'Org/Repo')
++        self.assertIn('inherit\t1', self.cli('repo', 'list')[1])
++        self.cli('analysis', 'deny', '--org', 'org')
++        self.assertIn('inherit\t0', self.cli('repo', 'list')[1])
++        self.cli('analysis', 'allow', 'Org/Repo')
++        self.assertIn('allow\t1', self.cli('repo', 'list')[1])
++        self.assertEqual(self.cli('repo', 'remove', 'org/repo')[0], 0)
++        self.assertNotIn('Repo', self.cli('repo', 'list')[1])
++        self.assertEqual(self.cli('analysis', 'allow', 'org/missing')[0], 1)
++
++    def test_schema_constraints_and_permissions(self):
++        config = Config.load()
++        with contextlib.closing(connect(config)) as conn:
++            self.assertEqual(conn.execute('PRAGMA user_version').fetchone()[0], 1)
++            self.assertEqual(conn.execute('PRAGMA journal_mode').fetchone()[0], 'wal')
++            conn.execute("INSERT INTO jobs(type,target_id,input_hash) VALUES('analyze',1,'a')")
++            with self.assertRaises(sqlite3.IntegrityError):
++                conn.execute("INSERT INTO jobs(type,target_id,input_hash) VALUES('analyze',1,'a')")
++            conn.execute("UPDATE jobs SET status='completed'")
++            conn.execute("INSERT INTO jobs(type,target_id,input_hash) VALUES('analyze',1,'a')")
++            conn.commit()
++            with self.assertRaises(sqlite3.IntegrityError):
++                conn.execute('INSERT INTO pull_requests(repo_id,number) VALUES(999,1)')
++            for table, fields in {'pull_requests': {'head_branch','state'}, 'snapshots': {'input_hash'},
++                                  'analyses': {'input_hash'}, 'jobs': {'id'}}.items():
++                self.assertTrue(fields <= {r[1] for r in conn.execute(f'PRAGMA table_info({table})')})
++        for path in Path(self.temp.name).rglob('*'):
++            self.assertEqual(path.stat().st_mode & 0o777, 0o700 if path.is_dir() else 0o600)
++
++    def test_backup_and_rollback(self):
++        config = Config.load()
++        conn = sqlite3.connect(config.db_path)
++        self.addCleanup(conn.close)
++        conn.execute('CREATE TABLE existing(value TEXT)')
++        conn.commit()
++        with patch('skim.db.MIGRATIONS', ('CREATE TABLE partial(x); INVALID SQL;',)):
++            with self.assertRaises(sqlite3.Error):
++                migrate(conn, config.db_path)
++        self.assertEqual(conn.execute('PRAGMA user_version').fetchone()[0], 0)
++        self.assertIsNone(conn.execute("SELECT name FROM sqlite_master WHERE name='partial'").fetchone())
++        backup = next(config.data_dir.glob('*.bak'))
++        with contextlib.closing(sqlite3.connect(backup)) as saved:
++            self.assertIsNotNone(saved.execute("SELECT name FROM sqlite_master WHERE name='existing'").fetchone())
++
++    def test_wrapper_symlink_and_stubs(self):
++        link = Path(self.temp.name) / 'skim'
++        link.symlink_to(ROOT / 'bin/skim')
++        result = subprocess.run([str(link), 'repo', 'add', 'a/b'], capture_output=True, text=True, cwd='/tmp')
++        self.assertEqual(result.returncode, 0, result.stderr)
++        for command in ('collect', 'analyze', 'web', 'doctor'):
++            self.assertEqual(self.cli(command)[0], 2)
++
++    def test_review_request_survives_untracking(self):
++        config = Config.load()
++        with contextlib.closing(connect(config)) as conn, conn:
++            conn.execute("INSERT INTO repositories(owner,name) VALUES('org','outside')")
++            repo_id = conn.execute('SELECT id FROM repositories').fetchone()[0]
++            self.assertEqual(conn.execute('SELECT tracked FROM repositories').fetchone()[0], 0)
++            for number in (1, 2):
++                conn.execute('INSERT INTO pull_requests(repo_id,number) VALUES(?,?)', (repo_id, number))
++            conn.execute("INSERT INTO pr_sources VALUES(1,'review_request')")
++            conn.execute("INSERT INTO snapshots(pr_id,base_sha,head_sha,diff_hash,input_hash) "
++                         "VALUES(1,'a','b','d','i')")
++            conn.execute("INSERT INTO analyses(snapshot_id,input_hash,provider,model,cli_version,"
++                         "prompt_version,schema_version,status) VALUES(1,'i','fake','fake','1','1','1','completed')")
++        self.assertNotIn('outside', self.cli('repo', 'list')[1])
++        self.assertEqual(self.cli('analysis', 'allow', '--org', 'org')[0], 0)
++        with contextlib.closing(connect(config)) as conn:
++            self.assertTrue(analysis_allowed(conn, repo_id))
++        self.cli('repo', 'add', 'org/outside')
++        with contextlib.closing(connect(config)) as conn, conn:
++            conn.executemany("INSERT INTO pr_sources VALUES(?,'repository')", [(1,), (2,)])
++        self.assertIn('outside', self.cli('repo', 'list')[1])
++        self.assertEqual(self.cli('repo', 'remove', 'org/outside')[0], 0)
++        self.assertNotIn('outside', self.cli('repo', 'list')[1])
++        with contextlib.closing(connect(config)) as conn:
++            self.assertEqual([tuple(r) for r in conn.execute('SELECT pr_id,source FROM pr_sources')],
++                             [(1, 'review_request')])
++            self.assertEqual(conn.execute('SELECT count(*) FROM pull_requests').fetchone()[0], 1)
++            self.assertEqual(conn.execute('SELECT count(*) FROM snapshots').fetchone()[0], 1)
++            self.assertEqual(conn.execute('SELECT count(*) FROM analyses').fetchone()[0], 1)
++            self.assertTrue(analysis_allowed(conn, repo_id))
++        self.assertEqual(self.cli('repo', 'remove', 'org/outside')[0], 1)
++        self.cli('repo', 'add', 'ORG/OUTSIDE')
++        with contextlib.closing(connect(config)) as conn:
++            self.assertEqual(conn.execute('SELECT id FROM repositories').fetchone()[0], repo_id)
++
++    def test_settings_validation_and_shared_home_permissions(self):
++        root = Path(self.temp.name)
++        root.chmod(0o755)
++        config = Config.load()
++        self.assertEqual(root.stat().st_mode & 0o777, 0o755)
++        path = config.config_dir / 'config.json'
++        path.write_text('{"poll_interval_seconds": 60, "retention_days": 7}')
++        config = Config.load()
++        self.assertEqual((config.poll_interval_seconds, config.retention_days), (60, 7))
++        for name in ('poll_interval_seconds', 'retention_days'):
++            for value in ('true', '0', '-1', '1.5', '"30"', 'null'):
++                path.write_text('{"' + name + '":' + value + '}')
++                with self.assertRaises(ValueError):
++                    Config.load()
++
++    def test_policy_notice_and_owner_validation(self):
++        self.cli('repo', 'add', 'a/b')
++        code, output = self.cli('analysis', 'allow', 'a/b')
++        self.assertEqual(code, 0)
++        self.assertLess(output.index('전송될 수 있습니다'), output.index('정책을 변경'))
++        self.assertEqual(self.cli('analysis', 'allow', '--org', 'bad-')[0], 1)
++
++    def test_default_paths(self):
++        with patch.dict(os.environ, {}, clear=True), patch('pathlib.Path.home', return_value=Path(self.temp.name)):
++            config = Config.load()
++            self.assertEqual(config.config_dir, Path(self.temp.name) / '.config/skim')
++            self.assertEqual(config.data_dir, Path(self.temp.name) / '.local/share/skim')
++
++
++if __name__ == '__main__':
++    unittest.main()

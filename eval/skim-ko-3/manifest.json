@@ -1,0 +1,21 @@
+{"prompt_version":"skim-ko-3","confirmed_by":null,"confirmed_sha256":null,"designated_by":"개발국장 (sangwon 확인 전)","rule":"high = 보안·격리·자격 증명·외부 통신·데이터 저장 경계를 바꾸는 파일. 포착 = 해당 파일의 어떤 단위가 high이거나 규칙 후보가 붙음.",
+"cases":[
+{"id":"pr2","diff":"diffs/pr2.diff","high_files":["lib/skim/db.py","lib/skim/config.py"]},
+{"id":"pr5","diff":"diffs/pr5.diff","high_files":["lib/skim/collect.py"]},
+{"id":"pr6","diff":"diffs/pr6.diff","high_files":["lib/skim/analyze/codex.py","lib/skim/analyze/units.py"]},
+{"id":"pr7","diff":"diffs/pr7.diff","high_files":["lib/skim/collect.py"]},
+{"id":"pr8","diff":"diffs/pr8.diff","high_files":["lib/skim/web.py"]},
+{"id":"pr9","diff":"diffs/pr9.diff","high_files":["lib/skim/sessio.py"]},
+{"id":"pr10","diff":"diffs/pr10.diff","high_files":["setup.sh","lib/skim/setup.py"]},
+{"id":"pr11","diff":"diffs/pr11.diff","high_files":["lib/skim/analyze/codex.py"]},
+{"id":"pr12","diff":"diffs/pr12.diff","high_files":[]},
+{"id":"pr13","diff":"diffs/pr13.diff","high_files":["lib/skim/analyze/codex.py"]},
+{"id":"pr14","diff":"diffs/pr14.diff","high_files":["lib/skim/analyze/units.py"]},
+{"id":"pr15","diff":"diffs/pr15.diff","high_files":["lib/skim/analyze/codex.py"]},
+{"id":"pr16","diff":"diffs/pr16.diff","high_files":["lib/skim/analyze/codex.py"],"watch":{"file":"lib/skim/doctor.py","model_flag_absent":"config"}},
+{"id":"pr17","diff":"diffs/pr17.diff","high_files":["lib/skim/analyze/protocol.py"]},
+{"id":"pr18","diff":"diffs/pr18.diff","high_files":["lib/skim/analyze/units.py"]},
+{"id":"fx-injection","diff":"diffs/fx-injection.diff","high_files":["lib/app/auth.py"]},
+{"id":"fx-secret","diff":"diffs/fx-secret.diff","high_files":["lib/app/settings.py"],"expect_redacted":true},
+{"id":"fx-nohunk","diff":"diffs/fx-nohunk.diff","high_files":[],"expect_unanalysed_visible":true}
+]}
