@@ -69,11 +69,9 @@ class CodexTests(unittest.TestCase):
                 directory = kw['cwd'] if self.file_location == 'cwd' else kw['env']['HOME']
                 (Path(directory) / 'probe.txt').touch()
             Path(command[command.index('--output-last-message') + 1]).write_text(json.dumps(self.answer))
-            stdout = ''
             self.assertIn('--json', command)
-            if True:
-                events = self.events + [{'type': 'turn.completed'}]
-                stdout = '\n'.join(json.dumps(e) for e in events)
+            events = self.events + [{'type': 'turn.completed'}]
+            stdout = '\n'.join(json.dumps(e) for e in events)
             return subprocess.CompletedProcess(command, self.exitcode, stdout, '')
         return subprocess.CompletedProcess(command, 0, output, '')
 
