@@ -1,8 +1,6 @@
 """diff 단위, 민감 정보 제외와 독립적인 위험 후보 계산."""
 import fnmatch
 import ast
-import io
-import tokenize
 import re
 from functools import lru_cache
 from pathlib import PurePosixPath
@@ -105,27 +103,64 @@ COMMON_STEMS = {'__init__', 'index', 'main', 'config', 'utils', 'run', 'app', 'c
 def test_reference_patterns(stem):
     """여러 hunk에서 같은 모듈의 참조 정규식을 재사용한다."""
     name = re.escape(stem)
-    return re.compile(r'^\s*(?:from\s+[\w.]*\b' + name + r'\s+import\b|import\s+' + name + r'(?:\s|\.|$))'
-                       r'|(?<![\w\'\"])' + name + r'\.[A-Za-z_]')
+    imports = re.compile(
+        r'^\s*(?:from\s+[\w.]*\b' + name + r'\s+import\b'
+        r'|from\s+[\w.]+\s+import\s+\(?\s*(?:\w+\s*(?:as\s+\w+\s*)?,\s*)*'
+        + name + r'(?=\s*(?:as\b|[,)#]|$))'
+        r'|import\s+(?:[\w.]+\s*(?:as\s+\w+\s*)?,\s*)*'
+        + r'(?:\w+\.)*' + name + r'(?=\s|\.|,|$))')
+    test_name = re.compile(r'^\s*(?:async\s+)?def\s+test_(?:\w+_)?'
+                           + name + r'(?:_\w*)?\s*\(')
+    return imports, test_name
+
+
+def test_references(stem, lines):
+    imports, test_name = test_reference_patterns(stem)
+    return (any(imports.search(line) for line in lines)
+            or (len(stem) >= 4 and any(test_name.search(line) for line in lines)))
 
 
 def added_test_lines(text):
-    """테스트 diff의 헤더·문맥·삭제를 제외하고 추가 줄만 돌려준다."""
-    in_hunk = False
-    for line in text.splitlines():
-        if line.startswith('@@ '):
-            in_hunk = True
-        elif in_hunk and line.startswith('+'):
-            # 문자열·주석 속 예시를 실행 코드 참조로 오인하지 않는다.
-            tokens = []
-            try:
-                for token in tokenize.generate_tokens(io.StringIO(line[1:]).readline):
-                    if token.type in (tokenize.STRING, tokenize.COMMENT):
-                        token = token._replace(string=' ' * len(token.string))
-                    tokens.append(token)
-            except (tokenize.TokenError, IndentationError):
-                pass
-            yield tokenize.untokenize(tokens)
+    """새 쪽 문맥·추가 줄의 문자열과 주석을 가리고 추가 줄만 반환한다.
+
+    들여쓰기와 괄호는 해석하지 않는다. hunk가 여러 줄 문자열 중간에서
+    시작하면 문자열 내부인지 판별할 수 없다. 문자열 상태는 hunk마다 초기화한다.
+    """
+    for hunk in re.split(r'(?m)^@@ .*$', text)[1:]:
+        quote = None
+        for line in hunk.splitlines():
+            if not line.startswith((' ', '+')):
+                continue
+            source = line[1:]
+            masked = list(source)
+            index = 0
+            continued = False
+            while index < len(source):
+                if quote:
+                    if source[index] == '\\':
+                        end = min(index + 2, len(source))
+                        continued = end == index + 1
+                    elif source.startswith(quote, index):
+                        end = index + len(quote)
+                        quote = None
+                    else:
+                        end = index + 1
+                elif source[index] == '#':
+                    end = len(source)
+                elif source[index] in ('"', "'"):
+                    char = source[index]
+                    quote = char * (3 if source.startswith(char * 3, index) else 1)
+                    end = index + len(quote)
+                else:
+                    index += 1
+                    continue
+                masked[index:end] = ' ' * (end - index)
+                index = end
+            # Only escaped newlines can continue ordinary quoted strings.
+            if quote and len(quote) == 1 and not continued:
+                quote = None
+            if line.startswith('+'):
+                yield ''.join(masked)
 
 
 def candidates(path, text, tests, test_diffs=None, *, test_lines=None):
@@ -149,14 +184,12 @@ def candidates(path, text, tests, test_diffs=None, *, test_lines=None):
     flags = [flag for flag, matches in rules.items() if matches]
     if not is_test(path) and PurePosixPath(path).suffix in ('.py', '.js', '.ts', '.tsx', '.go', '.rs', '.java', '.rb', '.c', '.cpp'):
         stem = PurePosixPath(path).stem
-        code_reference = test_reference_patterns(stem)
         test_diffs = test_diffs if test_diffs is not None else {}
         if test_lines is None:
             test_lines = {t: tuple(added_test_lines(test_diffs.get(t, ''))) for t in tests}
         # 테스트 패키지 초기화 파일 자체는 대응 테스트의 근거가 아니다.
         if not any((PurePosixPath(t).stem != '__init__' and stem == re.sub(r'^(?:test_|spec_)|(?:[._](?:test|spec)|_test)$', '', PurePosixPath(t).stem))
-                   or (stem not in COMMON_STEMS and any(code_reference.search(line)
-                       for line in test_lines.get(t, ()))) for t in tests):
+                   or (stem.lower() not in COMMON_STEMS and test_references(stem, test_lines.get(t, ()))) for t in tests):
             flags.append('logic_without_tests')
     return flags
 

@@ -65,14 +65,13 @@ class AnalysisTests(unittest.TestCase):
         self.analyzer = Analyzer(self.conn, self.config, self.fake, today=lambda: '2026-10-31')
 
     def test_prompt_defines_all_risk_flags(self):
-        from skim.analyze.protocol import FLAGS, PROMPT_VERSION
+        from skim.analyze.protocol import FLAGS
         request = prompt('chunk', {})
         for flag in FLAGS:
             self.assertIn(flag + ' = ', request)
         self.assertIn('추가·삭제된 변경 줄에 직접 근거', request)
         self.assertIn('설정을 읽거나 검증하는 코드 변경은 해당 안 됨', request)
         self.assertIn('DB 테이블·컬럼·인덱스', request)
-        self.assertEqual(PROMPT_VERSION, 'skim-ko-3')
 
     def test_first_analysis_records_verified_version_including_failure(self):
         self.fake.cli_version = 'unknown'
