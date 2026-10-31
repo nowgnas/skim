@@ -1,4 +1,5 @@
 """전용 인증 링크와 실증 검사로 검증하는 Codex CLI 격리 경계."""
+import hashlib
 import json
 import os
 import re
@@ -40,6 +41,7 @@ class CodexAdapter:
         self.home = self.data_dir / 'codex-home'
         self.model = model or 'unknown'
         self.disabled = []
+        self.unknown_enabled = []
 
     def init_home(self, reset=False):
         """자격 증명 내용은 열지 않고 사용자가 지정한 홈의 링크만 만든다."""
@@ -52,8 +54,12 @@ class CodexAdapter:
         if not self.home.exists() and not self.home.is_symlink():
             self.home.mkdir(mode=0o700)
         info = self.home.lstat()
-        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
-            raise IsolationError('codex-home 소유자·0700 권한을 확인하세요.')
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+            raise IsolationError('codex-home은 본인 소유 디렉터리여야 합니다. 경로를 직접 확인하세요.')
+        if reset:
+            self.home.chmod(0o700)
+        elif stat.S_IMODE(info.st_mode) != 0o700:
+            raise IsolationError('skim codex-home init --reset으로 0700 권한을 복구하세요.')
         if reset:
             # 링크 대상은 따라가지 않고 전용 홈 내부 항목만 제거한다.
             for entry in self.home.iterdir():
@@ -85,7 +91,7 @@ class CodexAdapter:
                     or target not in sources or target == link or not link.is_file()):
                 raise ValueError()
         except (OSError, ValueError, RuntimeError):
-            raise IsolationError('Codex 분석 차단: skim codex-home init --reset 및 전용 홈(auth.json 링크만, 0700)을 확인하세요.') from None
+            raise IsolationError('Codex 분석 차단: skim codex-home init --reset 및 전용 홈(auth.json 링크만, 0700)을 확인하세요. 초기화 때와 같은 CODEX_HOME 환경이 필요하며 링크·일반 파일·타인 소유 홈은 직접 확인하세요.') from None
 
     def _inspect(self, args):
         with tempfile.TemporaryDirectory(prefix='skim-check-') as work, tempfile.TemporaryDirectory(prefix='skim-check-home-') as home:
@@ -114,6 +120,7 @@ class CodexAdapter:
             raise IsolationError('Codex 분석 차단: 필수 격리 플래그 누락')
         features = self._inspect(['features', 'list'])
         names = set()
+        enabled = set()
         for line in features.splitlines():
             fields = line.split()
             if not fields:
@@ -122,15 +129,19 @@ class CodexAdapter:
                     or fields[-1] not in ('true', 'false') or fields[0] in names):
                 raise IsolationError('Codex 분석 차단: 기능 목록 형식 오류')
             names.add(fields[0])
+            if fields[-1] == 'true':
+                enabled.add(fields[0])
         if not names or not names.intersection(RISKY_FEATURES):
             raise IsolationError('Codex 분석 차단: 알려진 핵심 기능이 없는 기능 목록')
         self.disabled = sorted(names.intersection(RISKY_FEATURES))
+        self.unknown_enabled = sorted(enabled - RISKY_FEATURES)
         if not re.search(r'--disable(?![\w-])', help_text):
             raise IsolationError('Codex 분석 차단: 기능 비활성화 플래그 누락')
 
     @property
     def probe_path(self):
-        return self.data_dir / f'codex-probe-{self.cli_version}.json'
+        model_key = hashlib.sha256(self.model.encode()).hexdigest()
+        return self.data_dir / f'codex-probe-{self.cli_version}-{model_key}.json'
 
     def check_probe(self):
         try:
@@ -189,14 +200,22 @@ class CodexAdapter:
             try:
                 result = self.runner(command, input=prompt, text=True, capture_output=True,
                                      timeout=120, cwd=work, env=self._env(home, runtime))
-                if result.returncode or (probe and (any(Path(work).iterdir()) or any(Path(home).iterdir()))):
-                    raise IsolationError('Codex 실행 또는 격리 probe 실패')
+                if probe and (any(Path(work).iterdir()) or any(Path(home).iterdir())):
+                    raise IsolationError('Codex 격리 probe 파일 생성 감지')
+                if result.returncode:
+                    raise ValueError('Codex 실행 실패')
                 return output.read_text()
-            except (OSError, subprocess.TimeoutExpired):
-                raise IsolationError('Codex 실행 실패 또는 출력 누락') from None
+            except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
+                if probe:
+                    raise IsolationError('Codex 실행 또는 격리 probe 실패') from None
+                if isinstance(exc, IsolationError):
+                    raise
+                raise ValueError('Codex 실행 실패 또는 출력 누락') from None
 
     def generate(self, prompt, schema):
         self.verify()
-        result = self._execute(prompt, schema)
-        self.check_home()
-        return result
+        try:
+            return self._execute(prompt, schema)
+        finally:
+            # 실행 실패도 홈 오염 검사를 건너뛰지 않는다.
+            self.check_home()

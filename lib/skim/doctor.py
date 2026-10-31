@@ -39,10 +39,12 @@ def run(config, runner=None, which=None, adapter=None, probe=False):
         try:
             method()
             report(True, label, '격리 검사 통과')
+            if label == 'flags' and getattr(adapter, 'unknown_enabled', []):
+                print('경고: 차단 목록 밖의 활성 Codex 기능: ' + ', '.join(adapter.unknown_enabled))
         except (IsolationError, OSError, ValueError, subprocess.TimeoutExpired):
             ready = False
             details = {
-                'codex-home': 'skim codex-home init --reset으로 인증 링크·0700 전용 홈을 복구하세요.',
+                'codex-home': '초기화 때와 같은 CODEX_HOME 환경인지 확인하세요. 본인 소유 디렉터리는 skim codex-home init --reset으로 복구하세요. 링크·일반 파일·타인 소유 경로는 직접 확인해야 합니다.',
                 'version': 'Codex 안정 버전 0.165.0 이상과 버전 출력 형식을 확인하세요.',
                 'flags': 'exec --help의 필수 격리 플래그와 features list 형식을 확인하세요.',
                 'probe': 'skim doctor --probe로 격리를 재검증하세요. 도구 실행·지침·파일 생성 시 차단됩니다.',

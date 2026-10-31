@@ -159,6 +159,7 @@ class CodexTests(unittest.TestCase):
             self.assertEqual(run(config, self.runner, lambda _: '/fake', self.adapter, probe=True), 0)
         for label in ('codex-home', 'version', 'flags', 'probe'):
             self.assertIn('정상: ' + label, out.getvalue())
+        self.assertIn('경고: 차단 목록 밖의 활성 Codex 기능: other', out.getvalue())
         self.answer = {'intent': '변경 요약'}
         self.assertEqual(json.loads(self.adapter.generate('정제된 자료', {})), self.answer)
         execs = [kw for c, kw in self.calls if '--output-last-message' in c]
@@ -217,6 +218,91 @@ class CodexTests(unittest.TestCase):
         self.adapter.model = 'different'
         with self.assertRaises(IsolationError):
             self.adapter.check_probe()
+
+    def test_reset_repairs_permissions_and_invalidates_probe(self):
+        self.adapter.probe()
+        cache = self.adapter.probe_path
+        self.adapter.home.chmod(0o755)
+        with self.assertRaises(IsolationError):
+            self.adapter.init_home()
+        self.adapter.init_home(reset=True)
+        self.adapter.check_home()
+        self.assertFalse(cache.exists())
+
+    def test_reset_rejects_file_or_symlink_without_touching_target(self):
+        (self.adapter.home / 'auth.json').unlink()
+        self.adapter.home.rmdir()
+        self.adapter.home.write_text('보존')
+        with self.assertRaises(IsolationError):
+            self.adapter.init_home(reset=True)
+        self.assertEqual(self.adapter.home.read_text(), '보존')
+        self.adapter.home.unlink()
+        self.adapter.home.symlink_to(self.source, target_is_directory=True)
+        with self.assertRaises(IsolationError):
+            self.adapter.init_home(reset=True)
+        self.assertEqual((self.source / 'auth.json').read_text(), 'credential-never-read')
+
+    def test_analysis_execution_failures_retry_once_and_exhaust(self):
+        from skim.analyze import Analyzer
+        from skim.analyze.protocol import SYNTHESIS_SCHEMA
+        self.adapter.probe()
+        original = self.adapter.runner
+        for failure in ('exit', 'timeout', 'missing'):
+            for recover in (True, False):
+                with self.subTest(failure=failure, recover=recover):
+                    attempts = []
+
+                    def runner(command, **kw):
+                        if '--output-last-message' not in command:
+                            return original(command, **kw)
+                        attempts.append(command)
+                        if recover and len(attempts) == 2:
+                            self.answer = {'intent': '요약'}
+                            return original(command, **kw)
+                        if failure == 'timeout':
+                            raise subprocess.TimeoutExpired(command, 120)
+                        return subprocess.CompletedProcess(command, 1 if failure == 'exit' else 0, '', '')
+
+                    self.adapter.runner = runner
+                    analyzer = Analyzer(None, None, adapter=self.adapter)
+                    with patch.object(analyzer, '_reserve') as reserve:
+                        if recover:
+                            self.assertEqual(analyzer._call('synthesis', {}, SYNTHESIS_SCHEMA), {'intent': '요약'})
+                        else:
+                            with self.assertRaises(ValueError) as caught:
+                                analyzer._call('synthesis', {}, SYNTHESIS_SCHEMA)
+                            self.assertNotIsInstance(caught.exception, IsolationError)
+                        self.assertEqual(reserve.call_count, 2)
+                    self.assertEqual(len(attempts), 2)
+
+    def test_failed_execution_home_contamination_blocks_without_retry(self):
+        from skim.analyze import Analyzer
+        from skim.analyze.protocol import SYNTHESIS_SCHEMA
+        self.adapter.probe()
+        original = self.adapter.runner
+
+        def runner(command, **kw):
+            if '--output-last-message' in command:
+                (self.adapter.home / 'config.toml').touch()
+                raise subprocess.TimeoutExpired(command, 120)
+            return original(command, **kw)
+
+        self.adapter.runner = runner
+        analyzer = Analyzer(None, None, adapter=self.adapter)
+        with patch.object(analyzer, '_reserve') as reserve:
+            with self.assertRaises(IsolationError):
+                analyzer._call('synthesis', {}, SYNTHESIS_SCHEMA)
+            self.assertEqual(reserve.call_count, 1)
+
+    def test_probe_records_are_separate_per_model(self):
+        self.adapter.probe()
+        first = self.adapter.probe_path
+        self.adapter.model = 'another/model'
+        self.adapter.probe()
+        self.assertNotEqual(first, self.adapter.probe_path)
+        self.assertTrue(first.exists())
+        self.adapter.model = 'unknown'
+        self.adapter.check_probe()
 
     def test_cli_init(self):
         with contextlib.redirect_stdout(io.StringIO()):

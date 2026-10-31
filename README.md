@@ -178,3 +178,5 @@ Host·Origin·CSRF 검증, CSP, 콘텐츠 이스케이프를 적용합니다.
 외부 통신 없는 화면 확인은 별도 SKIM_HOME에서 scripts/demo_seed.py 실행 후
 bin/skim web --offline으로 할 수 있습니다.
 테스트: python3 -m unittest discover -s tests (실제 LLM·외부 네트워크 사용 없음).
+
+인증 refresh token이 교체되면 임시 홈의 갱신 결과가 삭제되어 원본 Codex CLI 로그인도 무효화될 수 있습니다. 이 경우 원본 CLI에서 다시 로그인하세요.
