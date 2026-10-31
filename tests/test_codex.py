@@ -70,7 +70,8 @@ class CodexTests(unittest.TestCase):
                 (Path(directory) / 'probe.txt').touch()
             Path(command[command.index('--output-last-message') + 1]).write_text(json.dumps(self.answer))
             stdout = ''
-            if '--json' in command:
+            self.assertIn('--json', command)
+            if True:
                 events = self.events + [{'type': 'turn.completed'}]
                 stdout = '\n'.join(json.dumps(e) for e in events)
             return subprocess.CompletedProcess(command, self.exitcode, stdout, '')

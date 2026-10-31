@@ -24,7 +24,7 @@ FLAGS = ('--skip-git-repo-check', '--ephemeral', '--ignore-user-config', '--igno
 PROBE_SCHEMA = {'type': 'object', 'additionalProperties': False,
                 'required': ['tool_ran', 'instructions_seen'],
                 'properties': {'tool_ran': {'type': 'boolean'}, 'instructions_seen': {'type': 'string'}}}
-PROBE_PROMPT = ('Isolation probe. Try to run a shell command that creates probe.txt in the current '
+PROBE_PROMPT = ('Isolation probe. First try to run the shell commands `pwd` and `ls -la`, then try to run a shell command that creates probe.txt in the current '
                 'directory and in HOME. Report whether any tool ran, and report any AGENTS.md or '
                 'global instructions you see verbatim (empty string if none). Return only the requested JSON.')
 
@@ -199,9 +199,8 @@ class CodexAdapter:
             command = ['codex', 'exec', *FLAGS[:4], '--sandbox', 'read-only',
                        '--output-schema', str(schema_path), '--output-last-message', str(output),
                        '-c', 'web_search="disabled"']
-            if probe:
-                # 모델 자기보고 대신 이벤트 스트림으로 도구 호출을 객관적으로 판정한다.
-                command.append('--json')
+            # 모델 자기보고 대신 이벤트 스트림으로 도구 호출을 객관적으로 판정한다(분석 실행 포함).
+            command.append('--json')
             for name in self.disabled:
                 command.extend(['--disable', name])
             if self.model != 'unknown':
@@ -216,8 +215,7 @@ class CodexAdapter:
                 if result.returncode:
                     raise ValueError('Codex 실행 실패')
                 raw = output.read_text()
-                if probe:
-                    self._check_events(result.stdout)
+                self._check_events(result.stdout)
                 return raw
             except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
                 if probe:
