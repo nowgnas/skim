@@ -91,7 +91,7 @@ class ScaffoldTests(unittest.TestCase):
         link.symlink_to(ROOT / 'bin/skim')
         result = subprocess.run([str(link), 'repo', 'add', 'a/b'], capture_output=True, text=True, cwd='/tmp')
         self.assertEqual(result.returncode, 0, result.stderr)
-        for command in ('collect', 'analyze', 'web', 'doctor'):
+        for command in ('analyze', 'web', 'doctor'):
             self.assertEqual(self.cli(command)[0], 2)
 
     def test_review_request_survives_untracking(self):
