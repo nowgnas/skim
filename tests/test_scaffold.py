@@ -55,7 +55,7 @@ class ScaffoldTests(unittest.TestCase):
     def test_schema_constraints_and_permissions(self):
         config = Config.load()
         with contextlib.closing(connect(config)) as conn:
-            self.assertEqual(conn.execute('PRAGMA user_version').fetchone()[0], 3)
+            self.assertEqual(conn.execute('PRAGMA user_version').fetchone()[0], 4)
             self.assertEqual(conn.execute('PRAGMA journal_mode').fetchone()[0], 'wal')
             conn.execute("INSERT INTO jobs(type,target_id,input_hash) VALUES('analyze',1,'a')")
             with self.assertRaises(sqlite3.IntegrityError):

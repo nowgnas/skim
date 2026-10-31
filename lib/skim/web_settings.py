@@ -1,5 +1,4 @@
 """한국어 설정 화면과 읽기 전용 저장소 조회 워커."""
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 import json
 import os
@@ -8,84 +7,68 @@ import tempfile
 import threading
 import time
 
-from .collect import Collector, GitHub, error_message
+from .collect import Collector, GitHub
 from .config import Config, valid_model
 from .db import connect, analysis_allowed
+from . import jobs
+from .web_jobs import JOB_PATHS, job_box, script
 from .repos import web_repository, add_repository, remove_repository
 
-POST_PATHS = {'/repos/add', '/repos/remove', '/repos/load', '/settings/analysis', '/settings/model'}
+POST_PATHS = {'/repos/add', '/repos/remove', '/repos/load', '/settings/analysis', '/settings/model'} | JOB_PATHS
 WARNING = ('허용하면 PR 코드·diff와 제목·설명이 Codex CLI를 통해 모델 서비스로 전송됩니다. '
            '민감 정보 제외는 완전하지 않으며 서비스의 전송·보존 정책이 적용됩니다.')
 
 
 class RepoLookup:
-    """조회 작업 하나만 허용하며 결과는 60초 동안 재사용한다."""
-    def __init__(self, config):
-        self.config = config
+    """조회는 공통 작업 큐의 단일 워커가 실행하고 목록 결과는 메모리에 60초 동안 재사용한다."""
+    def __init__(self, config, clock=time.monotonic):
+        self.config, self.clock = config, clock
         self.lock = threading.Lock()
-        self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='skim-repos')
-        self.future = None
         self.items = []
         self.expires = 0
-        self.message = ''
         self.gh = GitHub()
 
     def snapshot(self):
         with self.lock:
-            return list(self.items), self.message
+            return list(self.items)
 
-    def submit(self, parts=None, source=None):
+    def fresh(self):
         with self.lock:
-            if self.future and not self.future.done():
-                self.message = '이미 저장소 조회 작업이 진행 중입니다. 완료 후 다시 요청하세요.'
-                return
-            if parts is None and time.monotonic() < self.expires:
-                return
-            self.message = '저장소 조회 중입니다. 잠시 후 이 페이지를 다시 여세요.'
-            self.future = self.pool.submit(self.run, parts, source)
+            return self.clock() < self.expires
 
     def run(self, parts, source):
-        try:
-            if parts:
-                payload = self.gh.get('repos/' + '/'.join(parts))
-                actual = web_repository(payload['full_name'])
-                if tuple(p.lower() for p in actual) != tuple(p.lower() for p in parts):
-                    raise ValueError('저장소 주소가 변경되었습니다. 실제 주소를 입력하세요')
-                with closing(connect(self.config)) as conn, Collector(conn, self.config).lock(), conn:
-                    add_repository(conn, actual, source)
-                message = '저장소를 등록했습니다. 분석은 별도 허용이 필요합니다.'
-            else:
-                user = self.gh.get('user')
-                if not isinstance(user, dict) or not isinstance(user.get('login'), str):
-                    raise ValueError('사용자 응답 형식 오류')
-                items = set()
-                truncated = False
-                for page in range(1, 11):
-                    batch = self.gh.get('user/repos?affiliation=owner,organization_member,collaborator&per_page=100&page=' + str(page))
-                    if not isinstance(batch, list):
-                        raise ValueError('저장소 응답 형식 오류')
-                    for row in batch:
-                        try:
-                            items.add('/'.join(web_repository(row['full_name'])))
-                        except (ValueError, KeyError, TypeError):
-                            continue
-                    if len(batch) < 100:
-                        break
-                else:
-                    truncated = True
-                with self.lock:
-                    self.items = sorted(items, key=str.lower)
-                    self.expires = time.monotonic() + 60
-                message = ('최대 1,000개까지만 표시합니다. 직접 입력도 사용할 수 있습니다.' if truncated else
-                           '접근 가능한 저장소 조회 완료. 선택한 저장소만 등록합니다.')
-            with self.lock:
-                self.message = message
-        except Exception as exc:
-            with self.lock:
-                self.message = '저장소 조회 실패: ' + error_message(exc)
-
-    def close(self):
-        self.pool.shutdown(wait=False, cancel_futures=True)
+        """워커 전용. 성공 메시지를 반환하고 실패는 예외로 알린다(이전 목록은 보존)."""
+        if parts:
+            payload = self.gh.get('repos/' + '/'.join(parts))
+            actual = web_repository(payload['full_name'])
+            if tuple(p.lower() for p in actual) != tuple(p.lower() for p in parts):
+                raise ValueError('저장소 주소가 변경되었습니다. 실제 주소를 입력하세요')
+            with closing(connect(self.config)) as conn, Collector(conn, self.config).lock(), conn:
+                add_repository(conn, actual, source)
+            return '저장소를 등록했습니다. 분석은 별도 허용이 필요합니다.'
+        user = self.gh.get('user')
+        if not isinstance(user, dict) or not isinstance(user.get('login'), str):
+            raise ValueError('사용자 응답 형식 오류')
+        items = set()
+        truncated = False
+        for page in range(1, 11):
+            batch = self.gh.get('user/repos?affiliation=owner,organization_member,collaborator&per_page=100&page=' + str(page))
+            if not isinstance(batch, list):
+                raise ValueError('저장소 응답 형식 오류')
+            for row in batch:
+                try:
+                    items.add('/'.join(web_repository(row['full_name'])))
+                except (ValueError, KeyError, TypeError):
+                    continue
+            if len(batch) < 100:
+                break
+        else:
+            truncated = True
+        with self.lock:
+            self.items = sorted(items, key=str.lower)
+            self.expires = self.clock() + 60
+        return ('최대 1,000개까지만 표시합니다. 직접 입력도 사용할 수 있습니다.' if truncated else
+                '접근 가능한 저장소 조회 완료. 선택한 저장소만 등록합니다.')
 
 
 def form(action, csrf, content):
@@ -118,10 +101,13 @@ def render(server, conn, csrf, path):
         body += '<h2>직접 연결</h2>' + form('/repos/add', csrf, '<label>owner/repo<input name="repository" required maxlength="140"></label>' + source_field() + '<button>저장소 연결</button>')
         body += form('/repos/load', csrf, '<button>접근 가능한 저장소 불러오기</button>')
         lookup = getattr(server, 'repo_lookup', None)
-        items, message = lookup.snapshot() if lookup else ([], '')
-        body += '<p>' + esc(message) + '</p>'
+        items = lookup.snapshot() if lookup else []
         if getattr(server, 'offline', False):
             body += '<p>오프라인 모드에서는 GitHub 저장소를 불러오거나 접근을 확인하지 않습니다.</p>'
+        running = jobs.active(conn, 'repos')
+        if running is not None:
+            body += '<p>이미 저장소 조회 작업이 진행 중입니다. 완료 후 다시 요청하세요. 진행 중 요청은 새 작업을 만들지 않습니다.</p>'
+        body += job_box(jobs.latest(conn, 'repos')) + script()
         for name in items:
             body += '<article>' + esc(name) + form('/repos/add', csrf, f'<input type="hidden" name="repository" value="{esc(name)}">' + source_field() + '<button>선택하여 연결</button>') + '</article>'
         return body
@@ -161,7 +147,11 @@ def mutate(server, path, data):
                 raise ValueError('잘못된 저장소 출처입니다')
         if getattr(server, 'offline', False):
             return '/repos'
-        server.repo_lookup.submit(parts, d.get('source'))
+        if parts is None and server.repo_lookup.fresh():
+            return '/repos'
+        params = dict(repository='/'.join(parts), source=d['source']) if parts else {}
+        with closing(connect(server.config)) as conn:
+            jobs.enqueue(conn, 'repos', 0, params.get('repository', '접근 가능한 저장소 목록'), params=params)
         return '/repos'
     if path == '/settings/model':
         d = fields(data, ('model',))

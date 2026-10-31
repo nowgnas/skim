@@ -19,7 +19,8 @@ from urllib.parse import parse_qs, urlsplit
 
 from .db import connect
 from .web_settings import POST_PATHS, RepoLookup, render, mutate
-from .collect import Collector, CollectionScheduler
+from . import web_jobs
+from .jobs import worker, get as get_job
 from .analyze.units import parse_diff
 from .sessio import session_link
 
@@ -42,7 +43,7 @@ def page(title, content):
             '<meta name="viewport" content="width=device-width,initial-scale=1">'
             f'<title>{esc(title)} · skim</title><link rel="stylesheet" href="/static/app.css">'
             '<header><a class="brand" href="/">skim</a><span>PR 검토 대시보드</span>'
-            '<a href="/repos">저장소</a><a href="/settings">분석 허용 · 모델 설정</a></header><main>' + content + '</main></html>')
+            '<a href="/repos">저장소</a><a href="/status">상태 · 작업</a><a href="/settings">분석 허용 · 모델 설정</a></header><main>' + content + '</main></html>')
 
 
 class Auth:
@@ -171,7 +172,7 @@ def listing(prs, query, csrf):
                     f'<h2><a href="/pr/{pr["id"]}">{esc(pr["title"])}</a></h2>'
                     f'<p>{esc(a["intent"] if a and a["intent"] else "의도 미분석")}</p><p>{badges(pr)}</p>'
                     f'<div class="muted">{esc(pr["status"])} · 수집 {esc(s["collected_at"] if s else "대기")} · 분석 {esc(a["created_at"] if a else "대기")}</div></article>')
-    return content + ('<p class="muted">열린 PR이 없습니다. <a href="/repos">저장소 연결</a>과 <a href="/settings">설정</a>을 확인하세요. 상태 점검: skim doctor</p>' if not prs else '')
+    return content + ('<p class="muted">열린 PR이 없습니다. <a href="/repos">저장소 연결</a>과 <a href="/status">상태 점검</a>, <a href="/settings">설정</a>을 확인하세요.</p>' if not prs else '')
 
 
 def github(pr):
@@ -276,7 +277,7 @@ class Handler(BaseHTTPRequestHandler):
         url = urlsplit(self.path)
         if url.query and 'token' in parse_qs(url.query):
             return self.reply(400, '토큰은 fragment로만 전달합니다')
-        if url.path in ('/static/app.css', '/static/entry.js'):
+        if url.path in ('/static/app.css', '/static/entry.js', '/static/jobs.js'):
             name = url.path.rsplit('/', 1)[1]
             return self.reply(200, (STATIC / name).read_bytes(), 'text/css' if name.endswith('css') else 'text/javascript')
         if url.path == '/entry':
@@ -286,19 +287,30 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(401, page('인증 필요', '<p>skim web으로 새 진입 URL을 발급받으세요.</p>'))
         if url.path in POST_PATHS or url.path in ('/refresh', '/session'):
             return self.reply(405, 'POST만 허용합니다', extra=[('Allow', 'POST')])
+        offline = getattr(self.server, 'offline', False)
+        job = re.fullmatch(r'/jobs/([1-9][0-9]{0,17})', url.path)
         with closing(connect(self.server.config)) as conn:
+            if job:
+                # 읽기 전용 폴링. 조회가 작업을 만들거나 실행하지 않는다.
+                row = get_job(conn, int(job[1]))
+                if row is None:
+                    return self.reply(404, '{}', 'application/json')
+                return self.reply(200, json.dumps(web_jobs.describe(row), ensure_ascii=False), 'application/json; charset=utf-8')
             if url.path in ('/settings', '/repos'):
                 body = render(self.server, conn, csrf, url.path)
+            elif url.path == '/status':
+                body = web_jobs.status_page(conn, csrf, offline)
             else:
                 prs = load_prs(conn, self.server.config)
                 if url.path == '/':
-                    body = listing(prs, parse_qs(url.query), csrf)
+                    body = web_jobs.collect_panel(conn, csrf, offline) + listing(prs, parse_qs(url.query), csrf) + web_jobs.script()
                 else:
                     match = re.fullmatch(r'/pr/([1-9][0-9]*)', url.path)
                     pr = next((p for p in prs if match and p['id'] == int(match[1])), None)
                     if pr is None:
                         return self.reply(404, 'PR이 없습니다')
-                    body = detail(pr, parse_qs(url.query), self.server.config, getattr(self.server, 'offline', False))
+                    body = (detail(pr, parse_qs(url.query), self.server.config, offline)
+                            + web_jobs.analysis_panel(conn, pr, csrf, offline) + web_jobs.script())
         self.reply(200, page('대시보드', body))
 
     def do_POST(self):
@@ -333,7 +345,13 @@ class Handler(BaseHTTPRequestHandler):
         if not self.server.auth.allow_post(csrf):
             return self.reply(429, '요청이 많습니다. 60초 후 다시 시도하세요', extra=[('Retry-After', '60')])
         try:
-            location = mutate(self.server, self.path, data)
+            if self.path in web_jobs.JOB_PATHS:
+                with closing(connect(self.server.config)) as conn:
+                    location = web_jobs.mutate(self.server, conn, self.path, data)
+            else:
+                location = mutate(self.server, self.path, data)
+        except web_jobs.Rejected as exc:
+            return self.reply(exc.status, page('요청 거부', f'<p>{esc(exc)}</p><p><a href="/status">상태 · 작업</a> · <a href="/">PR 목록</a></p>'))
         except (OSError, ValueError, sqlite3.Error):
             return self.reply(400, '입력과 설정을 확인하세요. 허용하려면 모델 서비스 전송 확인 체크가 필요합니다.')
         self.reply(303, extra=[('Location', location)])
@@ -358,24 +376,6 @@ class Server(ThreadingHTTPServer):
 
     def entry_url(self):
         return self.origin + '/entry#' + self.auth.issue()
-
-
-def worker(config, stop):
-    """SQLite 연결은 워커 스레드 전용이며 수집 중에도 HTTP 응답을 계속한다."""
-    from .analyze import Analyzer
-    with closing(connect(config)) as conn:
-        scheduler = CollectionScheduler(conn, config.poll_interval_seconds)
-        collector = Collector(conn, config)
-        while not stop.is_set():
-            try:
-                if scheduler.tick(collector):
-                    from dataclasses import replace
-                    settings = json.loads((config.config_dir / 'config.json').read_text())
-                    from .config import Config
-                    Analyzer(conn, replace(config, codex_model=Config.parse_codex_model(settings))).run()
-            except (OSError, ValueError, sqlite3.Error):
-                conn.rollback()
-            stop.wait(1)
 
 
 def open_entry(url):
@@ -436,7 +436,8 @@ def serve(config, port=0, open_browser=True, offline=False):
                             pass
             threads = [threading.Thread(target=issue_urls, daemon=True)]
             if not offline:
-                threads.append(threading.Thread(target=worker, args=(config, stop), daemon=True))
+                # 수집·분석·doctor·저장소 조회를 하나의 워커가 직렬 실행한다.
+                threads.append(threading.Thread(target=worker, args=(config, stop, server.repo_lookup), daemon=True))
             for thread in threads:
                 thread.start()
             url = server.entry_url()
@@ -449,7 +450,6 @@ def serve(config, port=0, open_browser=True, offline=False):
                 pass
             finally:
                 stop.set()
-                server.repo_lookup.close()
                 for thread in threads:
                     thread.join(timeout=2)
                 path.unlink(missing_ok=True)

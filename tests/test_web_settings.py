@@ -1,5 +1,4 @@
 """설정·저장소의 보안 경계는 가짜 HTTP와 GitHub 응답으로 검증한다."""
-from concurrent.futures import Future
 from contextlib import redirect_stdout
 from dataclasses import replace
 import io
@@ -17,6 +16,7 @@ from skim.cli import main
 from skim.collect import GitHub, Deferred
 from skim.db import connect, analysis_allowed
 from skim.web_settings import POST_PATHS, RepoLookup
+from skim.jobs import Runner
 from skim.repos import web_repository
 
 
@@ -26,14 +26,23 @@ class SettingsTests(unittest.TestCase):
     request = WebTests.request
     def setUp(self):
         self.setup_http()
-        self.server.repo_lookup = RepoLookup(self.config)
-        self.addCleanup(self.server.repo_lookup.close)
+        self.server.repo_lookup = RepoLookup(self.config, clock=lambda: self.now)
 
     def post(self, path, **data):
         return self.request(path, 'POST', {'csrf': self.csrf, **data})
 
+    def repo_jobs(self, status=None):
+        with closing(connect(self.config)) as conn:
+            query = "SELECT * FROM jobs WHERE type='repos'" + (' AND status=?' if status else '') + ' ORDER BY id'
+            return conn.execute(query, (status,) if status else ()).fetchall()
+
     def wait_lookup(self):
-        self.server.repo_lookup.future.result(timeout=3)
+        # 실제 워커 대신 같은 Runner를 동기 실행한다. 수집 tick은 가짜로 막는다.
+        with closing(connect(self.config)) as conn, closing(connect(self.config)) as state:
+            runner = Runner(self.config, conn, state, self.server.repo_lookup)
+            runner.scheduler = SimpleNamespace(tick=lambda collector: False, last_ok=False)
+            while runner.step():
+                pass
 
     def test_bare_cli_is_web_and_subcommands_preserved(self):
         with patch('skim.web.serve', return_value=0) as serve:
@@ -62,7 +71,6 @@ class SettingsTests(unittest.TestCase):
                     self.assertEqual(self.request(path, method, headers=[('Origin', self.server.origin)])[0], 405)
         with closing(connect(self.config)) as conn:
             self.assertEqual(conn.execute('SELECT count(*) FROM jobs').fetchone()[0], 0)
-        self.assertIsNone(self.server.repo_lookup.future)
 
     def test_header_csrf_and_duplicate_or_cross_session_rejection(self):
         data = {'model': 'gpt-test:1'}
@@ -93,7 +101,8 @@ class SettingsTests(unittest.TestCase):
             for form in parser.forms:
                 self.assertTrue(any(i.get('type') == 'hidden' and i.get('name') == 'csrf' and i.get('value') == self.csrf for i in form))
             self.assertIn('href="/repos"', body)
-        self.server.repo_lookup.message = '<script>bad</script>'
+        with closing(connect(self.config)) as conn, conn:
+            conn.execute("INSERT INTO jobs(type,target_id,status,last_error) VALUES('repos',0,'failed','<script>bad</script>')")
         self.assertIn('&lt;script&gt;', self.request('/repos')[2])
         self.assertNotIn('<script>bad', self.request('/repos')[2])
 
@@ -101,7 +110,7 @@ class SettingsTests(unittest.TestCase):
         for name in ['a/..', 'a/a..b', 'a/.', 'a/b/c', '-a/b', 'a/b?x', 'a/b;sh', 'a/b c', 'a'*40+'/b', 'a/'+'b'*101]:
             self.assertEqual(self.post('/repos/add', repository=name, source='responsible')[0], 400, name)
         self.assertEqual(self.post('/repos/add', repository='org/repo', source='evil')[0], 400)
-        self.assertIsNone(self.server.repo_lookup.future)
+        self.assertEqual(self.repo_jobs(), [])
         self.assertEqual(web_repository('a-/._name-'), ('a-', '._name-'))
         self.assertEqual(web_repository('A'*39+'/'+'x'*100), ('A'*39, 'x'*100))
 
@@ -149,7 +158,9 @@ class SettingsTests(unittest.TestCase):
             self.wait_lookup()
             self.assertEqual(lookup.items, ['me/owned', 'org/collaborator'])
             self.post('/repos/load')
+            self.wait_lookup()
             self.assertEqual(gh.call_count, 2)
+            self.assertEqual(len(self.repo_jobs()), 1)
         body = self.request('/repos')[2]
         self.assertIn('org/collaborator', body)
         with closing(connect(self.config)) as conn:
@@ -161,19 +172,21 @@ class SettingsTests(unittest.TestCase):
             self.post('/repos/load')
             self.wait_lookup()
             self.assertEqual(gh.call_count, 11)
-            self.assertIn('1,000', lookup.message)
+            self.assertIn('1,000', self.repo_jobs()[-1]['result'])
         lookup.expires = 0
         with patch.object(lookup.gh, 'get', side_effect=Deferred(1000)):
             self.post('/repos/load')
             self.wait_lookup()
-        self.assertIn('실패', lookup.message)
+        self.assertEqual(self.repo_jobs()[-1]['status'], 'failed')
+        self.assertIn('실패', self.repo_jobs()[-1]['last_error'])
         self.assertEqual(lookup.items, ['org/repo'])
-        # 실행 중에는 추가 작업을 큐에 넣지 않는다.
-        lookup.future = Future()
-        with patch.object(lookup.pool, 'submit') as submit:
-            lookup.submit(('org', 'another'), 'owned')
-            submit.assert_not_called()
-        lookup.future.set_result(None)
+        # 대기 중에는 다른 대상이라도 새 작업을 만들지 않는다.
+        lookup.expires = 0
+        self.post('/repos/load')
+        self.post('/repos/add', repository='org/another', source='owned')
+        pending = self.repo_jobs('pending')
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]['target'], '접근 가능한 저장소 목록')
 
     def test_github_uses_fixed_read_only_argv_no_shell(self):
         runner = Mock(return_value=Mock(returncode=0, stdout='{"login":"me"}'))
@@ -188,7 +201,7 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(self.post('/repos/load')[0], 303)
             self.assertEqual(self.post('/repos/add', repository='org/repo', source='owned')[0], 303)
             self.assertIn('오프라인', self.request('/repos')[2])
-        self.assertIsNone(self.server.repo_lookup.future)
+        self.assertEqual(self.repo_jobs(), [])
 
     def test_repo_org_policy_confirmation_precedence_reset_and_default(self):
         with closing(connect(self.config)) as conn, conn:
@@ -240,39 +253,52 @@ class SettingsTests(unittest.TestCase):
             self.assertIn('SKIM_CODEX_MODEL', body)
 
     def test_lookup_does_not_block_http_and_reads_do_not_start_it(self):
+        from skim.jobs import worker
         lookup = self.server.repo_lookup
-        started, release = threading.Event(), threading.Event()
+        started, release, stop = threading.Event(), threading.Event(), threading.Event()
         def response(endpoint):
             started.set()
             if not release.wait(timeout=3):
                 raise AssertionError('워커 해제 누락')
             return {'login': 'me'} if endpoint == 'user' else []
-        with patch.object(lookup.gh, 'get', side_effect=response):
-            for path in ['/', '/repos', '/settings']:
+        # 워커의 정기 수집은 가짜로 막고 저장소 조회만 실제 워커 스레드에서 실행한다.
+        with patch.object(lookup.gh, 'get', side_effect=response), patch('skim.jobs.CollectionScheduler') as scheduler:
+            scheduler.return_value.tick.return_value = False
+            for path in ['/', '/repos', '/settings', '/status']:
                 self.assertEqual(self.request(path)[0], 200)
-            self.assertIsNone(lookup.future)
+            self.assertEqual(self.repo_jobs(), [])
+            thread = threading.Thread(target=worker, args=(self.config, stop, lookup), daemon=True)
+            thread.start()
             try:
                 self.assertEqual(self.post('/repos/load')[0], 303)
-                self.assertTrue(started.wait(timeout=1))
-                self.assertFalse(lookup.future.done())
+                self.assertTrue(started.wait(timeout=3))
+                self.assertEqual(self.repo_jobs()[0]['status'], 'running')
                 self.assertEqual(self.request('/settings')[0], 200)
-                self.assertIn('조회 중', self.request('/repos')[2])
+                body = self.request('/repos')[2]
+                self.assertIn('실행 중', body)
+                self.assertIn('data-job-active="1"', body)
                 self.post('/repos/add', repository='org/another', source='owned')
                 self.assertIn('완료 후 다시', self.request('/repos')[2])
+                self.assertEqual(len(self.repo_jobs()), 1)
             finally:
                 release.set()
-                self.wait_lookup()
+                stop.set()
+                thread.join(timeout=3)
+        self.assertEqual(self.repo_jobs()[0]['status'], 'completed')
 
     def test_next_scheduled_analysis_uses_new_model_and_keeps_running_config(self):
-        from skim.web import worker
         original = replace(self.config, codex_model='old')
         self.post('/settings/model', model='new')
-        stop = SimpleNamespace(is_set=Mock(side_effect=[False, True]), wait=Mock())
-        with patch('skim.web.CollectionScheduler') as scheduler, patch('skim.web.Collector'), patch('skim.analyze.Analyzer') as analyzer:
-            scheduler.return_value.tick.return_value = True
-            worker(original, stop)
-            self.assertEqual(analyzer.call_args.args[1].codex_model, 'new')
-            self.assertEqual(original.codex_model, 'old')
+        analyzer = Mock()
+        analyzer.return_value.run.return_value = []
+        with closing(connect(self.config)) as conn, closing(connect(self.config)) as state:
+            runner = Runner(original, conn, state, analyzer=analyzer)
+            runner.scheduler = SimpleNamespace(tick=lambda collector: True, last_ok=True)
+            self.assertTrue(runner.step())
+        self.assertEqual(analyzer.call_args.args[1].codex_model, 'new')
+        self.assertEqual(original.codex_model, 'old')
+        with closing(connect(self.config)) as conn:
+            self.assertEqual(conn.execute("SELECT model FROM jobs WHERE type='analyze'").fetchone()[0], 'new')
 
     def test_browser_failure_shows_terminal_fallback(self):
         from skim.web import open_entry
