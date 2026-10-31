@@ -127,9 +127,15 @@ def refresh_form(csrf):
 
 
 def badges(pr):
+    labels = []
+    if pr['rule_flags']:
+        labels.append('규칙 후보: ' + ' · '.join(pr['rule_flags']))
+    if pr['model_flags']:
+        labels.append('모델 판단: ' + ' · '.join(pr['model_flags']))
+    if pr['unanalysed']:
+        labels.append('모델 판단: 미분석' if not pr['items'] else '일부 미분석')
     return (f'<span class="badge {esc(pr["importance"])}">{esc(pr["importance"])}</span> '
-            + esc('규칙 후보: ' + (' · '.join(pr['rule_flags']) or '없음'))
-            + ' / ' + esc('모델 판단: ' + (' · '.join(pr['model_flags']) or '없음')) + (' · 미분석' if pr['unanalysed'] else '')
+            + esc(' / '.join(labels))
             + (' · 이전 SHA 결과' if pr['stale'] else '') + (' · draft' if pr['draft'] else ''))
 
 
@@ -205,7 +211,7 @@ def detail(pr, query, config, offline=False):
                     + (' · 규칙 기반 후보' if flags else '') + '</summary>'
                     f'<p>{esc(item["reason"] if item else unit.get("exclusion_reason") or unit.get("omission_reason") or "분석되지 않은 변경입니다")}</p>'
                     f'<p>규칙 후보: {esc(" · ".join(flags) or "없음")}</p>'
-                    f'<p>모델 판단: {esc(" · ".join(item.get("risk_flags", []) if item else []) or "없음")}</p>'
+                    f'<p>모델 판단: {esc((" · ".join(item.get("risk_flags", [])) or "없음") if item else "미분석")}</p>'
                     f'<p class="muted">이전 {esc(unit.get("old_range"))} → 새 줄 {esc(unit.get("new_range"))}</p>')
         if 'logic_without_tests' in flags:
             content += '<p>제공된 diff에서 관련 테스트 변경을 확인하지 못함</p>'

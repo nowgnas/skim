@@ -17,7 +17,7 @@ sys.path.insert(0, str(ROOT / 'lib'))
 sys.path.insert(0, str(ROOT / 'scripts'))
 from skim.config import Config
 from skim.db import connect
-from skim.web import Auth, Handler, CSP, Server, load_prs, worker, read_diff, serve
+from skim.web import Auth, Handler, CSP, Server, badges, load_prs, worker, read_diff, serve
 from demo_seed import seed
 
 
@@ -192,6 +192,16 @@ class WebTests(unittest.TestCase):
         for page in (body.split('<details')[0], self.request()[2]):
             self.assertIn('규칙 후보: ', page)
             self.assertIn('모델 판단: ', page)
+
+    def test_unanalyzed_model_label_and_empty_badges(self):
+        body = self.request('/pr/1')[2]
+        self.assertIn('<p>모델 판단: 미분석</p>', body)
+        base = dict(importance='low', rule_flags=[], model_flags=[],
+                    unanalysed=False, items={'h1': {}}, stale=False, draft=False)
+        self.assertNotIn('규칙 후보:', badges(base))
+        self.assertNotIn('모델 판단:', badges(base))
+        self.assertIn('모델 판단: 미분석', badges(dict(base, unanalysed=True, items={})))
+        self.assertIn('일부 미분석', badges(dict(base, unanalysed=True)))
 
     def test_untrusted_content_and_cache_paths(self):
         with closing(connect(self.config)) as conn, conn:
