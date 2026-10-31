@@ -27,17 +27,81 @@ def is_test(path):
     return bool(re.search(r'(^|/)(tests?|__tests__)(/|$)|(^|/)(test_[^/]+|[^/]+[._](test|spec)\.[^/]+)$|_test\.', path, re.I))
 
 
-def changed_lines(text):
-    """문맥과 헤더를 제외하되 hunk 안의 헤더 모양 변경 줄은 보존한다."""
-    changed = []
+def changed_spans(text):
+    """헤더를 제외한 변경 내용의 원문 오프셋을 돌려준다."""
+    offset = 0
     in_hunk = False
-    for line in text.splitlines():
+    for line in text.splitlines(keepends=True):
         if line.startswith('@@ '):
             in_hunk = True
         elif line.startswith(('+', '-')):
             if in_hunk or not line.startswith(('+++ ', '--- ')):
-                changed.append(line[1:])
-    return '\n'.join(changed)
+                yield offset + 1, offset + len(line.rstrip('\r\n'))
+        offset += len(line)
+
+
+def changed_lines(text):
+    """문맥과 헤더를 제외하되 hunk 안의 헤더 모양 변경 줄은 보존한다."""
+    return '\n'.join(text[start:end] for start, end in changed_spans(text))
+
+
+def changed_secrets(text):
+    """개인 키 전체의 가림 범위와 변경 줄이 겹치는지도 검사한다."""
+    spans = list(changed_spans(text))
+    if any(start < match.end() and match.start() < end
+           for match in SECRET_VALUE.finditer(text) for start, end in spans):
+        return True
+    # 전송 가림은 보수적으로 유지하고 후보는 리터럴 할당으로 좁힌다.
+    for match in SECRET_ASSIGNMENT.finditer(changed_lines(text)):
+        assignment = match.group()
+        key, value = re.split(r'[=:]', assignment, maxsplit=1)
+        if key.strip('"\' ').lower() == 'csrf_token':
+            continue
+        value = value.strip()
+        if re.fullmatch(r"(?:\"[^\"\n]+\"|'[^'\n]+')\s*[,;]?(?:\s*#.*)?", value):
+            return True
+        if re.fullmatch(r'[A-Za-z0-9_/-]+', value) and not value.lower() in ('true', 'false', 'none', 'null'):
+            if re.search(r'[0-9/-]', value) and not value.isdigit() and '=' in assignment:
+                return True
+    return False
+
+
+def payment_candidate(parts, code):
+    return any(re.fullmatch(r'checkout|(?:payments?|billing|stripe)(?:_.+)?', part)
+               for part in parts) or bool(re.search(
+        r'\b(?:stripe|braintree|paypal|adyen|razorpay)(?:\.[a-z_]\w*)+\s*\(', code))
+
+
+def schema_candidate(parts, path, name, code):
+    return (any(part in ('migration', 'migrations', 'migrate') for part in parts)
+            or 'alembic/versions/' in path.lower() or name.endswith('.sql')
+            or name == 'schema.prisma' or path.lower().endswith('db/schema.rb')
+            or bool(re.search(r'\b(?:(?:create|alter|drop)\s+table|(?:add|drop)\s+column|create\s+(?:unique\s+)?index)\b', code)))
+
+
+def config_candidate(parts, path, name):
+    return (any(part.startswith(('config', 'settings')) for part in parts)
+            or name.endswith(('.toml', '.ini', '.conf', '.tf')) or name.startswith('.env')
+            or name in ('compose.yaml', 'compose.yml', 'docker-compose.yaml', 'docker-compose.yml',
+                        'dockerfile', 'values.yaml', 'values.yml')
+            or name.startswith('dockerfile.')
+            or path.lower() in ('.github/dependabot.yml', '.github/dependabot.yaml'))
+
+
+def auth_candidate(parts, name, code):
+    auth_names = (r'auth|authn|authz|authenticate|authenticated|authentication|'
+                  r'authorize|authorized|authorization|is_authenticated|'
+                  r'check_permission|check_permissions|verify_token|login|logout|oauth|jwt')
+    auth_identifier = r'(?:[a-z0-9]+_)*(?:auth|oauth|permission|permissions|login|jwt)(?:_[a-z0-9]+)*'
+    auth_path = any(re.fullmatch(
+        r'auth|authn|authz|authentication|authorization|authenticate|authenticated|'
+        r'authorize|is_authenticated|check_permission|permissions?|sessions?|login|logout|oauth|acl'
+        r'|(?:auth|oauth|jwt|permissions?|login)_.+', part) for part in parts)
+    middleware_auth = ('middleware' in parts and bool(re.fullmatch(r'auth(?:_.+)?\.[^.]+', name)) or
+                       bool(re.fullmatch(r'auth_?middleware\.[^.]+', name)))
+    return auth_path or middleware_auth or bool(re.search(
+            r'\b(?:' + auth_names + r')\s*(?:\(|\.\s*[a-z_]\w*\s*\()', code)) or bool(re.search(
+                r'\b' + auth_identifier + r'\s*\(|@' + auth_identifier + r'\b', code))
 
 
 def candidates(path, text, tests):
@@ -49,32 +113,14 @@ def candidates(path, text, tests):
     changed = changed_lines(text)
     # camelCase 호출도 동일한 식별자로 검사하되 일반 단어 언급은 근거로 쓰지 않는다.
     code = re.sub(r'([a-z])([A-Z])', r'\1_\2', changed).lower()
-    auth_names = (r'auth|authn|authz|authenticate|authenticated|authentication|'
-                  r'authorize|authorized|authorization|is_authenticated|'
-                  r'check_permission|check_permissions|verify_token|login|logout|oauth|jwt')
-    auth_identifier = r'(?:[a-z0-9]+_)*(?:auth|permission|permissions|login|jwt)(?:_[a-z0-9]+)*'
-    auth_path = any(re.fullmatch(
-        r'auth|authn|authz|authentication|authorization|authenticate|authenticated|'
-        r'authorize|is_authenticated|check_permission|permissions?|sessions?|login|logout|oauth|acl'
-        r'|(?:auth|oauth|jwt|permissions?|login)_.+', part) for part in parts)
-    middleware_auth = ('middleware' in parts and name.startswith('auth') or
-                       bool(re.fullmatch(r'auth[^/]*middleware\.[^.]+', name)))
     rules = {
-        'auth': auth_path or middleware_auth or bool(re.search(
-            r'\b(?:' + auth_names + r')\s*(?:\(|\.\s*[a-z_]\w*\s*\()', code)) or bool(re.search(
-                r'\b' + auth_identifier + r'\s*\(|@' + auth_identifier + r'\b', code)),
-        'payments': any(part.startswith(('payment', 'billing', 'checkout', 'stripe')) for part in parts) or bool(re.search(
-                            r'\b(?:stripe|braintree|paypal|adyen|razorpay)(?:\.[a-z_]\w*)+\s*\(', code)),
-        'db_schema_migration': any(part in ('migrations', 'migrate') for part in parts) or
-            'alembic/versions/' in path.lower() or name.endswith('.sql') or
-            (name == 'schema.prisma' or path.lower().endswith('db/schema.rb')) or bool(re.search(
-                r'\b(?:(?:create|alter|drop)\s+table|(?:add|drop)\s+column|create\s+(?:unique\s+)?index)\b', code)),
-        'config': any(part.startswith(('config', 'settings')) for part in parts) or
-            name.endswith(('.toml', '.ini', '.conf')) or name.startswith('.env') or
-            name in ('compose.yaml', 'compose.yml', 'docker-compose.yaml', 'docker-compose.yml'),
+        'auth': auth_candidate(parts, name, code),
+        'payments': payment_candidate(parts, code),
+        'db_schema_migration': schema_candidate(parts, path, name, code),
+        'config': config_candidate(parts, path, name),
         'ci_workflow': path.lower().startswith('.github/workflows/'),
         'dependency': bool(re.search(r'(^|/)(package(-lock)?\.json|(?:[^/]+[.-])?lock|requirements[^/]*|pyproject\.toml|go\.(?:mod|sum)|pnpm-lock\.yaml|gemfile|cargo\.toml)$', path.lower())),
-        'secrets': secret_path(path) or 'secrets' in parts or sanitize(changed) != changed,
+        'secrets': secret_path(path) or 'secrets' in parts or changed_secrets(text),
     }
     flags = [flag for flag, matches in rules.items() if matches]
     if not is_test(path) and PurePosixPath(path).suffix in ('.py', '.js', '.ts', '.tsx', '.go', '.rs', '.java', '.rb', '.c', '.cpp'):

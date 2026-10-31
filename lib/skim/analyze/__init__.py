@@ -137,7 +137,7 @@ class Analyzer:
                 used += unit['raw_bytes']
         eligible = [u for u in units if not u.get('omission_reason')]
         chunks = chunk_units(eligible, metadata)
-        material = dict(metadata=metadata, units=units, policy='redact-v2/limits-v1/rules-v2', prompt_version=PROMPT_VERSION)
+        material = dict(metadata=metadata, units=units, policy='redact-v2/limits-v1/rules-v3', prompt_version=PROMPT_VERSION)
         input_hash = hashlib.sha256(encode(material).encode()).hexdigest()
         row['analysis_input_hash'] = input_hash
         adapter = self.adapter

@@ -105,14 +105,65 @@ class RiskCandidatesTests(unittest.TestCase):
         for line in ('author()', 'authorship()', 'message = "auth"', 'auth', 'requires_auth'):
             self.assertNotIn('auth', candidates('app.py', '+' + line, []))
 
-    def test_changed_assignments_follow_redaction(self):
-        # 가림 규칙과 후보 판정은 같은 변경 줄 근거를 사용한다.
+    def test_changed_literal_assignments(self):
+        # 리터럴 후보 판정은 보수적인 전송 가림과 구분한다.
         for line in ('export API_TOKEN=abcd1234', 'DB_PASSWORD=hunter2',
-                     'password = user.password', 'token = get_token()'):
+                     'password = "fixture"', 'token = "fixture"'):
             for sign in ('+', '-'):
                 with self.subTest(line=line, sign=sign):
                     self.assertIn('secrets', candidates('compose.yml', sign + line, []))
             self.assertNotIn('secrets', candidates('compose.yml', ' ' + line, []))
+
+    def test_private_key_body_replacement(self):
+        for path in ('deploy/k.yaml', 'app.py'):
+            for change in ('-MIIEold\n+MIIEnew', '+MIIEnew', '-MIIEold'):
+                with self.subTest(path=path, change=change):
+                    units, _ = parse_diff(f"""diff --git a/{path} b/{path}
+--- a/{path}
++++ b/{path}
+@@ -1,3 +1,3 @@
+ -----BEGIN RSA PRIVATE KEY-----
+{change}
+ -----END RSA PRIVATE KEY-----
+""")
+                    self.assertTrue(units[0]['redacted'])
+                    self.assertIn('secrets', units[0]['candidates'])
+                    self.assertNotIn('MIIE', units[0]['diff'])
+
+    def test_private_key_context_only(self):
+        text = """@@ -1,4 +1,4 @@
+ -----BEGIN RSA PRIVATE KEY-----
+ MIIEfixture
+ -----END RSA PRIVATE KEY-----
+-old()
++new()
+"""
+        self.assertNotIn('secrets', candidates('app.py', text, []))
+
+    def test_assignment_expressions_are_not_secrets(self):
+        for line in ('max_tokens=100', 'csrf_token = generate_token()',
+                     'csrf_token = "fixture"', 'token = get_token()',
+                     'password = user.password', 'Authorization: Bearer ${TOKEN}',
+                     'headers["Authorization"] = token'):
+            for sign in ('+', '-'):
+                with self.subTest(line=line, sign=sign):
+                    self.assertNotIn('secrets', candidates('app.py', sign + line, []))
+
+    def test_review_path_boundaries_and_config(self):
+        for path, flag in (
+            ('db/migration/V1.py', 'db_schema_migration'),
+            ('src/migration/AddUser.ts', 'db_schema_migration'),
+            ('Dockerfile', 'config'), ('deploy/Dockerfile.prod', 'config'),
+            ('infra/main.tf', 'config'), ('helm/app/values.yaml', 'config'),
+            ('.github/dependabot.yml', 'config')):
+            with self.subTest(path=path):
+                self.assertIn(flag, candidates(path, '', []))
+        for path, flag in (
+            ('scripts/checkout_repo.sh', 'payments'),
+            ('striped_table.py', 'payments'), ('middleware/author.py', 'auth')):
+            with self.subTest(path=path):
+                self.assertNotIn(flag, candidates(path, '', []))
+        self.assertIn('auth', candidates('app.py', '+oauth_client(value)', []))
 
     def test_header_like_changes_inside_hunk(self):
         text = '--- a/app.sql\n+++ b/app.sql\n@@ -1 +1 @@\n--- removed SQL comment\n+++ added comment'
