@@ -47,7 +47,10 @@ def parser():
     web.add_argument('--port', type=int, default=0)
     web.add_argument('--no-browser', action='store_true')
     web.add_argument('--offline', action='store_true', help='수집·분석 없이 저장된 데이터만 표시')
-    commands.add_parser('doctor', help='인증·격리·로컬 권한 점검')
+    doctor = commands.add_parser('doctor', help='인증·격리·로컬 권한 점검')
+    doctor.add_argument('--probe', action='store_true', help='코드 없이 실제 모델 격리 검사 실행')
+    codex_home = commands.add_parser('codex-home', help='분석 전용 인증 링크 관리')
+    codex_home.add_subparsers(dest='action', required=True).add_parser('init')
     return root
 
 
@@ -56,8 +59,13 @@ def main(argv=None):
     try:
         if args.command == 'doctor':
             from .doctor import run, paths
-            return run(paths())
+            return run(paths(), probe=args.probe)
         config = Config.load()
+        if args.command == 'codex-home':
+            from .analyze.codex import CodexAdapter
+            CodexAdapter(data_dir=config.data_dir).init_home()
+            print('분석 전용 Codex 인증 링크를 만들었습니다.')
+            return 0
         if args.command == 'web':
             if not 0 <= args.port <= 65535:
                 raise ValueError('포트는 0~65535 범위여야 합니다')

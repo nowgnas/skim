@@ -19,7 +19,7 @@ class BudgetExceeded(ValueError):
 class Analyzer:
     def __init__(self, conn, config, adapter=None, today=None):
         self.conn, self.config = conn, config
-        self.adapter = adapter if adapter is not None else CodexAdapter()
+        self.adapter = adapter if adapter is not None else CodexAdapter(data_dir=config.data_dir)
         self.today = today or (lambda: datetime.now().astimezone().date().isoformat())
 
     def _reserve(self):

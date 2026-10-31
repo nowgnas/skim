@@ -1,0 +1,172 @@
+"""실제 Codex와 네트워크 없이 격리 계약을 검증한다."""
+import contextlib
+import io
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))
+from skim.analyze.codex import CodexAdapter, IsolationError, FLAGS
+from skim.config import Config
+from skim.doctor import run
+from skim.cli import main
+
+
+class CodexTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.source = self.root / 'user-codex'
+        self.source.mkdir()
+        (self.source / 'auth.json').write_text('credential-never-read')
+        env = patch.dict(os.environ, CODEX_HOME=str(self.source), SKIM_HOME=str(self.root / 'skim'))
+        env.start()
+        self.addCleanup(env.stop)
+        self.adapter = CodexAdapter(self.runner, self.root / 'data')
+        self.calls = []
+        self.version = 'codex-cli 0.165.0'
+        self.help = ' '.join(FLAGS) + ' --disable'
+        self.features = 'apps stable true\nplugins under development false\nmulti_agent experimental true\nweb_search_cached stable true\nother stable true'
+        self.answer = {'tool_ran': False, 'instructions_seen': ''}
+        self.file_location = None
+        self.exitcode = 0
+        self.adapter.init_home()
+
+    def runner(self, command, **kw):
+        self.calls.append((command, kw))
+        if command[0] == 'gh':
+            return subprocess.CompletedProcess(command, 0, '', '')
+        self.assertEqual(set(kw['env']), {'PATH', 'HOME', 'CODEX_HOME'})
+        self.assertEqual(kw['env']['CODEX_HOME'], str(self.adapter.home))
+        self.assertEqual(list(Path(kw['cwd']).iterdir()), [])
+        args = command[1:]
+        if args == ['--version']:
+            output = self.version
+        elif args in (['exec', '--help'], ['--help']):
+            output = self.help
+        elif args == ['features', 'list']:
+            output = self.features
+        else:
+            self.assertEqual(args[0], 'exec')
+            self.assertEqual(command[command.index('--sandbox') + 1], 'read-only')
+            for flag in FLAGS:
+                self.assertIn(flag, command)
+            for name in ('apps', 'plugins', 'multi_agent', 'web_search_cached'):
+                self.assertIn(name, command)
+            self.assertNotIn('other', command)
+            self.assertEqual(list(Path(kw['env']['HOME']).iterdir()), [])
+            if self.file_location:
+                directory = kw['cwd'] if self.file_location == 'cwd' else kw['env']['HOME']
+                (Path(directory) / 'probe.txt').touch()
+            Path(command[command.index('--output-last-message') + 1]).write_text(json.dumps(self.answer))
+            return subprocess.CompletedProcess(command, self.exitcode, '', '')
+        return subprocess.CompletedProcess(command, 0, output, '')
+
+    def test_init_explicit_idempotent_and_no_credential_reads(self):
+        with patch.object(Path, 'read_text', side_effect=AssertionError('인증 읽기 금지')):
+            self.adapter.init_home()
+            self.adapter.check_home()
+        self.assertEqual(self.adapter.home.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(list(self.adapter.home.iterdir()), [self.adapter.home / 'auth.json'])
+        self.assertEqual(os.readlink(self.adapter.home / 'auth.json'), str(self.source / 'auth.json'))
+        self.assertFalse(self.calls)
+
+    def test_home_contamination_and_permissions_block(self):
+        for name in ('config.toml', 'AGENTS.md', 'skills', 'plugins', 'memories', 'hooks'):
+            entry = self.adapter.home / name
+            entry.touch()
+            with self.assertRaises(IsolationError):
+                self.adapter.verify()
+            entry.unlink()
+        self.assertFalse(self.calls)
+        self.adapter.home.chmod(0o755)
+        with self.assertRaises(IsolationError):
+            self.adapter.verify()
+
+    def test_regular_auth_and_arbitrary_link_block(self):
+        link = self.adapter.home / 'auth.json'
+        link.unlink()
+        link.write_text('no')
+        with self.assertRaises(IsolationError):
+            self.adapter.check_home()
+        link.unlink()
+        other = self.root / 'other'
+        other.touch()
+        link.symlink_to(other)
+        with self.assertRaises(IsolationError):
+            self.adapter.check_home()
+
+    def test_version_and_flag_gates(self):
+        for version in ('codex-cli 0.164.9', 'unknown', 'codex-cli 0.165.0-beta', 'codex-cli 0.165'):
+            self.version = version
+            with self.assertRaises(IsolationError):
+                self.adapter.verify()
+        self.version = 'codex-cli 0.165.0'
+        for flag in FLAGS:
+            self.help = ' '.join(f for f in FLAGS if f != flag)
+            with self.assertRaises(IsolationError):
+                self.adapter.verify()
+        self.assertFalse(any('--output-last-message' in c for c, _ in self.calls))
+
+    def test_probe_required_cached_expired_and_version_keyed(self):
+        with self.assertRaises(IsolationError):
+            self.adapter.generate('repo-code', {})
+        self.adapter.probe()
+        self.assertEqual(self.adapter.cli_version, '0.165.0')
+        self.assertEqual(self.adapter.model, 'unknown')
+        self.adapter.verify()
+        cache = self.adapter.probe_path
+        value = json.loads(cache.read_text())
+        value['checked_at'] = time.time() - 7 * 86400
+        cache.write_text(json.dumps(value))
+        with self.assertRaises(IsolationError):
+            self.adapter.verify()
+        self.adapter.probe()
+        self.version = 'codex-cli 0.166.0'
+        with self.assertRaises(IsolationError):
+            self.adapter.verify()
+
+    def test_probe_blocks_writes_tools_instructions_bad_output_and_exit(self):
+        self.adapter.probe()
+        for location in ('cwd', 'home'):
+            self.file_location = location
+            with self.assertRaises(IsolationError):
+                self.adapter.probe()
+            self.assertFalse(self.adapter.probe_path.exists())
+        self.file_location = None
+        for answer in ({'tool_ran': True, 'instructions_seen': ''},
+                       {'tool_ran': False, 'instructions_seen': 'AGENTS'}, {}, [],
+                       {'tool_ran': 0, 'instructions_seen': ''}):
+            self.answer = answer
+            with self.assertRaises(IsolationError):
+                self.adapter.probe()
+        self.answer = {'tool_ran': False, 'instructions_seen': ''}
+        self.exitcode = 1
+        with self.assertRaises(IsolationError):
+            self.adapter.probe()
+
+    def test_generate_same_isolation_and_doctor(self):
+        config = Config(self.root / 'absent', self.adapter.data_dir)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(run(config, self.runner, lambda _: '/fake', self.adapter, probe=True), 0)
+        for label in ('codex-home', 'version', 'flags', 'probe'):
+            self.assertIn('정상: ' + label, out.getvalue())
+        self.answer = {'intent': '변경 요약'}
+        self.assertEqual(json.loads(self.adapter.generate('정제된 자료', {})), self.answer)
+        execs = [kw for c, kw in self.calls if '--output-last-message' in c]
+        self.assertNotIn('정제된 자료', execs[0]['input'])
+        self.assertEqual(execs[-1]['input'], '정제된 자료')
+        self.assertEqual(execs[0]['env'].keys(), execs[-1]['env'].keys())
+
+    def test_cli_init(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(main(['codex-home', 'init']), 0)
+        self.assertTrue((self.root / 'skim/data/codex-home/auth.json').is_symlink())
