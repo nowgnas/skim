@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+SOURCE="${BASH_SOURCE[0]}"
+while [[ -L "$SOURCE" ]]; do
+  SOURCE_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" = /* ]] || SOURCE="$SOURCE_DIR/$SOURCE"
+done
+ROOT="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
+PY="${SKIM_PYTHON:-$(command -v python3 || true)}"
+if [[ -z "$PY" ]] || ! "$PY" -c 'import sys; sys.exit(sys.version_info < (3,11))'; then
+  echo 'Python 3.11 이상이 필요합니다.' >&2
+  exit 2
+fi
+export PYTHONPATH="$ROOT/lib${PYTHONPATH:+:$PYTHONPATH}"
+exec "$PY" -m skim "$@"
