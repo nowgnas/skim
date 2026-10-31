@@ -174,6 +174,25 @@ class WebTests(unittest.TestCase):
             conn.execute("UPDATE pull_requests SET state='closed' WHERE id=1")
         self.assertNotIn('결제 인증 경계', self.request()[2])
 
+    def test_risk_sources_are_separate_in_summary_and_hunks(self):
+        with closing(connect(self.config)) as conn, conn:
+            row = conn.execute('SELECT id,output_json FROM analyses WHERE snapshot_id=1 ORDER BY id DESC LIMIT 1').fetchone()
+            result = json.loads(row['output_json'])
+            unit = next(u for u in result['units']
+                        if any(i['change_id'] == u['change_id'] for i in result['items']))
+            item = next(i for i in result['items'] if i['change_id'] == unit['change_id'])
+            unit['candidates'] = ['logic_without_tests']
+            item['risk_flags'] = ['config']
+            conn.execute('UPDATE analyses SET output_json=? WHERE id=?', (json.dumps(result), row['id']))
+        body = self.request('/pr/1')[2]
+        hunk = next(part.split('</details>')[0] for part in body.split('<details')
+                    if ' · ' + unit['change_id'] + ' · ' in part)
+        self.assertIn('<p>규칙 후보: logic_without_tests</p>', hunk)
+        self.assertIn('<p>모델 판단: config</p>', hunk)
+        for page in (body.split('<details')[0], self.request()[2]):
+            self.assertIn('규칙 후보: ', page)
+            self.assertIn('모델 판단: ', page)
+
     def test_untrusted_content_and_cache_paths(self):
         with closing(connect(self.config)) as conn, conn:
             conn.execute("UPDATE pull_requests SET title=?,url=? WHERE id=1", ('<script>alert(1)</script>', 'javascript:alert(1)'))

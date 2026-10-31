@@ -147,3 +147,9 @@
 - 헤더 다음 여는 구분선과 닫는 구분선을 구별하고 timestamp 접두사를 허용했다. 닫는 구분선 확인, 키-값 행 검사와 32행 상한으로 배너 밖 모델 오탐을 제한했다. 일반 doctor의 모델 오류는 캐시된 probe 검증 생략으로 안내한다.
 - 직전 배너 감지 수정은 실제 출력으로 검증하지 않았다. 이번 fixture도 리뷰의 0.165.0 형식을 재구성한 합성 자료이며 실제 stderr 캡처가 아니다. 실제 CLI 출력 대조는 미검증으로 남긴다.
 - fake/fixture만으로 unittest 132개와 git diff --check가 통과했다. 실제 LLM·네트워크 호출, GitHub 쓰기와 커밋은 하지 않았다.
+
+## PR #16 위험 표시 오탐 수정 — 2026-10-31
+
+- 모든 모델 위험 플래그의 한국어 정의와 변경 줄의 직접 근거 조건을 추가하고 prompt_version을 skim-ko-2로 올렸다. 웹 hunk·PR 요약·목록에서 규칙 후보와 모델 판단의 출처를 분리했다.
+- 같은 PR의 테스트 경로·diff에 모듈 식별자 참조가 있으면 logic_without_tests 후보를 해제한다. 기존 candidates 호출과 parse_diff 반환 형식은 유지했다.
+- doctor/test_codex import·문맥 참조와 run/rerun 경계, 프롬프트 정의·웹 출처 표시를 회귀 검증했다. 외부 모델 환경 변수를 테스트에서 격리했으며 unittest 136개와 git diff --check가 통과했다. 실제 LLM·네트워크 호출, GitHub 쓰기와 커밋은 하지 않았다.

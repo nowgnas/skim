@@ -29,6 +29,8 @@ class CodexTests(unittest.TestCase):
         env = patch.dict(os.environ, CODEX_HOME=str(self.source), SKIM_HOME=str(self.root / 'skim'))
         env.start()
         self.addCleanup(env.stop)
+        # 실행 환경의 모델 지정이 fixture 설정을 덮어쓰지 않게 격리한다.
+        os.environ.pop('SKIM_CODEX_MODEL', None)
         self.adapter = CodexAdapter(self.runner, self.root / 'data')
         self.calls = []
         self.version = 'codex-cli 0.165.0'

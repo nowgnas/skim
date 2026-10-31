@@ -94,7 +94,7 @@ def auth_candidate(parts, name, code):
                 r'\b' + auth_identifier + r'\s*\(|@' + auth_identifier + r'\b', code))
 
 
-def candidates(path, text, tests):
+def candidates(path, text, tests, test_diffs=None):
     location = PurePosixPath(path.lower())
     # 경로 조각은 camelCase를 분리하고 확장자를 뗀 이름으로 통일한다.
     parts = tuple(re.sub(r'([a-z])([A-Z])', r'\1_\2', part).lower().split('.')[0]
@@ -115,7 +115,13 @@ def candidates(path, text, tests):
     flags = [flag for flag, matches in rules.items() if matches]
     if not is_test(path) and PurePosixPath(path).suffix in ('.py', '.js', '.ts', '.tsx', '.go', '.rs', '.java', '.rb', '.c', '.cpp'):
         stem = PurePosixPath(path).stem
-        if not any(stem == re.sub(r'^(?:test_|spec_)|(?:[._](?:test|spec)|_test)$', '', PurePosixPath(t).stem) for t in tests):
+        # 기존 파일명 대응에 더해 같은 PR의 테스트 경로와 diff 참조를 확인한다.
+        path_reference = re.compile(r'(?<![A-Za-z0-9])' + re.escape(stem) + r'(?![A-Za-z0-9])')
+        code_reference = re.compile(r'(?<!\w)' + re.escape(stem) + r'(?!\w)')
+        test_diffs = test_diffs if test_diffs is not None else (tests if isinstance(tests, dict) else {})
+        if not any(stem == re.sub(r'^(?:test_|spec_)|(?:[._](?:test|spec)|_test)$', '', PurePosixPath(t).stem)
+                   or path_reference.search(t)
+                   or code_reference.search(test_diffs.get(t, '')) for t in tests):
             flags.append('logic_without_tests')
     return flags
 
@@ -152,6 +158,7 @@ def parse_diff(diff, files=()):
         section_sizes[path] = len(('diff --git ' + block).encode())
     paths = sorted(set(sections) | {f['filename'] for f in files})
     tests = [p for p in paths if is_test(p) and not secret_path(p)]
+    test_diffs = {p: sections.get(p, '') for p in tests}
     units = []
     for path in paths:
         body = sections.get(path, '')
@@ -164,7 +171,7 @@ def parse_diff(diff, files=()):
         overhead = section_sizes.get(path, 0) - sum(len(p[0].encode()) for p in parts)
         for index, (text, old, new) in enumerate(parts):
             excluded = secret_path(path) or bool(old_path and secret_path(old_path))
-            flags = candidates(path, text, tests)
+            flags = candidates(path, text, tests, test_diffs)
             cleaned = sanitize(text)
             redacted = not excluded and cleaned != text
             if excluded and 'secrets' not in flags:

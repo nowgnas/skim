@@ -48,6 +48,16 @@ class Fake:
 
 
 class AnalysisTests(unittest.TestCase):
+    def test_prompt_defines_all_risk_flags(self):
+        from skim.analyze.protocol import FLAGS, PROMPT_VERSION
+        request = prompt('chunk', {})
+        for flag in FLAGS:
+            self.assertIn(flag + ' = ', request)
+        self.assertIn('추가·삭제된 변경 줄에 직접 근거', request)
+        self.assertIn('설정을 읽거나 검증하는 코드 변경은 해당 안 됨', request)
+        self.assertIn('DB 테이블·컬럼·인덱스', request)
+        self.assertEqual(PROMPT_VERSION, 'skim-ko-2')
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

@@ -198,3 +198,38 @@ class RiskCandidatesTests(unittest.TestCase):
         text = '--- a/app.sql\n+++ b/app.sql\n@@ -1 +1 @@\n--- removed SQL comment\n+++ added comment'
         self.assertEqual(changed_lines(text), '-- removed SQL comment\n++ added comment')
         self.assertIn('secrets', candidates('app.py', '@@ -1 +1 @@\n+++ API_TOKEN=abcd1234', []))
+
+    def test_pr16_doctor_referenced_by_codex_test(self):
+        for reference in ('+from skim.doctor import run\n+run(config)',
+                          ' from skim.doctor import run\n+run(config)',
+                          '+import doctor', '+doctor.run(config)', '+from .doctor import run'):
+            with self.subTest(reference=reference):
+                diff = f"""diff --git a/lib/skim/doctor.py b/lib/skim/doctor.py
+--- a/lib/skim/doctor.py
++++ b/lib/skim/doctor.py
+@@ -1 +1 @@
+-old(config)
++validate_model(config)
+diff --git a/tests/test_codex.py b/tests/test_codex.py
+--- a/tests/test_codex.py
++++ b/tests/test_codex.py
+@@ -1 +1,2 @@
+{reference}
+"""
+                units, tests = parse_diff(diff)
+                self.assertEqual(tests, ['tests/test_codex.py'])
+                self.assertEqual(units[0]['candidates'], [])
+
+    def test_test_references_and_identifier_boundaries(self):
+        for tests in ({'tests/test_codex.py': '+rerun(config)'},
+                      {'tests/test_rerun.py': '+other()'},
+                      {'tests/test_codex.py': '+run_extra()'}):
+            with self.subTest(tests=tests):
+                self.assertIn('logic_without_tests', candidates('lib/run.py', '+run()', tests))
+        for tests in ({'tests/test_codex.py': '+from skim.run import main'},
+                      {'tests/test_run_extra.py': ''},
+                      {'tests/run/test_checks.py': ''}):
+            with self.subTest(tests=tests):
+                self.assertNotIn('logic_without_tests', candidates('lib/run.py', '+run()', tests))
+        self.assertIn('logic_without_tests', candidates('lib/doctor.py', '+check()',
+                      ['tests/test_codex.py'], {'tests/test_codex.py': '+other()'}))
