@@ -157,6 +157,8 @@ class WebTests(unittest.TestCase):
         self.assertNotIn('결제 인증 경계', body)
         self.assertNotIn('일반 API 응답 정리', self.request('/?review=1')[2])
         body = self.request('/pr/1')[2]
+        self.assertIn('모델 ', body)
+        self.assertIn('Codex CLI ', body)
         self.assertIn('<details open><summary>auth/session.py', body)
         self.assertIn('<details open><summary>.env', body)
         self.assertIn('<details><summary>README.md', body)

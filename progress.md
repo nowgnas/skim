@@ -124,3 +124,8 @@
 - 개인 키 탐지 범위와 변경 줄 오프셋의 겹침으로 secrets 후보를 판정해 문맥의 BEGIN/END 사이 본문 교체·추가·삭제 누락을 고쳤다. 문맥만 가린 경우는 계속 제외하며 전송 가림 규칙은 유지한다.
 - 리터럴 할당 중심으로 비밀값 후보를 좁히고 경로 접두사 오탐, 단수 migration, Dockerfile·Terraform·values.yaml·Dependabot 설정과 oauth_client 호출을 보완했다. 규칙별 헬퍼와 policy rules-v3를 적용하고 중복 빈 줄을 정리했다.
 - 회귀 테스트를 포함한 unittest 121개와 git diff --check가 통과했다. 실제 LLM·네트워크 호출, GitHub 쓰기와 커밋은 하지 않았다.
+
+## Codex 모델 기록 — 2026-10-31
+
+- codex_model 설정과 SKIM_CODEX_MODEL 우선 적용, --model 전달을 연결했다. probe의 JSON 이벤트·stderr 배너에서 모델을 감지해 버전별 캐시에 보존하고 분석·캐시 키에 반영한다.
+- doctor·웹 PR 상세에 모델을 표시하며 감지 실패 시 unknown과 명시적 설정 안내를 유지한다. fake 기반 unittest 125개와 git diff --check가 통과했다. 실제 LLM·네트워크 호출, GitHub 쓰기와 커밋은 하지 않았다.

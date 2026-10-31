@@ -37,6 +37,7 @@ class CodexTests(unittest.TestCase):
         self.answer = {'tool_ran': False, 'instructions_seen': ''}
         self.file_location = None
         self.events = [{'type': 'item.completed', 'item': {'type': 'agent_message', 'text': 'x'}}]
+        self.stderr = ''
         self.exitcode = 0
         self.adapter.init_home()
 
@@ -72,7 +73,7 @@ class CodexTests(unittest.TestCase):
             self.assertIn('--json', command)
             events = self.events + [{'type': 'turn.completed'}]
             stdout = '\n'.join(json.dumps(e) for e in events)
-            return subprocess.CompletedProcess(command, self.exitcode, stdout, '')
+            return subprocess.CompletedProcess(command, self.exitcode, stdout, self.stderr)
         return subprocess.CompletedProcess(command, 0, output, '')
 
     def test_init_explicit_idempotent_and_no_credential_reads(self):
@@ -322,6 +323,52 @@ class CodexTests(unittest.TestCase):
         self.assertTrue(first.exists())
         self.adapter.model = 'unknown'
         self.adapter.check_probe()
+
+    def test_model_banner_cached_without_extra_execution(self):
+        self.stderr = 'OpenAI Codex\nmodel: gpt-5.4\nprovider: openai\n'
+        self.adapter.probe()
+        self.assertEqual(self.adapter.model, 'gpt-5.4')
+        self.assertEqual(json.loads(self.adapter.probe_path.read_text())['model'], 'gpt-5.4')
+        fresh = CodexAdapter(self.runner, self.adapter.data_dir)
+        before = len(self.calls)
+        fresh.verify()
+        self.assertEqual(fresh.model, 'gpt-5.4')
+        self.assertFalse(any('--output-last-message' in c for c, _ in self.calls[before:]))
+        fresh.generate('자료', {})
+        command = self.calls[-1][0]
+        self.assertEqual(command[command.index('--model') + 1], 'gpt-5.4')
+
+    def test_model_event_precedes_banner_and_unknown_fallback(self):
+        self.stderr = 'model: banner-model\n'
+        self.events = [{'type': 'thread.started', 'metadata': {'model': 'event-model'}}]
+        self.adapter.probe()
+        self.assertEqual(self.adapter.model, 'event-model')
+        self.stderr = ''
+        self.events = []
+        self.adapter.probe()
+        self.assertEqual(self.adapter.model, 'unknown')
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            run(Config(self.root / 'config', self.adapter.data_dir), self.runner,
+                lambda _: '/fake', self.adapter)
+        self.assertIn('Codex 모델: unknown', out.getvalue())
+        self.assertIn('codex_model 설정', out.getvalue())
+
+    def test_configured_model_and_environment_override(self):
+        config = Config.load()
+        (config.config_dir / 'config.json').write_text(json.dumps({'codex_model': 'configured'}))
+        self.assertEqual(Config.load().codex_model, 'configured')
+        with patch.dict(os.environ, SKIM_CODEX_MODEL='override'):
+            config = Config.load()
+            self.assertEqual(config.codex_model, 'override')
+            adapter = CodexAdapter(self.runner, self.adapter.data_dir,
+                                   model=config.resolved_codex_model())
+            self.stderr = 'model: ignored-banner\n'
+            adapter.probe()
+            adapter.verify()
+            self.assertEqual(adapter.model, 'override')
+            command = next(c for c, _ in reversed(self.calls) if '--output-last-message' in c)
+            self.assertEqual(command[command.index('--model') + 1], 'override')
 
     def test_cli_init(self):
         with contextlib.redirect_stdout(io.StringIO()):

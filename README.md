@@ -180,3 +180,14 @@ bin/skim web --offline으로 할 수 있습니다.
 테스트: python3 -m unittest discover -s tests (실제 LLM·외부 네트워크 사용 없음).
 
 인증 refresh token이 교체되면 임시 홈의 갱신 결과가 삭제되어 원본 Codex CLI 로그인도 무효화될 수 있습니다. 이 경우 원본 CLI에서 다시 로그인하세요.
+
+### Codex 모델 기록
+
+`config.json`의 `codex_model`(예: `"codex_model": "gpt-5.4"`)로 모델을
+지정할 수 있습니다. `SKIM_CODEX_MODEL` 환경 변수가 설정 파일보다 우선하며,
+지정한 값은 Codex의 `--model` 인수와 분석 모델·캐시 키에 사용됩니다.
+미지정 시 `skim doctor --probe`가 JSON 이벤트의 모델 메타데이터 또는
+stderr의 `model:` 배너에서 감지하고 CLI 버전별 probe 캐시에 보관합니다.
+일반 검사에서는 캐시를 읽어 추가 모델 호출을 하지 않습니다. 감지 실패 시
+`unknown`을 유지하고 doctor에서 명시적 모델 설정을 권장합니다.
+모델은 doctor와 웹 PR 상세 화면에서 확인할 수 있습니다.

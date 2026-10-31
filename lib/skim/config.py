@@ -27,6 +27,17 @@ class Config:
     sessio_index_path: Path | None = None
     sessio_web_url: str = 'http://127.0.0.1:8765/'
 
+    codex_model: str | None = None
+
+    def resolved_codex_model(self):
+        # doctor도 파일 권한을 바꾸지 않고 같은 설정과 환경 우선순위를 사용한다.
+        path = self.config_dir / 'config.json'
+        settings = json.loads(path.read_text()) if path.exists() else {}
+        value = os.environ.get('SKIM_CODEX_MODEL', settings.get('codex_model', self.codex_model))
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            raise ValueError('codex_model 설정은 비어 있지 않은 문자열이어야 합니다')
+        return value.strip() if value else None
+
     @classmethod
     def load(cls):
         home = os.environ.get("SKIM_HOME")
@@ -65,7 +76,8 @@ class Config:
         if not valid_base_url(url):
             raise ValueError('sessio_web_url 설정은 로컬 Sessio HTTP 주소여야 합니다')
         values['sessio_web_url'] = url
-        return cls(config_dir, data_dir, **values)
+        config = cls(config_dir, data_dir, **values)
+        return cls(config_dir, data_dir, **values, codex_model=config.resolved_codex_model())
 
     @property
     def db_path(self):
