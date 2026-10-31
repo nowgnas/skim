@@ -20,6 +20,7 @@ from urllib.parse import parse_qs, urlsplit
 from .db import connect
 from .collect import Collector, CollectionScheduler
 from .analyze.units import parse_diff
+from .sessio import session_link
 
 CSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'"
 STATIC = Path(__file__).with_name('web_static')
@@ -162,12 +163,16 @@ def github(pr):
     return None
 
 
-def detail(pr, query, config):
+def detail(pr, query, config, offline=False):
     a, s = pr['analysis'], pr['snapshot']
     content = f'<p><a href="/">← PR 목록</a></p><h1>{esc(pr["title"])}</h1>'
     link = github(pr)
     if link:
         content += f'<p><a href="{esc(link)}" rel="noreferrer">GitHub 원문 ↗</a></p>'
+    session = None if offline else session_link(config, pr)
+    if session:
+        sid, url = session
+        content += f'<p><a href="{esc(url)}" rel="noreferrer">Sessio · {esc(sid)} ↗</a></p>'
     content += f'<article><h2>의도</h2><p>{esc(a["intent"] if a and a["intent"] else "미분석 — 분석 결과가 없습니다.")}</p><h2>위험 요약</h2><p>{badges(pr)}</p><p>{esc(pr["status"])} {esc(a["error"] if a else "")}</p>'
     if s:
         coverage = json.loads(s['coverage'])
@@ -273,7 +278,7 @@ class Handler(BaseHTTPRequestHandler):
                     pr = next((p for p in prs if match and p['id'] == int(match[1])), None)
                     if pr is None:
                         return self.reply(404, 'PR이 없습니다')
-                    body = detail(pr, parse_qs(url.query), self.server.config)
+                    body = detail(pr, parse_qs(url.query), self.server.config, getattr(self.server, 'offline', False))
         self.reply(200, page('대시보드', body))
 
     def do_POST(self):
@@ -355,6 +360,7 @@ def serve(config, port=0, open_browser=True, offline=False):
         with closing(connect(config)):
             pass
         with Server(config, port) as server, socket.socket(socket.AF_UNIX) as control:
+            server.offline = offline
             path.unlink(missing_ok=True)
             # bind 시점에도 소켓이 공개되지 않도록 umask를 제한한다.
             mask = os.umask(0o177)

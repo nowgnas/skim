@@ -24,6 +24,8 @@ class Config:
     data_dir: Path
     poll_interval_seconds: int = 300
     retention_days: int = 30
+    sessio_index_path: Path | None = None
+    sessio_web_url: str = 'http://127.0.0.1:8765/'
 
     @classmethod
     def load(cls):
@@ -53,6 +55,16 @@ class Config:
             values[name] = value
         for name in ("cache", "logs"):
             private_dir(data_dir / name)
+        index = settings.get('sessio_index_path')
+        if index is not None and (not isinstance(index, str) or not index):
+            raise ValueError('sessio_index_path 설정은 비어 있지 않은 경로여야 합니다')
+        values['sessio_index_path'] = (Path(index).expanduser() if index else
+                                      Path(os.environ.get('SESSIO_HOME', '~/.sessio')).expanduser() / 'index/sessions.jsonl')
+        url = settings.get('sessio_web_url', 'http://127.0.0.1:8765/')
+        from .sessio import valid_base_url
+        if not valid_base_url(url):
+            raise ValueError('sessio_web_url 설정은 로컬 Sessio HTTP 주소여야 합니다')
+        values['sessio_web_url'] = url
         return cls(config_dir, data_dir, **values)
 
     @property

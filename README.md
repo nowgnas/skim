@@ -79,3 +79,24 @@ SHA를 수집 전후 확인하고 설명·파일 목록·diff 해시를 스냅�
 구분하며 모델이 `unknown`이면 영속 결과를 재사용하지 않습니다. 수집용 원문
 해시는 coverage에 별도로 보존해 분석 뒤 재수집도 중복 스냅샷을 만들지 않습니다.
 실제 LLM·네트워크를 호출하는 테스트는 없습니다.
+
+## Sessio 연결
+
+PR 상세에서 로컬 Sessio 인덱스의 저장소·브랜치 후보가 정확히 하나일 때
+`gh api user`로 현재 로그인 사용자를 확인합니다. PR 작성자와 일치하면
+세션 ID와 링크를 표시합니다. 인증 실패·인덱스 누락/손상·복수 후보는 표시하지
+않으며 `web --offline`에서는 조회와 표시를 모두 생략합니다.
+
+인덱스 기본 경로는 `$SESSIO_HOME/index/sessions.jsonl`이며,
+`SESSIO_HOME`이 없으면 `~/.sessio/index/sessions.jsonl`입니다.
+skim의 `config.json`에서 `sessio_index_path`로 경로를 변경할 수 있습니다.
+`sessio_web_url` 기본값은 `http://127.0.0.1:8765/`입니다.
+Sessio가 다른 포트에서 실행되면 `http://localhost:8766/`처럼 설정합니다.
+HTTP의 `127.0.0.1` 또는 `localhost`와 명시적 포트·루트 경로만 허용하며,
+토큰·query·fragment는 설정에 넣지 않습니다. Sessio 웹 인증은 해당 앱에서
+먼저 진행해야 합니다.
+
+Sessio의 실제 인덱스는 보통 저장소 이름만 기록하므로 그 이름과 정확한
+브랜치를 비교합니다(전체 `owner/repo` 값도 지원). 동일 이름의 저장소를
+여러 소유자 아래 사용하면 인덱스의 이름만으로 소유자를 구별할 수 없습니다.
+인덱스의 임의 URL은 사용하지 않고 검증한 harness·세션 ID로 링크를 생성합니다.

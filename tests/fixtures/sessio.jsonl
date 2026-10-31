@@ -1,0 +1,2 @@
+{"harness":"codex","session_id":"abc-123","repo":"checkout","branch":"feature/payment"}
+{"harness":"claude","session_id":"other-456","repo":"another","branch":"feature/payment"}
