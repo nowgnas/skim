@@ -27,20 +27,46 @@ def is_test(path):
     return bool(re.search(r'(^|/)(tests?|__tests__)(/|$)|(^|/)(test_[^/]+|[^/]+[._](test|spec)\.[^/]+)$|_test\.', path, re.I))
 
 
+def changed_lines(text):
+    """문맥·hunk 헤더·파일 헤더를 제외한 추가/삭제 줄만 반환한다."""
+    return '\n'.join(line[1:] for line in text.splitlines()
+                     if line.startswith(('+', '-')) and not line.startswith(('+++ ', '--- ')))
+
+
 def candidates(path, text, tests):
-    # camelCase도 단어 경계로 취급해 인증 함수 이름을 놓치지 않는다.
-    value = re.sub(r'([a-z])([A-Z])', r'\1_\2', path + '\n' + text).lower()
-    flags = []
-    rules = {'auth': r'(?<![a-z])(?:auth(?:entication|enticated|enticate|orization|orized|orize|z|n)?|permissions?|oauth|sessions?|acl)(?![a-z])', 'payments': r'payment|billing|checkout|refund|charge',
-             'db_schema_migration': r'migration|schema|\b(?:drop|alter) table',
-             'config': r'config|settings|\.toml$|\.ini$|\.env',
-             'ci_workflow': r'\.github/workflows/',
-             'dependency': r'(^|/)(package(-lock)?\.json|(?:[^/]+[.-])?lock|requirements[^/]*|pyproject\.toml|go\.(?:mod|sum)|pnpm-lock\.yaml|gemfile|cargo\.toml)(\n|$)',
-             'secrets': r'secret|password|private.key|token|credentials'}
-    for flag, pattern in rules.items():
-        target = path.lower() if flag == 'dependency' else value
-        if re.search(pattern, target, re.M):
-            flags.append(flag)
+    location = PurePosixPath(path.lower())
+    parts = location.parts
+    name = location.name
+    changed = changed_lines(text)
+    # camelCase 호출도 동일한 식별자로 검사하되 일반 단어 언급은 근거로 쓰지 않는다.
+    code = re.sub(r'([a-z])([A-Z])', r'\1_\2', changed).lower()
+    auth_names = (r'auth|authn|authz|authenticate|authenticated|authentication|'
+                  r'authorize|authorized|authorization|is_authenticated|'
+                  r'check_permission|check_permissions|verify_token|login|logout|oauth|jwt')
+    auth_path = any(re.fullmatch(
+        r'auth|authn|authz|authentication|authorization|authenticate|authenticated|'
+        r'authorize|is_authenticated|check_permission|permissions?|sessions?|login|logout|oauth|acl',
+        re.sub(r'([a-z])([A-Z])', r'\1_\2', part).lower().split('.')[0]) for part in PurePosixPath(path).parts)
+    middleware_auth = ('middleware' in parts and name.startswith('auth') or
+                       bool(re.fullmatch(r'auth[^/]*middleware\.[^.]+', name)))
+    rules = {
+        'auth': auth_path or middleware_auth or bool(re.search(
+            r'\b(?:' + auth_names + r')\s*(?:\(|\.\s*[a-z_]\w*\s*\()', code)),
+        'payments': any(part in ('payments', 'billing', 'checkout', 'stripe') or
+                        part.startswith('stripe.') for part in parts) or bool(re.search(
+                            r'\b(?:stripe|braintree|paypal|adyen|razorpay)(?:\.[a-z_]\w*)+\s*\(', code)),
+        'db_schema_migration': any(part in ('migrations', 'migrate') for part in parts) or
+            'alembic/versions/' in path.lower() or name.endswith('.sql') or
+            path.lower().endswith(('prisma/schema.prisma', 'db/schema.rb')) or bool(re.search(
+                r'\b(?:(?:create|alter|drop)\s+table|(?:add|drop)\s+column|create\s+(?:unique\s+)?index)\b', code)),
+        'config': 'config' in parts or name.endswith(('.toml', '.ini', '.yaml', '.yml')) or
+            name.startswith('.env') or name == 'settings.py',
+        'ci_workflow': path.lower().startswith('.github/workflows/'),
+        'dependency': bool(re.search(r'(^|/)(package(-lock)?\.json|(?:[^/]+[.-])?lock|requirements[^/]*|pyproject\.toml|go\.(?:mod|sum)|pnpm-lock\.yaml|gemfile|cargo\.toml)$', path.lower())),
+        'secrets': secret_path(path) or 'secrets' in parts or bool(SECRET_VALUE.search(changed)) or
+            bool(re.search(r"\b(?:[a-z0-9_]*(?:password|api_?key|secret|token)[a-z0-9_]*)[\"']?\s*[:=]\s*([\"'])[^\"'\n]+\1", code)),
+    }
+    flags = [flag for flag, matches in rules.items() if matches]
     if not is_test(path) and PurePosixPath(path).suffix in ('.py', '.js', '.ts', '.tsx', '.go', '.rs', '.java', '.rb', '.c', '.cpp'):
         stem = PurePosixPath(path).stem
         if not any(stem == re.sub(r'^(?:test_|spec_)|(?:[._](?:test|spec)|_test)$', '', PurePosixPath(t).stem) for t in tests):
@@ -95,7 +121,7 @@ def parse_diff(diff, files=()):
             flags = candidates(path, text, tests)
             cleaned = sanitize(text)
             redacted = not excluded and cleaned != text
-            if (excluded or redacted) and 'secrets' not in flags:
+            if excluded and 'secrets' not in flags:
                 flags.append('secrets')
             units.append(dict(change_id=f'h{len(units)+1}', file_path=sanitize(path), kind='hunk' if old else 'synthetic',
                               old_range=old, new_range=new, binary='GIT binary patch' in body or 'Binary files ' in body,

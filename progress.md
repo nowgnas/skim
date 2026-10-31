@@ -106,3 +106,9 @@
 - codex-cli 0.165.0 실환경에서 doctor --probe 통과. 빈 CODEX_HOME 생성, 점 포함 기능명 허용, 웹 검색 비활성(-c web_search="disabled"), 위험 기능 차단 목록 확장.
 - 모델 자기보고(tool_ran)는 실제로 부정확해 --json 이벤트 스트림으로 도구 호출을 객관 판정한다. 분석 실행에도 같은 검사를 적용한다.
 - 음성 검증: --disable 없이 실행하면 command_execution 이벤트가 나타나 검사에 걸림을 확인했다.
+
+## 위험 후보 오탐 수정 — 2026-10-31
+
+- 위험 후보를 경로 구조와 추가·삭제 줄의 DDL·인증 호출·결제 SDK 호출·비밀값 할당 근거로 제한했다. 문맥·hunk 헤더와 일반 schema/config 단어는 근거에서 제외하고 logic_without_tests는 유지했다.
+- PR #13의 provider_schema/auth.json 문맥 회귀와 양성 사례를 추가하고 분석 캐시용 prompt_version을 skim-ko-2로 올렸다. doctor 테스트는 외부 SKIM_HOME을 격리했다.
+- 실제 LLM·네트워크 호출 없이 unittest 113개와 git diff --check가 통과했다. GitHub 쓰기와 커밋은 하지 않았다.
