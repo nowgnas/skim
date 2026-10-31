@@ -201,7 +201,7 @@ class WebTests(unittest.TestCase):
         self.assertNotIn('규칙 후보:', badges(base))
         self.assertNotIn('모델 판단:', badges(base))
         self.assertIn('모델 판단: 미분석', badges(dict(base, unanalysed=True, items={})))
-        self.assertIn('일부 미분석', badges(dict(base, unanalysed=True)))
+        self.assertIn('모델 판단: 일부 미분석', badges(dict(base, unanalysed=True)))
 
     def test_untrusted_content_and_cache_paths(self):
         with closing(connect(self.config)) as conn, conn:

@@ -243,3 +243,12 @@ diff --git a/tests/test_codex.py b/tests/test_codex.py
         for header in ('--- a/doctor.py', 'rename from doctor.py', '+++ b/doctor.py'):
             self.assertIn('logic_without_tests', candidates('lib/doctor.py', '+check()',
                 [path], {path: header + '\n@@ -1 +1 @@\n+other()'}))
+
+    def test_exact_test_filename_only(self):
+        for source, test in (
+            ('lib/skim/__init__.py', 'tests/__init__.py'),
+            ('lib/skim/web.py', 'tests/web/test_anything.py'),
+            ('lib/run.py', 'tests/test_run_codex.py'),
+        ):
+            with self.subTest(source=source, test=test):
+                self.assertIn('logic_without_tests', candidates(source, '+change()', [test]))

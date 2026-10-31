@@ -133,7 +133,7 @@ def badges(pr):
     if pr['model_flags']:
         labels.append('모델 판단: ' + ' · '.join(pr['model_flags']))
     if pr['unanalysed']:
-        labels.append('모델 판단: 미분석' if not pr['items'] else '일부 미분석')
+        labels.append('모델 판단: 미분석' if not pr['items'] else '모델 판단: 일부 미분석')
     return (f'<span class="badge {esc(pr["importance"])}">{esc(pr["importance"])}</span> '
             + esc(' / '.join(labels))
             + (' · 이전 SHA 결과' if pr['stale'] else '') + (' · draft' if pr['draft'] else ''))
