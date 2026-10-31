@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 사용자 PATH 링크와 선택적 로그인 웹 서비스를 설치한다.
+# 사용자 PATH 링크를 설치한다.
 set -euo pipefail
 ROOT="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PY="${SKIM_PYTHON:-$(command -v python3 || true)}"

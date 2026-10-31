@@ -121,24 +121,10 @@ Mac에서는 위 순서로 실행하면 브라우저가 열립니다. 터미널�
 현재 Codex 격리 계약 미검증으로 doctor는 실패하고 실제 분석은 차단됩니다.
 수집과 로컬 웹은 사용할 수 있습니다. 등록만으로 코드 전송을 허용하지 않습니다.
 
-```bash
-./setup.sh --web
-./setup.sh --remove-web
-```
-
---web은 로그인 시 macOS launchd 사용자 LaunchAgent
-(~/Library/LaunchAgents/dev.skim.web.plist) 또는 Linux systemd --user
-(~/.config/systemd/user/skim-web.service)를 등록합니다.
-브라우저는 자동으로 열지 않습니다. 로그인 후 skim web으로 기존 서버의 새 진입 URL을
-받으세요. --remove-web은 자동 시작과 서비스 파일만 제거하고 설정·DB는 보존합니다.
-CLI 제거는 자동 시작 제거 후 rm ~/.local/bin/skim으로 합니다.
+로그인 시 자동 시작 등록은 MVP 범위 밖입니다. 터미널에서 `skim web`을 실행하세요.
+CLI 제거는 `rm ~/.local/bin/skim`으로 합니다.
 기존 일반 파일이나 다른 설치의 링크는 덮어쓰지 않습니다.
-SKIM_PYTHON으로 Python 실행 경로를 선택할 수 있습니다.
-서비스에는 설치 당시 PATH·Python·명시한 SKIM_HOME을 기록하므로 환경 변경 후
-./setup.sh --web을 다시 실행하세요. Linux에는 로그인한 systemd 사용자 세션이 필요합니다.
-Mac 상태는 launchctl print gui/$(id -u)/dev.skim.web,
-Linux 상태는 systemctl --user status skim-web.service로 확인합니다.
-서비스에서도 gh 인증과 로그인 키체인 접근이 가능해야 합니다.
+`SKIM_PYTHON`으로 Python 실행 경로를 선택할 수 있습니다.
 조직 SSO 승인·비공개 저장소 읽기 권한·팀 멤버십을 확인하세요.
 doctor의 gh 인증 성공만으로 모든 조직·팀 접근을 보장하지 않습니다.
 

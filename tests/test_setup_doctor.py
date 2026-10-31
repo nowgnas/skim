@@ -3,7 +3,6 @@ import contextlib
 import io
 import os
 from pathlib import Path
-import plistlib
 import subprocess
 import sys
 import tempfile
@@ -30,6 +29,7 @@ class SetupDoctorTests(unittest.TestCase):
             self.assertEqual(run(config, runner, lambda n: '/fake'), 1)
         self.assertIn('SSO', out.getvalue())
         self.assertNotIn('SECRET', out.getvalue())
+        self.assertNotIn('TOKEN', out.getvalue())
         self.assertIn('차단', out.getvalue())
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(run(config, runner, lambda n: '/fake', Mock()), 0)
@@ -40,30 +40,9 @@ class SetupDoctorTests(unittest.TestCase):
             self.assertEqual(run(config, runner, lambda n: None), 1)
             runner.assert_not_called()
 
-    def install(self, system, *options):
-        with patch('pathlib.Path.home', return_value=self.home), patch('skim.setup.platform.system', return_value=system), patch('skim.setup.shutil.which', return_value='/fake'), patch('skim.setup.subprocess.run') as runner, contextlib.redirect_stdout(io.StringIO()):
-            code = main(['--root', str(ROOT), *options])
-        return code, runner
-
-    def test_linux(self):
-        for _ in range(2):
-            code, runner = self.install('Linux', '--web')
-            self.assertEqual(code, 0)
-            self.assertIn(unittest.mock.call(['systemctl', '--user', 'enable', '--now', 'skim-web.service'], check=True), runner.call_args_list)
-        service = self.home / '.config/systemd/user/skim-web.service'
-        self.assertIn('--no-browser', service.read_text())
-        self.assertEqual(service.stat().st_mode & 0o777, 0o600)
-        self.assertEqual(self.install('Linux', '--remove-web')[0], 0)
-        self.assertFalse(service.exists())
-
-    def test_mac(self):
-        self.assertEqual(self.install('Darwin', '--web')[0], 0)
-        service = self.home / 'Library/LaunchAgents/dev.skim.web.plist'
-        value = plistlib.loads(service.read_bytes())
-        self.assertEqual(value['ProgramArguments'], [str(ROOT / 'bin/skim'), 'web', '--no-browser'])
-        self.assertIn('SKIM_PYTHON', value['EnvironmentVariables'])
-        self.assertEqual(self.install('Darwin', '--remove-web')[0], 0)
-        self.assertFalse(service.exists())
+    def install(self):
+        with patch('pathlib.Path.home', return_value=self.home), contextlib.redirect_stdout(io.StringIO()):
+            return main(['--root', str(ROOT)])
 
     def test_wrapper_and_conflict(self):
         result = subprocess.run([str(ROOT / 'setup.sh')], env=dict(os.environ, HOME=str(self.home)), capture_output=True, text=True)
@@ -73,12 +52,32 @@ class SetupDoctorTests(unittest.TestCase):
         link.unlink()
         link.write_text('keep')
         with contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(self.install('Linux')[0], 1)
+            self.assertEqual(self.install(), 1)
         self.assertEqual(link.read_text(), 'keep')
 
-    def test_service_failure_is_reported(self):
-        with patch('pathlib.Path.home', return_value=self.home), patch('skim.setup.platform.system', return_value='Linux'), patch('skim.setup.shutil.which', return_value='/fake'), patch('skim.setup.subprocess.run', side_effect=subprocess.CalledProcessError(1, 'fake')), contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(main(['--root', str(ROOT), '--web']), 1)
+    def test_doctor_checks_skim_home_root_without_changing_permissions(self):
+        config = Config(self.home / 'config', self.home / 'data')
+        config.config_dir.mkdir(mode=0o700)
+        config.data_dir.mkdir(mode=0o700)
+        self.home.chmod(0o755)
+        with patch.dict(os.environ, SKIM_HOME=str(self.home)), contextlib.redirect_stdout(io.StringIO()):
+            runner = Mock(return_value=subprocess.CompletedProcess([], 0))
+            self.assertEqual(run(config, runner, lambda n: '/fake', Mock()), 1)
+        self.assertEqual(self.home.stat().st_mode & 0o777, 0o755)
+
+    def test_doctor_skips_disappearing_files(self):
+        missing = self.home / 'removed-wal'
+        original = Path.lstat
+
+        def lstat(path):
+            if path == missing:
+                raise FileNotFoundError(path)
+            return original(path)
+
+        with patch.object(Path, 'rglob', return_value=iter([missing])), patch.object(Path, 'lstat', lstat), contextlib.redirect_stdout(io.StringIO()):
+            runner = Mock(return_value=subprocess.CompletedProcess([], 0))
+            self.assertEqual(run(Config(self.home, self.home / 'absent'), runner,
+                                 lambda n: '/fake', Mock()), 0)
 
     def test_doctor_timeout_and_auth_failure(self):
         config = Config(self.home, self.home / 'absent')
