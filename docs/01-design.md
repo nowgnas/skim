@@ -51,7 +51,7 @@ SQLite를 기준 저장소로 사용한다. 설정·DB·캐시는 사용자 전�
 
 분석 캐시 키는 `repo + PR + base/head SHA + input_hash + provider/model + cli_version + prompt_version + schema_version`이다. `input_hash`는 전송할 제목·설명·정제 diff·테스트 목록·제외/분할 정책의 해시이며 스냅샷과 분석에 기록한다. 모델 식별자가 `unknown`이면 CLI 버전을 기록하고 영속 캐시는 재사용하지 않는다. `coverage`에는 전체/분석/제외/누락 단위 수와 사유를 보관한다. 기본 보존 기간은 30일이다.
 
-Sessio 연동은 sangwon 본인이 로컬에서 만든 PR에만 적용한다. 로컬 Sessio 인덱스에서 PR 브랜치 이름으로 세션을 찾으며, 없으면 아무것도 표시하지 않는다. 다른 사람의 PR에는 Sessio 링크를 표시하지 않는다.
+Sessio 연동은 sangwon 본인(현재 `gh` 로그인 사용자와 PR author가 일치)이 로컬에서 만든 PR에만 적용한다. 로컬 Sessio 인덱스에서 같은 저장소 + PR 브랜치 이름으로 세션을 찾으며, 없거나 후보가 여러 개면 아무것도 표시하지 않는다. 다른 사람의 PR에는 Sessio 링크를 표시하지 않는다.
 
 DB는 버전별 트랜잭션 마이그레이션과 사전 백업을 사용한다. 로그는 데이터 디렉터리의 `logs/`에 두고 5 MiB × 3개로 순환한다. `skim cache clear`로 캐시를, 프로세스 종료 후 `skim uninstall --purge`로 설정·DB·로그까지 삭제한다.
 
