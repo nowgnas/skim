@@ -1,0 +1,876 @@
+diff --git a/.gitignore b/.gitignore
+index 43ae0e2..0ba4922 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -1,2 +1,3 @@
+ __pycache__/
+ *.py[cod]
++.impl.lock
+diff --git a/docs/04-web.md b/docs/04-web.md
+new file mode 100644
+index 0000000..12614d5
+--- /dev/null
++++ b/docs/04-web.md
+@@ -0,0 +1,41 @@
++# 로컬 대시보드
++
++`bin/skim web`은 127.0.0.1의 임의 포트에서 실행하며 브라우저를 연다.
++고정 포트는 `--port 8765`, URL만 출력하려면 `--no-browser`를 사용한다.
++실행 중 다시 `skim web`을 호출하면 사용자 전용 Unix 소켓으로 새 URL만 발급한다.
++종료는 서버를 실행한 터미널에서 Ctrl+C를 누른다.
++
++진입 URL의 fragment 토큰은 60초 동안 한 번만 사용할 수 있다. 진입 스크립트가
++주소에서 먼저 지운 뒤 동일 Origin으로 교환한다. 세션은 서버 재시작 시 소멸하며
++HttpOnly·SameSite=Strict·host-only 쿠키로 유지한다. HTTP 루프백의 Secure 쿠키
++처리는 브라우저별 차이가 있으므로 이 구현은 Secure를 설정하지 않는다. 브라우저별
++Secure 동작 검증은 수행하지 않았다. 다른 포트도 쿠키를 받을 수 있으므로
++모든 변경 요청에서 정확한 Origin 및 별도 CSRF 토큰 검사를 강제한다.
++URL을 공유하지 않으며, 초기 진입 셸에는 PR 데이터를 포함하지 않는다.
++
++목록에서 저장소·리뷰 요청·중요도·분석 상태를 필터링할 수 있다. 상세에서는
++규칙 후보·미분석·high를 펼치고 나머지를 접는다. 파일명·라인 범위·정제된 hunk와
++판정 근거를 확인하고, 전체 원본 diff 또는 GitHub 변경 화면으로 이동할 수 있다.
++이전 SHA 결과, 분석 실패·차단·부분 분석, 수집 오류를 별도로 표시한다.
++원본 diff에는 분석에서 제외한 민감 정보가 있을 수 있으므로 인증 후에만 표시한다.
++Sessio 인덱스 연동은 아직 구현하지 않아 세션 링크를 생성하지 않는다.
++
++수동 새로고침은 수집 작업을 SQLite 큐에 넣는다. 내장 워커는 설정된 간격으로
++같은 큐를 점유해 수집하고 허용된 최신 스냅샷을 분석한다. Codex 격리 계약이
++확인되지 않으면 기존 분석기의 차단 정책을 유지한다. 설정 화면은 설정값과
++최근 작업 상태를 보여 준다. 설정 변경은 로컬 설정 파일과 기존 CLI를 사용한다.
++
++## 외부 통신 없는 데모
++
++```bash
++python3 scripts/demo_seed.py --home /tmp/skim-demo
++SKIM_HOME=/tmp/skim-demo bin/skim web --offline
++```
++
++데모 스크립트는 비어 있는 전용 SKIM_HOME에서만 동작한다. 가짜 모델 응답으로
++high·mid·low, 민감 경로 제외, 분석 대기, 이전 SHA 사례를 만든다.
++`--offline`에서는 워커를 실행하지 않으며 수동 요청은 큐에만 남긴다.
++일반 모드로 재실행하면 큐를 처리하므로 데모 확인에는 계속 `--offline`을 사용한다.
++
++HTTP 보안 테스트는 메모리 속 연결로 요청을 재현하며 실제 소켓·GitHub·LLM을
++호출하지 않는다. 실행: `python3 -m unittest discover -s tests`.
+diff --git a/lib/skim/cli.py b/lib/skim/cli.py
+index 79a1751..4285154 100644
+--- a/lib/skim/cli.py
++++ b/lib/skim/cli.py
+@@ -43,18 +43,26 @@ def parser():
+     analyze = commands.add_parser('analyze', help='허용한 저장소의 최신 스냅샷 분석')
+     analyze.add_argument('--snapshot', type=int)
+     analyze.add_argument('--include-drafts', action='store_true', help='draft도 수동 분석')
+-    for command in ('web', 'doctor'):
+-        commands.add_parser(command, help='후속 PR에서 구현 예정')
++    web = commands.add_parser('web', help='로컬 PR 대시보드')
++    web.add_argument('--port', type=int, default=0)
++    web.add_argument('--no-browser', action='store_true')
++    web.add_argument('--offline', action='store_true', help='수집·분석 없이 저장된 데이터만 표시')
++    commands.add_parser('doctor', help='후속 PR에서 구현 예정')
+     return root
+ 
+ 
+ def main(argv=None):
+     args = parser().parse_args(argv)
+-    if args.command in ('web', 'doctor'):
++    if args.command == 'doctor':
+         print(f'{args.command}: 아직 구현되지 않았습니다.', file=sys.stderr)
+         return 2
+     try:
+         config = Config.load()
++        if args.command == 'web':
++            if not 0 <= args.port <= 65535:
++                raise ValueError('포트는 0~65535 범위여야 합니다')
++            from .web import serve
++            return serve(config, args.port, not args.no_browser, args.offline)
+         conn = connect(config)
+         try:
+             if args.command == 'analyze':
+diff --git a/lib/skim/web.py b/lib/skim/web.py
+new file mode 100644
+index 0000000..5f50791
+--- /dev/null
++++ b/lib/skim/web.py
+@@ -0,0 +1,403 @@
++"""루프백 전용 대시보드와 일회용 진입 인증."""
++import fcntl
++import hashlib
++import hmac
++import json
++import os
++import re
++import secrets
++import socket
++import sqlite3
++import threading
++import time
++from contextlib import closing
++from html import escape
++from http.cookies import SimpleCookie, CookieError
++from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
++from pathlib import Path
++from urllib.parse import parse_qs, urlsplit
++
++from .db import connect
++from .collect import Collector, CollectionScheduler
++from .analyze.units import parse_diff
++
++CSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'"
++STATIC = Path(__file__).with_name('web_static')
++RANK = {'high': 3, 'mid': 2, 'low': 1}
++
++
++def constant_equal(left, right):
++    return hmac.compare_digest(left.encode('utf-8'), right.encode('utf-8'))
++
++
++def esc(value):
++    return escape(str(value if value is not None else ''), quote=True)
++
++
++def page(title, content):
++    return ('<!doctype html><html lang="ko"><meta charset="utf-8">'
++            '<meta name="viewport" content="width=device-width,initial-scale=1">'
++            f'<title>{esc(title)} · skim</title><link rel="stylesheet" href="/static/app.css">'
++            '<header><a class="brand" href="/">skim</a><span>PR 검토 대시보드</span>'
++            '<a href="/settings">설정 · 상태</a></header><main>' + content + '</main></html>')
++
++
++class Auth:
++    def __init__(self, clock=time.monotonic):
++        self.clock = clock
++        self.lock = threading.Lock()
++        self.tokens = {}
++        self.sessions = {}
++        self.cookie = 'skim_' + secrets.token_hex(8)
++
++    def issue(self):
++        token = secrets.token_urlsafe(32)
++        with self.lock:
++            now = self.clock()
++            self.tokens = {key: expiry for key, expiry in self.tokens.items() if expiry > now}
++            self.tokens[hashlib.sha256(token.encode()).digest()] = now + 60
++        return token
++
++    def redeem(self, token):
++        digest = hashlib.sha256(token.encode()).digest()
++        with self.lock:
++            found = next((key for key in self.tokens if hmac.compare_digest(key, digest)), None)
++            expiry = self.tokens.pop(found, 0)
++            if expiry <= self.clock():
++                return None
++            session, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
++            self.sessions[session] = csrf
++            return session
++
++    def csrf(self, cookie):
++        try:
++            jar = SimpleCookie()
++            jar.load(cookie or '')
++            value = jar[self.cookie].value if self.cookie in jar else ''
++        except CookieError:
++            return None
++        with self.lock:
++            return next((csrf for key, csrf in self.sessions.items() if constant_equal(key, value)), None)
++
++
++def read_diff(config, snapshot):
++    """캐시 루트 밖의 경로와 심볼릭 링크 대상은 읽지 않는다."""
++    if not snapshot or not snapshot['diff_path']:
++        return ''
++    try:
++        path = Path(snapshot['diff_path']).resolve()
++        root = (config.data_dir / 'cache').resolve()
++        if not path.is_relative_to(root) or not path.is_file() or path.stat().st_size > 1024 * 1024:
++            return ''
++        return path.read_text(encoding='utf-8', errors='replace')
++    except OSError:
++        return ''
++
++
++def load_prs(conn, config):
++    rows = []
++    for raw in conn.execute("SELECT p.*,r.owner,r.name,EXISTS(SELECT 1 FROM pr_sources WHERE pr_id=p.id AND source='review_request') AS review FROM pull_requests p JOIN repositories r ON r.id=p.repo_id WHERE p.state='open'"):
++        pr = dict(raw)
++        snapshot = conn.execute('SELECT * FROM snapshots WHERE pr_id=? ORDER BY id DESC LIMIT 1', (pr['id'],)).fetchone()
++        analysis = conn.execute('SELECT a.*,s.head_sha,s.base_sha FROM analyses a JOIN snapshots s ON s.id=a.snapshot_id WHERE s.pr_id=? ORDER BY s.id DESC,a.id DESC LIMIT 1', (pr['id'],)).fetchone()
++        result = json.loads(analysis['output_json'] or '{}') if analysis else {}
++        units = result.get('units', [])
++        if not units and snapshot:
++            coverage = json.loads(snapshot['coverage'])
++            units, _ = parse_diff(read_diff(config, snapshot), coverage.get('files', []))
++        items = {item['change_id']: item for item in result.get('items', [])}
++        if snapshot and analysis and snapshot['id'] != analysis['snapshot_id']:
++            units, _ = parse_diff(read_diff(config, snapshot), json.loads(snapshot['coverage']).get('files', []))
++            items = {}
++        pr.update(snapshot=snapshot, analysis=analysis, result=result, units=units, items=items,
++                  status=analysis['status'] if analysis else 'unanalyzed',
++                  stale=bool(analysis and (analysis['head_sha'] != pr['head_sha'] or analysis['base_sha'] != pr['base_sha'] or (snapshot and snapshot['id'] != analysis['snapshot_id']))))
++        pr['importance'] = max((item['importance'] for item in items.values()), key=lambda x: RANK.get(x, 0), default='unanalyzed')
++        pr['flags'] = sorted({flag for unit in units for flag in unit.get('candidates', [])} | {flag for item in items.values() for flag in item.get('risk_flags', [])})
++        pr['unanalysed'] = not units or any(u['change_id'] not in items for u in units)
++        rows.append(pr)
++    return sorted(rows, key=lambda p: (-bool(p['flags']), -p['unanalysed'], -RANK.get(p['importance'], 0), -p['id']))
++
++
++def refresh_form(csrf):
++    return f'<form method="post" action="/refresh"><input type="hidden" name="csrf" value="{esc(csrf)}"><button>수동 새로고침</button></form>'
++
++
++def badges(pr):
++    return (f'<span class="badge {esc(pr["importance"])}">{esc(pr["importance"])}</span> '
++            + esc(' · '.join(pr['flags'])) + (' · 미분석' if pr['unanalysed'] else '')
++            + (' · 이전 SHA 결과' if pr['stale'] else '') + (' · draft' if pr['draft'] else ''))
++
++
++def listing(prs, query, csrf):
++    fields = [('repo', '저장소', sorted({p['owner'] + '/' + p['name'] for p in prs})),
++              ('importance', '중요도', ['high', 'mid', 'low', 'unanalyzed']),
++              ('status', '상태', ['completed', 'partial', 'failed', 'blocked', 'deferred', 'unanalyzed', 'stale']),
++              ('review', '리뷰 요청', ['1'])]
++    content = '<div class="heading"><h1>먼저 볼 변경</h1>' + refresh_form(csrf) + '</div><form class="filters" method="get">'
++    for name, label, values in fields:
++        content += f'<label>{label}<select name="{name}"><option value="">전체</option>'
++        for value in values:
++            selected = ' selected' if query.get(name, [''])[0] == value else ''
++            content += f'<option value="{esc(value)}"{selected}>{esc(value)}</option>'
++        content += '</select></label>'
++    content += '<button>필터 적용</button></form>'
++    for pr in prs:
++        values = dict(repo=pr['owner'] + '/' + pr['name'], importance=pr['importance'], status=pr['status'], review=str(pr['review']))
++        if any(query.get(key, [''])[0] and query[key][0] != value and not (key == 'status' and query[key][0] == 'stale' and pr['stale']) for key, value in values.items()):
++            continue
++        a, s = pr['analysis'], pr['snapshot']
++        content += (f'<article><div class="muted">{esc(values["repo"])} #{pr["number"]} · {esc(pr["author"])}'
++                    + (' · 리뷰 요청' if pr['review'] else '') + '</div>'
++                    f'<h2><a href="/pr/{pr["id"]}">{esc(pr["title"])}</a></h2>'
++                    f'<p>{esc(a["intent"] if a and a["intent"] else "의도 미분석")}</p><p>{badges(pr)}</p>'
++                    f'<div class="muted">{esc(pr["status"])} · 수집 {esc(s["collected_at"] if s else "대기")} · 분석 {esc(a["created_at"] if a else "대기")}</div></article>')
++    return content + ('<p class="muted">열린 PR이 없습니다.</p>' if not prs else '')
++
++
++def github(pr):
++    # 저장된 URL을 신뢰하지 않고 검증된 좌표만 사용한다.
++    if re.fullmatch(r'[A-Za-z0-9-]+', pr['owner']) and re.fullmatch(r'[A-Za-z0-9_.-]+', pr['name']) and pr['name'] not in ('.', '..'):
++        return f'https://github.com/{pr["owner"]}/{pr["name"]}/pull/{int(pr["number"])}'
++    return None
++
++
++def detail(pr, query, config):
++    a, s = pr['analysis'], pr['snapshot']
++    content = f'<p><a href="/">← PR 목록</a></p><h1>{esc(pr["title"])}</h1>'
++    link = github(pr)
++    if link:
++        content += f'<p><a href="{esc(link)}" rel="noreferrer">GitHub 원문 ↗</a></p>'
++    content += f'<article><h2>의도</h2><p>{esc(a["intent"] if a and a["intent"] else "미분석 — 분석 결과가 없습니다.")}</p><h2>위험 요약</h2><p>{badges(pr)}</p><p>{esc(pr["status"])} {esc(a["error"] if a else "")}</p>'
++    if s:
++        coverage = json.loads(s['coverage'])
++        stats = coverage.get('analysis', {})
++        content += '<p>수집 상태: ' + esc(coverage.get('status', '대기')) + ' · ' + esc(coverage.get('collection_error', '')) + '</p>'
++        content += '<p>분석 ' + esc(stats.get('analyzed', 0)) + ' · 제외 ' + esc(stats.get('excluded', 0)) + ' · 누락 ' + esc(stats.get('omitted', 0)) + '</p>'
++        content += f'<p class="muted">수집 {esc(s["collected_at"])} · 분석 {esc(a["created_at"] if a else "대기")}</p>'
++    content += '</article><p><a href="?order=original">원래 파일 순서</a> · <a href="?order=priority">검토 우선순위</a> · <a href="?diff=1">전체 diff 보기</a></p>'
++    units = list(pr['units'])
++    def priority(unit):
++        item = pr['items'].get(unit['change_id'])
++        return (not bool(unit.get('candidates')), item is not None, -RANK.get(item['importance'], 0) if item else 0)
++    if query.get('order', [''])[0] == 'original' and s:
++        files = json.loads(s['coverage']).get('files', [])
++        file_order = {entry['filename']: index for index, entry in enumerate(files)}
++        units.sort(key=lambda unit: file_order.get(unit['file_path'], len(files)))
++    else:
++        units.sort(key=priority)
++    for unit in units:
++        item = pr['items'].get(unit['change_id'])
++        flags = unit.get('candidates', [])
++        opened = bool(flags) or not item or item['importance'] == 'high'
++        importance = item['importance'] if item else '미분석'
++        content += (f'<details{" open" if opened else ""}><summary>{esc(unit["file_path"])} · {esc(unit["change_id"])} · {esc(importance)}'
++                    + (' · 규칙 기반 후보' if flags else '') + '</summary>'
++                    f'<p>{esc(item["reason"] if item else unit.get("exclusion_reason") or unit.get("omission_reason") or "분석되지 않은 변경입니다")}</p>'
++                    f'<p>{esc(" · ".join(flags + (item.get("risk_flags", []) if item else [])))}</p>'
++                    f'<p class="muted">이전 {esc(unit.get("old_range"))} → 새 줄 {esc(unit.get("new_range"))}</p>')
++        if 'logic_without_tests' in flags:
++            content += '<p>제공된 diff에서 관련 테스트 변경을 확인하지 못함</p>'
++        if link:
++            anchor = hashlib.sha256(unit['file_path'].encode()).hexdigest()
++            content += f'<a href="{esc(link)}/files#diff-{anchor}" rel="noreferrer">GitHub 변경</a>'
++        content += f'<pre>{esc(unit.get("diff", ""))}</pre></details>'
++    if not units:
++        content += '<article>미분석 — 수집된 변경 단위가 없습니다.</article>'
++    if query.get('diff') == ['1']:
++        content += '<h2>전체 원본 diff</h2><pre>' + esc(read_diff(config, s) or 'diff 캐시가 없습니다.') + '</pre>'
++    return content
++
++
++class Handler(BaseHTTPRequestHandler):
++    """모든 동적 데이터는 인증 뒤에만 반환한다. 접근 로그에는 URL을 남기지 않는다."""
++    server_version = 'skim'
++
++    def log_message(self, *args):
++        pass
++
++    def reply(self, status, body='', content_type='text/html; charset=utf-8', extra=()):
++        body = body.encode() if isinstance(body, str) else body
++        self.send_response(status)
++        for name, value in [('Content-Type', content_type), ('Content-Length', str(len(body))),
++                            ('Content-Security-Policy', CSP), ('Referrer-Policy', 'no-referrer'),
++                            ('X-Content-Type-Options', 'nosniff'), ('Cache-Control', 'no-store'),
++                            ('X-Frame-Options', 'DENY'), *extra]:
++            self.send_header(name, value)
++        self.end_headers()
++        self.wfile.write(body)
++
++    def check(self, mutation=False):
++        if self.headers.get_all('Host') != [self.server.authority]:
++            self.reply(403, 'Host 거부')
++            return False
++        origins = self.headers.get_all('Origin')
++        if (mutation or origins is not None) and origins != [self.server.origin]:
++            self.reply(403, 'Origin 거부')
++            return False
++        return True
++
++    def send_error(self, code, message=None, explain=None):
++        if hasattr(self, 'headers') and self.headers.get_all('Host') != [self.server.authority]:
++            code = 403
++        self.reply(code, '요청을 처리할 수 없습니다')
++
++    def do_GET(self):
++        if not self.check():
++            return
++        url = urlsplit(self.path)
++        if url.query and 'token' in parse_qs(url.query):
++            return self.reply(400, '토큰은 fragment로만 전달합니다')
++        if url.path in ('/static/app.css', '/static/entry.js'):
++            name = url.path.rsplit('/', 1)[1]
++            return self.reply(200, (STATIC / name).read_bytes(), 'text/css' if name.endswith('css') else 'text/javascript')
++        if url.path == '/entry':
++            return self.reply(200, page('진입', '<p id="status">인증 중…</p><script src="/static/entry.js" defer></script>'))
++        csrf = self.server.auth.csrf(self.headers.get('Cookie'))
++        if not csrf:
++            return self.reply(401, page('인증 필요', '<p>skim web으로 새 진입 URL을 발급받으세요.</p>'))
++        with closing(connect(self.server.config)) as conn:
++            if url.path == '/settings':
++                jobs = conn.execute('SELECT type,status,last_error FROM jobs ORDER BY id DESC LIMIT 20').fetchall()
++                body = '<h1>설정 · 상태</h1><p>수집 간격 ' + str(self.server.config.poll_interval_seconds) + '초 · 보존 ' + str(self.server.config.retention_days) + '일</p>'
++                body += '<p>분석 CLI: Codex · 전송은 명시적 허용 필요 · 격리 계약 미검증 시 차단</p>'
++                for row in conn.execute('SELECT owner,name,tracked,analysis_policy FROM repositories ORDER BY owner,name'):
++                    body += '<article>' + esc(dict(row)) + '</article>'
++                body += '<h2>작업 큐</h2>' + ''.join('<article>' + esc(dict(row)) + '</article>' for row in jobs)
++            else:
++                prs = load_prs(conn, self.server.config)
++                if url.path == '/':
++                    body = listing(prs, parse_qs(url.query), csrf)
++                else:
++                    match = re.fullmatch(r'/pr/([1-9][0-9]*)', url.path)
++                    pr = next((p for p in prs if match and p['id'] == int(match[1])), None)
++                    if pr is None:
++                        return self.reply(404, 'PR이 없습니다')
++                    body = detail(pr, parse_qs(url.query), self.server.config)
++        self.reply(200, page('대시보드', body))
++
++    def do_POST(self):
++        if not self.check(mutation=True):
++            return
++        lengths = self.headers.get_all('Content-Length') or []
++        if len(lengths) != 1 or not lengths[0].isascii() or not lengths[0].isdigit() or int(lengths[0]) > 4096 or self.headers.get('Transfer-Encoding'):
++            return self.reply(400, '잘못된 요청 크기')
++        if self.headers.get_content_type() != 'application/x-www-form-urlencoded':
++            return self.reply(415, '폼 요청만 허용합니다')
++        try:
++            data = parse_qs(self.rfile.read(int(lengths[0])).decode('utf-8'), strict_parsing=True)
++        except (ValueError, UnicodeError):
++            return self.reply(400, '잘못된 폼')
++        if self.path == '/session':
++            if set(data) != {'token'} or len(data['token']) != 1:
++                return self.reply(400, '잘못된 토큰 요청')
++            session = self.server.auth.redeem(data['token'][0])
++            if not session:
++                return self.reply(401, '진입 토큰 만료 또는 사용됨')
++            # HTTP 루프백에서 브라우저별 Secure 처리 차이를 피한다. 정확한 Origin 검사가 포트 경계를 지킨다.
++            return self.reply(303, extra=[('Location', '/'), ('Set-Cookie', f'{self.server.auth.cookie}={session}; Path=/; HttpOnly; SameSite=Strict')])
++        csrf = self.server.auth.csrf(self.headers.get('Cookie'))
++        submitted = data.get('csrf', [])
++        if not csrf or len(submitted) != 1 or not constant_equal(csrf, submitted[0]):
++            return self.reply(403, 'CSRF 거부')
++        if self.path != '/refresh' or set(data) != {'csrf'}:
++            return self.reply(400, '허용되지 않은 작업')
++        with closing(connect(self.server.config)) as conn:
++            CollectionScheduler(conn, self.server.config.poll_interval_seconds).request()
++        self.reply(303, extra=[('Location', '/settings')])
++
++
++class Server(ThreadingHTTPServer):
++    daemon_threads = True
++
++    def __init__(self, config, port=0):
++        self.config, self.auth = config, Auth()
++        super().__init__(('127.0.0.1', port), Handler)
++        self.authority = f'127.0.0.1:{self.server_port}'
++        self.origin = 'http://' + self.authority
++
++    def entry_url(self):
++        return self.origin + '/entry#' + self.auth.issue()
++
++
++def worker(config, stop):
++    """SQLite 연결은 워커 스레드 전용이며 수집 중에도 HTTP 응답을 계속한다."""
++    from .analyze import Analyzer
++    with closing(connect(config)) as conn:
++        scheduler = CollectionScheduler(conn, config.poll_interval_seconds)
++        collector = Collector(conn, config)
++        while not stop.is_set():
++            try:
++                if scheduler.tick(collector):
++                    Analyzer(conn, config).run()
++            except (OSError, ValueError, sqlite3.Error):
++                conn.rollback()
++            stop.wait(1)
++
++
++def serve(config, port=0, open_browser=True, offline=False):
++    """단일 서버 잠금과 0600 Unix 소켓으로 기존 서버의 새 URL을 발급한다."""
++    import webbrowser
++    path = config.data_dir / 'web.sock'
++    fd = os.open(config.data_dir / 'web.lock', os.O_CREAT | os.O_RDWR, 0o600)
++    try:
++        try:
++            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
++        except BlockingIOError:
++            with socket.socket(socket.AF_UNIX) as client:
++                client.settimeout(5)
++                client.connect(str(path))
++                url = client.recv(4096).decode()
++            print(url, flush=True)
++            if open_browser:
++                webbrowser.open(url)
++            return 0
++        with closing(connect(config)):
++            pass
++        with Server(config, port) as server, socket.socket(socket.AF_UNIX) as control:
++            path.unlink(missing_ok=True)
++            # bind 시점에도 소켓이 공개되지 않도록 umask를 제한한다.
++            mask = os.umask(0o177)
++            try:
++                control.bind(str(path))
++            finally:
++                os.umask(mask)
++            path.chmod(0o600)
++            control.listen(4)
++            control.settimeout(0.5)
++            stop = threading.Event()
++            def issue_urls():
++                while not stop.is_set():
++                    try:
++                        client, _ = control.accept()
++                    except socket.timeout:
++                        continue
++                    except OSError:
++                        break
++                    with client:
++                        client.settimeout(1)
++                        try:
++                            client.sendall(server.entry_url().encode())
++                        except OSError:
++                            pass
++            threads = [threading.Thread(target=issue_urls, daemon=True)]
++            if not offline:
++                threads.append(threading.Thread(target=worker, args=(config, stop), daemon=True))
++            for thread in threads:
++                thread.start()
++            url = server.entry_url()
++            print(url, flush=True)
++            if open_browser:
++                webbrowser.open(url)
++            try:
++                server.serve_forever(poll_interval=0.5)
++            except KeyboardInterrupt:
++                pass
++            finally:
++                stop.set()
++                for thread in threads:
++                    thread.join(timeout=2)
++                path.unlink(missing_ok=True)
++        return 0
++    finally:
++        os.close(fd)
+diff --git a/lib/skim/web_static/app.css b/lib/skim/web_static/app.css
+new file mode 100644
+index 0000000..6babd59
+--- /dev/null
++++ b/lib/skim/web_static/app.css
+@@ -0,0 +1,3 @@
++/* Sessio와 어울리는 어두운 로컬 검토 화면. 외부 글꼴·리소스 없음. */
++:root{color-scheme:dark;--bg:#10131a;--surface:#191e29;--border:#2c3445;--fg:#e4e8f1;--muted:#97a4bc;--accent:#94b5ff}
++*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}header{display:flex;align-items:center;gap:24px;padding:13px 28px;border-bottom:1px solid var(--border);background:var(--surface)}.brand{font-size:21px;font-weight:750;color:var(--fg)}header span,.muted{color:var(--muted)}header a:last-child{margin-left:auto}main{max-width:1200px;margin:auto;padding:28px 24px 60px}a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}h1{font-size:25px;letter-spacing:-.03em;margin:0 0 18px}h2{font-size:17px;margin:8px 0}.heading{display:flex;align-items:center;justify-content:space-between;gap:16px}article,details,.filters{background:var(--surface);border:1px solid var(--border);border-radius:7px;padding:16px 20px;margin:12px 0}details[open]{border-left:3px solid #dca862}summary{cursor:pointer;font-weight:600;overflow-wrap:anywhere}.filters{display:flex;flex-wrap:wrap;align-items:end;gap:12px}label{display:flex;flex-direction:column;color:var(--muted);font-size:12px}select,button{font:inherit;background:var(--bg);color:var(--fg);border:1px solid var(--border);border-radius:5px;padding:7px 12px}button{cursor:pointer;background:#29467c}pre{font:12px/1.7 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere;background:var(--bg);padding:14px;border-radius:5px}.badge{font-size:11px;border:1px solid var(--border);border-radius:4px;padding:3px 7px}.high{color:#ff99a8}.mid{color:#e6bb76}.low{color:#8ed6b8}:focus-visible{outline:2px solid var(--accent);outline-offset:3px}p{overflow-wrap:anywhere}@media(max-width:640px){header{padding:12px;gap:12px}header span{display:none}main{padding:20px 12px}.heading{align-items:start}article,details{padding:12px}}
+diff --git a/lib/skim/web_static/entry.js b/lib/skim/web_static/entry.js
+new file mode 100644
+index 0000000..9fa6224
+--- /dev/null
++++ b/lib/skim/web_static/entry.js
+@@ -0,0 +1,14 @@
++/* 토큰은 저장하지 않고 전송 전에 주소 표시줄에서 제거한다. */
++'use strict';
++const token = location.hash.slice(1);
++history.replaceState(null, '', '/entry');
++if (token) {
++  fetch('/session', {
++    method: 'POST', credentials: 'same-origin', redirect: 'manual',
++    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
++    body: new URLSearchParams({token})
++  }).then(response => {
++    if (response.type === 'opaqueredirect' || response.status === 303) location.replace('/');
++    else document.getElementById('status').textContent = '진입 토큰이 만료되었거나 사용되었습니다. skim web으로 새 URL을 받으세요.';
++  }).catch(() => { document.getElementById('status').textContent = '인증 연결 실패'; });
++} else document.getElementById('status').textContent = 'skim web으로 진입 URL을 받으세요.';
+diff --git a/progress.md b/progress.md
+index a6193ac..019e89e 100644
+--- a/progress.md
++++ b/progress.md
+@@ -58,3 +58,10 @@
+ - 분석 저장 트랜잭션에서 최신 coverage를 다시 읽어 수집 실패 상태·오류를 보존하며 분석 통계만 합친다. 값만 가린 hunk에도 secrets 후보를 붙이고 민감 경로 제외와 가림 통계의 중복을 없앴다.
+ - 정제 후 모델 출력 재검증, 동일 준비 실패 기록 중복 방지, 일반 diff 422 오류 분류, 크기 초과 후 SHA 재확인, 이름별 중첩 잠금과 의존성 후보를 보완했다. tests/app.py 대응은 기존 동작을 회귀 테스트로 확인했다.
+ - fake gh/LLM·별도 SQLite 연결로 unittest 70개와 git diff --check가 통과했다. 실제 LLM·네트워크 호출, GitHub 쓰기와 커밋은 하지 않았다.
++
++## PR4 — 2026-10-31
++
++- 127.0.0.1 전용 `skim web`, 60초·일회용 fragment 토큰과 세션 쿠키, 상수 시간 비교, Host·Origin·CSRF 검사, 엄격한 CSP와 보안 헤더를 구현했다. 단일 실행 잠금과 0600 Unix 소켓으로 기존 서버에서 새 URL을 발급한다.
++- Sessio와 어울리는 어두운 서버 렌더링 목록·필터·상세 화면, 규칙 후보·미분석·high 우선 펼침, mid/low 접힘, 이전 SHA·수집/분석 상태, 전체 diff·GitHub 링크와 수동 갱신 큐·내장 워커를 추가했다.
++- 외부 통신 없는 가짜 데이터 생성기 `scripts/demo_seed.py`, `web --offline`, 한국어 사용 문서를 추가했다. HTTP 루프백 쿠키는 Secure 없이 정확한 Origin 검사를 사용하며, 브라우저별 Secure 동작과 Sessio 인덱스 연동은 미검증·미구현으로 문서에 명시했다.
++- 메모리 HTTP 연결과 fake 모델·소켓으로 unittest 80개 및 `git diff --check`가 통과했다. 실제 LLM·외부 네트워크·GitHub 쓰기·커밋은 수행하지 않았다.
+diff --git a/scripts/demo_seed.py b/scripts/demo_seed.py
+new file mode 100644
+index 0000000..c8e011b
+--- /dev/null
++++ b/scripts/demo_seed.py
+@@ -0,0 +1,85 @@
++#!/usr/bin/env python3
++"""가짜 PR만 생성한다. SKIM_HOME=/tmp/skim-demo python3 scripts/demo_seed.py
++
++확인: SKIM_HOME=/tmp/skim-demo bin/skim web --offline
++실제 GitHub·LLM에 접근하지 않으며 비어 있는 DB에서만 실행한다.
++"""
++import argparse
++import hashlib
++import json
++import os
++from pathlib import Path
++import sys
++from contextlib import closing
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))
++from skim.config import Config, private_file
++from skim.db import connect
++from skim.analyze import Analyzer
++
++
++class DemoModel:
++    """모델 서비스 대신 결정적인 fixture 응답을 제공한다."""
++    provider, model, cli_version = 'fixture', 'demo', '1'
++
++    def verify(self):
++        pass
++
++    def generate(self, request, schema):
++        value = json.loads(request.split('\n', 1)[1])
++        if value['stage'] == 'synthesis':
++            return json.dumps({'intent': '변경 목적과 검토 우선순위를 보여 주는 가짜 PR입니다.'})
++        items = []
++        for unit in value['data']['units']:
++            path = unit['file_path']
++            level = 'high' if 'auth' in path else 'low' if path.endswith('.md') else 'mid'
++            items.append(dict(change_id=unit['change_id'], importance=level,
++                              reason='인증 경계를 확인하세요.' if level == 'high' else '변경 동작과 테스트를 확인하세요.',
++                              risk_flags=['auth'] if level == 'high' else []))
++        return json.dumps(dict(items=items, uncertainties=[]))
++
++
++def seed(config):
++    with closing(connect(config)) as conn:
++        if conn.execute('SELECT 1 FROM repositories LIMIT 1').fetchone():
++            raise ValueError('비어 있는 SKIM_HOME을 사용하세요')
++        with conn:
++            repo = conn.execute("INSERT INTO repositories(owner,name,analysis_policy) VALUES('demo','checkout','allow')").lastrowid
++            for number, title, paths in [
++                (1, '결제 인증 경계 보완', ['auth/session.py', 'service.py', 'README.md', '.env']),
++                (2, '일반 API 응답 정리', ['handler.py', 'tests/test_handler.py']),
++                (3, '사용 설명 보완', ['docs/guide.md']),
++                (4, '수집 완료 · 분석 대기', ['.github/workflows/check.yml']),
++                (5, '이전 SHA 분석 결과', ['auth/access.py'])]:
++                head = 'head' + str(number)
++                pr = conn.execute('INSERT INTO pull_requests(repo_id,number,title,author,url,base_sha,head_sha,updated_at) VALUES(?,?,?,?,?,?,?,CURRENT_TIMESTAMP)',
++                                  (repo, number, title, 'demo-author', 'https://github.com/demo/checkout/pull/' + str(number), 'base', head)).lastrowid
++                conn.execute('INSERT INTO pr_sources VALUES(?,?)', (pr, 'review_request' if number % 2 else 'repository'))
++                diff = ''.join(f'diff --git a/{p} b/{p}\n--- a/{p}\n+++ b/{p}\n@@ -1 +1 @@\n-old\n+new\n' for p in paths)
++                digest = hashlib.sha256(diff.encode()).hexdigest()
++                path = config.data_dir / 'cache' / (digest + '.diff')
++                private_file(path)
++                path.write_text(diff)
++                snapshot = conn.execute('INSERT INTO snapshots(pr_id,base_sha,head_sha,diff_hash,input_hash,diff_path,coverage) VALUES(?,?,?,?,?,?,?)',
++                                       (pr, 'base', head, digest, digest, str(path), json.dumps(dict(status='collected', files=[dict(filename=p) for p in paths])))).lastrowid
++                conn.commit()
++                if number != 4:
++                    Analyzer(conn, config, adapter=DemoModel()).run(snapshot)
++                if number == 5:
++                    conn.execute("UPDATE pull_requests SET head_sha='new-head' WHERE id=?", (pr,))
++        print('가짜 PR 5개 생성 완료. 같은 SKIM_HOME으로 bin/skim web --offline을 실행하세요.')
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument('--home', help='데모 전용 SKIM_HOME')
++    args = parser.parse_args()
++    if args.home:
++        os.environ['SKIM_HOME'] = args.home
++    if not os.environ.get('SKIM_HOME'):
++        parser.error('데모 전용 --home 또는 SKIM_HOME이 필요합니다')
++    seed(Config.load())
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/tests/test_scaffold.py b/tests/test_scaffold.py
+index fbca6b3..a3ff138 100644
+--- a/tests/test_scaffold.py
++++ b/tests/test_scaffold.py
+@@ -107,8 +107,10 @@ def test_wrapper_symlink_and_stubs(self):
+         link.symlink_to(ROOT / 'bin/skim')
+         result = subprocess.run([str(link), 'repo', 'add', 'a/b'], capture_output=True, text=True, cwd='/tmp')
+         self.assertEqual(result.returncode, 0, result.stderr)
+-        for command in ('web', 'doctor'):
+-            self.assertEqual(self.cli(command)[0], 2)
++        self.assertEqual(self.cli('doctor')[0], 2)
++        with patch('skim.web.serve', return_value=0) as serve:
++            self.assertEqual(self.cli('web', '--offline', '--no-browser')[0], 0)
++            self.assertEqual(serve.call_args.args[1:], (0, False, True))
+ 
+     def test_review_request_survives_untracking(self):
+         config = Config.load()
+diff --git a/tests/test_web.py b/tests/test_web.py
+new file mode 100644
+index 0000000..50fa8cd
+--- /dev/null
++++ b/tests/test_web.py
+@@ -0,0 +1,220 @@
++"""실제 소켓·네트워크·모델 없이 HTTP와 데모 fixture를 검증한다."""
++import io
++from contextlib import closing, redirect_stdout
++import json
++import os
++from pathlib import Path
++import sys
++import tempfile
++from types import SimpleNamespace
++import unittest
++from unittest.mock import patch
++from urllib.parse import urlencode
++
++ROOT = Path(__file__).resolve().parents[1]
++sys.path.insert(0, str(ROOT / 'lib'))
++sys.path.insert(0, str(ROOT / 'scripts'))
++from skim.config import Config
++from skim.db import connect
++from skim.web import Auth, Handler, CSP, Server, load_prs, worker, read_diff, serve
++from demo_seed import seed
++
++
++class FakeConnection:
++    def __init__(self, request):
++        self.input = io.BytesIO(request)
++        self.output = io.BytesIO()
++
++    def makefile(self, mode, *args):
++        return self.input
++
++    def sendall(self, data):
++        self.output.write(data)
++
++
++class WebTests(unittest.TestCase):
++    def setUp(self):
++        self.temp = tempfile.TemporaryDirectory()
++        self.addCleanup(self.temp.cleanup)
++        env = patch.dict(os.environ, SKIM_HOME=self.temp.name)
++        env.start()
++        self.addCleanup(env.stop)
++        self.config = Config.load()
++        self.now = 10
++        self.auth = Auth(clock=lambda: self.now)
++        self.server = SimpleNamespace(config=self.config, auth=self.auth,
++                                      authority='127.0.0.1:8123', origin='http://127.0.0.1:8123')
++        # fixture조차 실제 외부 실행을 호출하면 테스트가 즉시 실패한다.
++        with patch('subprocess.run', side_effect=AssertionError('외부 실행 금지')), patch('socket.socket', side_effect=AssertionError('소켓 금지')):
++            with redirect_stdout(io.StringIO()):
++                seed(self.config)
++        session = self.auth.redeem(self.auth.issue())
++        self.cookie = self.auth.cookie + '=' + session
++        self.csrf = self.auth.csrf(self.cookie)
++
++    def request(self, path='/', method='GET', data=None, headers=None, authenticated=True):
++        body = urlencode(data or {}).encode()
++        fields = [('Host', self.server.authority)]
++        if authenticated:
++            fields.append(('Cookie', self.cookie))
++        if method == 'POST':
++            fields += [('Origin', self.server.origin), ('Content-Type', 'application/x-www-form-urlencoded'), ('Content-Length', str(len(body)))]
++        for key, value in headers or []:
++            if key.startswith('!'):
++                fields = [(k, v) for k, v in fields if k.lower() != key[1:].lower()]
++                if value is not None:
++                    fields.append((key[1:], value))
++            else:
++                fields.append((key, value))
++        raw = f'{method} {path} HTTP/1.1\r\n' + ''.join(f'{k}: {v}\r\n' for k, v in fields) + '\r\n'
++        conn = FakeConnection(raw.encode() + body)
++        Handler(conn, ('127.0.0.1', 12345), self.server)
++        head, content = conn.output.getvalue().split(b'\r\n\r\n', 1)
++        lines = head.decode().split('\r\n')
++        return int(lines[0].split()[1]), dict(line.split(': ', 1) for line in lines[1:]), content.decode()
++
++    def test_token_ttl_one_use_and_restart(self):
++        token = self.auth.issue()
++        self.assertIsNone(self.auth.redeem(token + 'bad'))
++        self.assertIsNotNone(self.auth.redeem(token))
++        self.assertIsNone(self.auth.redeem(token))
++        token = self.auth.issue()
++        self.now += 60
++        self.assertIsNone(self.auth.redeem(token))
++        self.assertIsNone(Auth().csrf(self.cookie))
++        self.assertIsNone(self.auth.csrf(self.auth.cookie + '=한글'))
++
++    def test_entry_has_no_data_and_session_cookie(self):
++        code, headers, body = self.request('/entry', authenticated=False)
++        self.assertEqual(code, 200)
++        self.assertNotIn('결제 인증', body)
++        self.assertIn('src="/static/entry.js"', body)
++        code, headers, _ = self.request('/session', 'POST', {'token': self.auth.issue()}, authenticated=False)
++        self.assertEqual(code, 303)
++        self.assertIn('HttpOnly; SameSite=Strict', headers['Set-Cookie'])
++        self.assertNotIn('Domain=', headers['Set-Cookie'])
++        for path in ['/', '/pr/1', '/settings', '/?diff=1']:
++            self.assertEqual(self.request(path, authenticated=False)[0], 401)
++        self.assertEqual(self.request('/?token=secret')[0], 400)
++
++    def test_strict_host_and_origin(self):
++        for fields in [[('!Host', None)], [('Host', self.server.authority)], [('!Host', 'localhost:8123')], [('!Host', 'evil.test')], [('!Host', '127.0.0.1:9999')]]:
++            self.assertEqual(self.request(headers=fields)[0], 403)
++        for origin in [None, 'null', 'http://127.0.0.1:9999', 'https://evil.test']:
++            self.assertEqual(self.request('/refresh', 'POST', {'csrf': self.csrf}, [('!Origin', origin)])[0], 403)
++        self.assertEqual(self.request('/refresh', 'POST', {'csrf': self.csrf}, [('Origin', self.server.origin)])[0], 403)
++        self.assertEqual(self.request(headers=[('Origin', 'http://evil.test')])[0], 403)
++        # 전달 헤더를 신뢰하지 않는다.
++        self.assertEqual(self.request(headers=[('!Host', 'evil.test'), ('X-Forwarded-Host', self.server.authority)])[0], 403)
++
++    def test_csrf_and_fixed_refresh_job(self):
++        for data in [{}, {'csrf': 'wrong'}, {'csrf': '한글'}, {'csrf': self.csrf, 'target_id': '99'}, {'csrf': [self.csrf, self.csrf]}]:
++            self.assertIn(self.request('/refresh', 'POST', data)[0], (400, 403))
++        self.assertEqual(self.request('/refresh')[0], 404)
++        self.assertEqual(self.request('/refresh', 'POST', {'csrf': self.csrf})[0], 303)
++        self.assertEqual(self.request('/refresh', 'POST', {'csrf': self.csrf})[0], 303)
++        with closing(connect(self.config)) as conn, conn:
++            rows = conn.execute('SELECT type,target_id,status FROM jobs').fetchall()
++            self.assertEqual([tuple(row) for row in rows], [('collect', 0, 'pending')])
++
++    def test_security_headers_on_success_errors_static(self):
++        for path, authenticated in [('/', True), ('/pr/1', True), ('/', False), ('/missing', True), ('/static/app.css', False), ('/static/entry.js', False), ('/static/../../config.json', True)]:
++            _, headers, body = self.request(path, authenticated=authenticated)
++            self.assertEqual(headers['Content-Security-Policy'], CSP)
++            self.assertNotIn('unsafe-inline', CSP)
++            self.assertEqual(headers['Cache-Control'], 'no-store')
++            self.assertEqual(headers['Referrer-Policy'], 'no-referrer')
++            self.assertEqual(headers['X-Content-Type-Options'], 'nosniff')
++            self.assertNotIn('Access-Control-Allow-Origin', headers)
++        self.assertEqual(self.request('/refresh', 'POST', {'csrf': self.csrf}, [('Content-Length', '0')])[0], 400)
++        self.assertEqual(self.request('/refresh', 'POST', {'csrf': self.csrf}, [('Transfer-Encoding', 'chunked')])[0], 400)
++
++    def test_demo_priority_filters_and_collapsed_units(self):
++        code, _, body = self.request()
++        self.assertEqual(code, 200)
++        self.assertLess(body.index('결제 인증 경계'), body.index('사용 설명 보완'))
++        self.assertIn('리뷰 요청', body)
++        self.assertIn('수집', body)
++        body = self.request('/?importance=low')[2]
++        self.assertIn('사용 설명 보완', body)
++        self.assertNotIn('결제 인증 경계', body)
++        self.assertNotIn('일반 API 응답 정리', self.request('/?review=1')[2])
++        body = self.request('/pr/1')[2]
++        self.assertIn('<details open><summary>auth/session.py', body)
++        self.assertIn('<details open><summary>.env', body)
++        self.assertIn('<details><summary>README.md', body)
++        self.assertIn('규칙 기반 후보', body)
++        self.assertIn('미분석', body)
++        self.assertIn('https://github.com/demo/checkout/pull/1', body)
++        self.assertIn('전체 원본 diff', self.request('/pr/1?diff=1')[2])
++        self.assertIn('이전 SHA 결과', self.request('/pr/5')[2])
++        self.assertIn('대기', self.request('/pr/4')[2])
++        with closing(connect(self.config)) as conn, conn:
++            conn.execute("UPDATE pull_requests SET state='closed' WHERE id=1")
++        self.assertNotIn('결제 인증 경계', self.request()[2])
++
++    def test_untrusted_content_and_cache_paths(self):
++        with closing(connect(self.config)) as conn, conn:
++            conn.execute("UPDATE pull_requests SET title=?,url=? WHERE id=1", ('<script>alert(1)</script>', 'javascript:alert(1)'))
++            conn.execute("UPDATE analyses SET intent=? WHERE snapshot_id=1", ('<img src=x onerror=alert(1)>',))
++        body = self.request('/pr/1')[2]
++        self.assertIn('&lt;script&gt;', body)
++        self.assertIn('&lt;img', body)
++        self.assertNotIn('javascript:', body)
++        self.assertNotIn('<img', body)
++        outside = Path(self.temp.name) / 'outside'
++        outside.write_text('private')
++        self.assertEqual(read_diff(self.config, {'diff_path': str(outside)}), '')
++        link = self.config.data_dir / 'cache' / 'link'
++        link.symlink_to(outside)
++        self.assertEqual(read_diff(self.config, {'diff_path': str(link)}), '')
++
++    def test_new_snapshot_does_not_reuse_old_hunk_verdict(self):
++        with closing(connect(self.config)) as conn, conn:
++            row = conn.execute('SELECT * FROM snapshots WHERE pr_id=1').fetchone()
++            conn.execute("INSERT INTO snapshots(pr_id,base_sha,head_sha,diff_hash,input_hash,diff_path,coverage) VALUES(1,'base','new','d','i',?,?)", (row['diff_path'], row['coverage']))
++        body = self.request('/pr/1')[2]
++        self.assertIn('이전 SHA 결과', body)
++        self.assertIn('README.md · h', body)
++        self.assertNotIn('<details><summary>README.md', body)
++
++    def test_single_instance_reissues_url_and_private_socket_cleanup(self):
++        url = self.server.origin + '/entry#fixture-token'
++        with patch('skim.web.fcntl.flock', side_effect=BlockingIOError), patch('skim.web.socket.socket') as sock, patch('webbrowser.open') as browser, redirect_stdout(io.StringIO()) as out:
++            sock.return_value.__enter__.return_value.recv.return_value = url.encode()
++            self.assertEqual(serve(self.config, open_browser=False), 0)
++            self.assertEqual(out.getvalue().strip(), url)
++            browser.assert_not_called()
++        self.assertEqual((self.config.data_dir / 'web.lock').stat().st_mode & 0o777, 0o600)
++        with patch('skim.web.Server') as server, patch('skim.web.socket.socket') as sock, patch('skim.web.threading.Thread'), redirect_stdout(io.StringIO()):
++            instance = server.return_value.__enter__.return_value
++            instance.entry_url.return_value = url
++            instance.serve_forever.side_effect = KeyboardInterrupt
++            control = sock.return_value.__enter__.return_value
++            def bind(path):
++                Path(path).touch()
++                self.assertEqual(Path(path).stat().st_mode & 0o777, 0o600)
++            control.bind.side_effect = bind
++            self.assertEqual(serve(self.config, open_browser=False, offline=True), 0)
++        self.assertFalse((self.config.data_dir / 'web.sock').exists())
++
++    def test_server_loopback_and_worker_uses_existing_scheduler(self):
++        with patch('skim.web.ThreadingHTTPServer.__init__', autospec=True) as init:
++            # 서버 포트는 실제 bind 결과에서 받으므로 가짜 기반 생성자가 설정한다.
++            def fake_init(server, address, handler):
++                self.assertEqual(address, ('127.0.0.1', 0))
++                server.server_port = 8123
++            init.side_effect = fake_init
++            server = Server(self.config)
++            self.assertTrue(server.entry_url().startswith(self.server.origin + '/entry#'))
++        stop = SimpleNamespace(is_set=lambda: False, wait=lambda seconds: None)
++        with patch('skim.web.CollectionScheduler') as scheduler, patch('skim.web.Collector'), patch('skim.analyze.Analyzer') as analyzer:
++            stop.is_set = unittest.mock.Mock(side_effect=[False, True])
++            scheduler.return_value.tick.return_value = True
++            worker(self.config, stop)
++            scheduler.return_value.tick.assert_called_once()
++            analyzer.return_value.run.assert_called_once()
++
++
++if __name__ == '__main__':
++    unittest.main()
