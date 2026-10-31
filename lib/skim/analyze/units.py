@@ -28,14 +28,23 @@ def is_test(path):
 
 
 def changed_lines(text):
-    """문맥·hunk 헤더·파일 헤더를 제외한 추가/삭제 줄만 반환한다."""
-    return '\n'.join(line[1:] for line in text.splitlines()
-                     if line.startswith(('+', '-')) and not line.startswith(('+++ ', '--- ')))
+    """문맥과 헤더를 제외하되 hunk 안의 헤더 모양 변경 줄은 보존한다."""
+    changed = []
+    in_hunk = False
+    for line in text.splitlines():
+        if line.startswith('@@ '):
+            in_hunk = True
+        elif line.startswith(('+', '-')):
+            if in_hunk or not line.startswith(('+++ ', '--- ')):
+                changed.append(line[1:])
+    return '\n'.join(changed)
 
 
 def candidates(path, text, tests):
     location = PurePosixPath(path.lower())
-    parts = location.parts
+    # 경로 조각은 camelCase를 분리하고 확장자를 뗀 이름으로 통일한다.
+    parts = tuple(re.sub(r'([a-z])([A-Z])', r'\1_\2', part).lower().split('.')[0]
+                  for part in PurePosixPath(path).parts)
     name = location.name
     changed = changed_lines(text)
     # camelCase 호출도 동일한 식별자로 검사하되 일반 단어 언급은 근거로 쓰지 않는다.
@@ -43,28 +52,29 @@ def candidates(path, text, tests):
     auth_names = (r'auth|authn|authz|authenticate|authenticated|authentication|'
                   r'authorize|authorized|authorization|is_authenticated|'
                   r'check_permission|check_permissions|verify_token|login|logout|oauth|jwt')
+    auth_identifier = r'(?:[a-z0-9]+_)*(?:auth|permission|permissions|login|jwt)(?:_[a-z0-9]+)*'
     auth_path = any(re.fullmatch(
         r'auth|authn|authz|authentication|authorization|authenticate|authenticated|'
-        r'authorize|is_authenticated|check_permission|permissions?|sessions?|login|logout|oauth|acl',
-        re.sub(r'([a-z])([A-Z])', r'\1_\2', part).lower().split('.')[0]) for part in PurePosixPath(path).parts)
+        r'authorize|is_authenticated|check_permission|permissions?|sessions?|login|logout|oauth|acl'
+        r'|(?:auth|oauth|jwt|permissions?|login)_.+', part) for part in parts)
     middleware_auth = ('middleware' in parts and name.startswith('auth') or
                        bool(re.fullmatch(r'auth[^/]*middleware\.[^.]+', name)))
     rules = {
         'auth': auth_path or middleware_auth or bool(re.search(
-            r'\b(?:' + auth_names + r')\s*(?:\(|\.\s*[a-z_]\w*\s*\()', code)),
-        'payments': any(part in ('payments', 'billing', 'checkout', 'stripe') or
-                        part.startswith('stripe.') for part in parts) or bool(re.search(
+            r'\b(?:' + auth_names + r')\s*(?:\(|\.\s*[a-z_]\w*\s*\()', code)) or bool(re.search(
+                r'\b' + auth_identifier + r'\s*\(|@' + auth_identifier + r'\b', code)),
+        'payments': any(part.startswith(('payment', 'billing', 'checkout', 'stripe')) for part in parts) or bool(re.search(
                             r'\b(?:stripe|braintree|paypal|adyen|razorpay)(?:\.[a-z_]\w*)+\s*\(', code)),
         'db_schema_migration': any(part in ('migrations', 'migrate') for part in parts) or
             'alembic/versions/' in path.lower() or name.endswith('.sql') or
-            path.lower().endswith(('prisma/schema.prisma', 'db/schema.rb')) or bool(re.search(
+            (name == 'schema.prisma' or path.lower().endswith('db/schema.rb')) or bool(re.search(
                 r'\b(?:(?:create|alter|drop)\s+table|(?:add|drop)\s+column|create\s+(?:unique\s+)?index)\b', code)),
-        'config': 'config' in parts or name.endswith(('.toml', '.ini', '.yaml', '.yml')) or
-            name.startswith('.env') or name == 'settings.py',
+        'config': any(part.startswith(('config', 'settings')) for part in parts) or
+            name.endswith(('.toml', '.ini', '.conf')) or name.startswith('.env') or
+            name in ('compose.yaml', 'compose.yml', 'docker-compose.yaml', 'docker-compose.yml'),
         'ci_workflow': path.lower().startswith('.github/workflows/'),
         'dependency': bool(re.search(r'(^|/)(package(-lock)?\.json|(?:[^/]+[.-])?lock|requirements[^/]*|pyproject\.toml|go\.(?:mod|sum)|pnpm-lock\.yaml|gemfile|cargo\.toml)$', path.lower())),
-        'secrets': secret_path(path) or 'secrets' in parts or bool(SECRET_VALUE.search(changed)) or
-            bool(re.search(r"\b(?:[a-z0-9_]*(?:password|api_?key|secret|token)[a-z0-9_]*)[\"']?\s*[:=]\s*([\"'])[^\"'\n]+\1", code)),
+        'secrets': secret_path(path) or 'secrets' in parts or sanitize(changed) != changed,
     }
     flags = [flag for flag, matches in rules.items() if matches]
     if not is_test(path) and PurePosixPath(path).suffix in ('.py', '.js', '.ts', '.tsx', '.go', '.rs', '.java', '.rb', '.c', '.cpp'):

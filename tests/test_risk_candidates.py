@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))
-from skim.analyze.units import candidates, parse_diff
+from skim.analyze.units import candidates, changed_lines, parse_diff
 
 
 class RiskCandidatesTests(unittest.TestCase):
@@ -59,8 +59,6 @@ class RiskCandidatesTests(unittest.TestCase):
     def test_bare_words_and_file_mentions(self):
         flags = candidates('lib/provider_schema.py', '''+schema = provider_schema(schema)
 +config = settings
-+password = user.password
-+token = get_token()
 +message = "payment billing checkout refund charge"
 +path = Path('auth.json')
 +path = Path('schema.sql')
@@ -80,3 +78,43 @@ class RiskCandidatesTests(unittest.TestCase):
 ''')
         self.assertTrue(units[0]['redacted'])
         self.assertNotIn('secrets', units[0]['candidates'])
+
+    def test_common_file_paths(self):
+        for path, flag in (
+            ('src/billing.py', 'payments'), ('payment.py', 'payments'),
+            ('billingService.ts', 'payments'), ('config.py', 'config'),
+            ('config_prod.py', 'config'), ('settings/production.py', 'config'),
+            ('nginx.conf', 'config'), ('compose.yaml', 'config'),
+            ('src/auth_service.py', 'auth'), ('oauth_client.py', 'auth'),
+            ('src/authService.py', 'auth'), ('schema.prisma', 'db_schema_migration')):
+            with self.subTest(path=path):
+                self.assertIn(flag, candidates(path, '', []))
+        for path in ('openapi.yaml', 'fixtures/example.yml', 'src/author.py'):
+            with self.subTest(path=path):
+                self.assertNotIn('config', candidates(path, '', []))
+                self.assertNotIn('auth', candidates(path, '', []))
+
+    def test_auth_decorator_removal_and_compound_calls(self):
+        for line in ('@requires_auth', '@permission_required("x")',
+                     '@login_required', '@jwt_required()', 'requires_auth(user)',
+                     'permission_required("x")', 'loginRequired(user)'):
+            for sign in ('+', '-'):
+                with self.subTest(line=line, sign=sign):
+                    self.assertIn('auth', candidates('app.py', sign + line, []))
+            self.assertNotIn('auth', candidates('app.py', ' ' + line, []))
+        for line in ('author()', 'authorship()', 'message = "auth"', 'auth', 'requires_auth'):
+            self.assertNotIn('auth', candidates('app.py', '+' + line, []))
+
+    def test_changed_assignments_follow_redaction(self):
+        # 가림 규칙과 후보 판정은 같은 변경 줄 근거를 사용한다.
+        for line in ('export API_TOKEN=abcd1234', 'DB_PASSWORD=hunter2',
+                     'password = user.password', 'token = get_token()'):
+            for sign in ('+', '-'):
+                with self.subTest(line=line, sign=sign):
+                    self.assertIn('secrets', candidates('compose.yml', sign + line, []))
+            self.assertNotIn('secrets', candidates('compose.yml', ' ' + line, []))
+
+    def test_header_like_changes_inside_hunk(self):
+        text = '--- a/app.sql\n+++ b/app.sql\n@@ -1 +1 @@\n--- removed SQL comment\n+++ added comment'
+        self.assertEqual(changed_lines(text), '-- removed SQL comment\n++ added comment')
+        self.assertIn('secrets', candidates('app.py', '@@ -1 +1 @@\n+++ API_TOKEN=abcd1234', []))

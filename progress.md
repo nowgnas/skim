@@ -110,5 +110,12 @@
 ## 위험 후보 오탐 수정 — 2026-10-31
 
 - 위험 후보를 경로 구조와 추가·삭제 줄의 DDL·인증 호출·결제 SDK 호출·비밀값 할당 근거로 제한했다. 문맥·hunk 헤더와 일반 schema/config 단어는 근거에서 제외하고 logic_without_tests는 유지했다.
-- PR #13의 provider_schema/auth.json 문맥 회귀와 양성 사례를 추가하고 분석 캐시용 prompt_version을 skim-ko-2로 올렸다. doctor 테스트는 외부 SKIM_HOME을 격리했다.
-- 실제 LLM·네트워크 호출 없이 unittest 113개와 git diff --check가 통과했다. GitHub 쓰기와 커밋은 하지 않았다.
+- PR #13의 provider_schema/auth.json 문맥 회귀와 양성 사례를 추가했다. 당시 분석 캐시용 prompt_version을 skim-ko-2로 올렸으나 아래 후속 수정에서 복원했다. doctor 테스트는 외부 SKIM_HOME을 격리했다.
+- 실제 LLM·네트워크 호출 없이 unittest 113개와 git diff --check가 통과했다. 이 변경은 기존 커밋 6ec263d에 포함되어 있으므로 당시의 “커밋은 하지 않았다” 기록을 정정한다.
+
+
+## 위험 후보 누락 리뷰 수정 — 2026-10-31
+
+- 변경 줄의 민감 정보 가림을 secrets 후보에 연결하고 인증 데코레이터·복합 호출, 확장자와 camelCase를 정규화한 인증·결제·설정 경로를 보완했다. 문맥 가림만으로는 후보를 붙이지 않는다.
+- hunk 내부의 헤더 모양 변경 줄과 루트 schema.prisma를 보존하고 YAML 전체의 config 판정을 좁혔다. 프롬프트 버전은 skim-ko-1로 복원하고 규칙 버전은 입력 해시의 policy에 기록한다.
+- fake 기반 회귀 검증으로 모델의 low 판정에도 후보가 단위·파일에 유지됨을 확인했다. unittest 117개와 git diff --check가 통과했다. 이번 작업에서 실제 LLM·외부 네트워크 호출, GitHub 쓰기 및 새 커밋은 하지 않았다.

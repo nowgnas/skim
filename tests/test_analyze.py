@@ -349,8 +349,11 @@ new mode 100755
                      'isAuthenticated', 'checkPermission', 'authz', 'OAuth', 'authentication'):
             with self.subTest(term=term):
                 self.assertIn('auth', candidates(term, '', []))
-                if '/' not in term and term != 'sessions':
-                    self.assertIn('auth', candidates('app.py', '+' + term + '()', []))
+        for term in ('authorize', 'authenticated', 'isAuthenticated', 'checkPermission',
+                     'authz', 'OAuth', 'authentication', 'requires_auth',
+                     'permission_required', 'login_required', 'jwt_required'):
+            with self.subTest(call=term):
+                self.assertIn('auth', candidates('app.py', '+' + term + '()', []))
         for path in ('clock', 'src/clock', 'src/author.py'):
             self.assertNotIn('dependency', candidates(path, '', []))
             self.assertNotIn('auth', candidates(path, '', []))
@@ -416,7 +419,8 @@ new mode 100755
         self.assertEqual(self.analyzer.run()[0]['status'], 'blocked')
 
     def test_value_only_secrets_keep_candidates_even_when_model_says_low(self):
-        for token in ('AKIA' + 'A' * 16, 'ghp_abc', 'sk_live_abc', 'xoxb-abc'):
+        for token in ('AKIA' + 'A' * 16, 'ghp_abc', 'sk_live_abc', 'xoxb-abc',
+                      'export API_TOKEN=abcd1234', 'DB_PASSWORD=hunter2'):
             with self.subTest(token=token):
                 self.snapshot('diff --git a/a.txt b/a.txt\n@@ -1 +1 @@\n+' + token)
                 result = self.analyzer.run()[0]
