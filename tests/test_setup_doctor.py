@@ -17,6 +17,11 @@ from skim.setup import main
 
 class SetupDoctorTests(unittest.TestCase):
     def setUp(self):
+        # 실행 환경의 실제 데이터 디렉터리 대신 테스트 임시 홈만 검사한다.
+        env = patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop('SKIM_HOME', None)
         self.temp = tempfile.TemporaryDirectory(prefix='skim space ')
         self.addCleanup(self.temp.cleanup)
         self.home = Path(self.temp.name)
