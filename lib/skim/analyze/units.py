@@ -177,6 +177,11 @@ def candidates(path, text, tests, test_diffs=None, *, test_lines=None):
         'payments': payment_candidate(parts, code),
         'db_schema_migration': schema_candidate(parts, path, name, code),
         'config': config_candidate(parts, path, name),
+        'install_script': (name in ('setup.sh', 'install.sh', 'bootstrap.sh')
+                           or (name.endswith('.sh') and (len(location.parts) == 1
+                               or (location.parts[0] == 'scripts' and name.startswith(('install', 'setup')))))
+                           or (name == 'setup.py' and (len(location.parts) == 1 or location.parts[0] == 'lib'))
+                           or location.parts[0] == 'bin'),
         'ci_workflow': path.lower().startswith('.github/workflows/'),
         'dependency': bool(re.search(r'(^|/)(package(-lock)?\.json|(?:[^/]+[.-])?lock|requirements[^/]*|pyproject\.toml|go\.(?:mod|sum)|pnpm-lock\.yaml|gemfile|cargo\.toml)$', path.lower())),
         'secrets': secret_path(path) or 'secrets' in parts or changed_secrets(text),

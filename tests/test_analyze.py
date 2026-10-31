@@ -10,7 +10,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))
 from skim.analyze import Analyzer
 from skim.analyze.codex import CodexAdapter, IsolationError
-from skim.analyze.protocol import chunk_units, validate_chunk, prompt
+from skim.analyze.protocol import FLAGS, PROMPT_VERSION, chunk_units, validate_chunk, prompt
 from skim.analyze.units import parse_diff, sanitize
 from skim.config import Config
 from skim.db import connect
@@ -191,10 +191,18 @@ new mode 100755
         with self.assertRaises(ValueError):
             validate_chunk(json.dumps(dict(items=[item], uncertainties=[dict(change_id='h2', reason='모름')])), {'h1'})
 
+    def test_install_script_stays_rule_only(self):
+        self.assertNotIn('install_script', FLAGS)
+        self.assertEqual(PROMPT_VERSION, 'skim-ko-3')
+        item = dict(change_id='h1', importance='high', reason='설치 변경',
+                    risk_flags=['install_script'])
+        with self.assertRaises(ValueError):
+            validate_chunk(json.dumps(dict(items=[item], uncertainties=[])), {'h1'})
+
     def test_chunk_limits_prioritize_rules_and_count_metadata(self):
         units, _ = parse_diff(DIFF)
         units = [dict(units[0], change_id=f'h{i}', candidates=[], file_path=f'{i}.txt') for i in range(1, 503)]
-        units[-1]['candidates'] = ['auth']
+        units[-1]['candidates'] = ['install_script']
         chunks = chunk_units(units, {'title':'자료'})
         self.assertEqual(sum(len(c['units']) for c in chunks), 200)
         self.assertEqual(chunks[0]['units'][0]['change_id'], 'h502')

@@ -41,6 +41,20 @@ class RiskCandidatesTests(unittest.TestCase):
             with self.subTest(path=path, flag=flag):
                 self.assertIn(flag, candidates(path, '', []))
 
+    def test_install_script_paths(self):
+        for path in ('setup.sh', 'install.sh', 'bootstrap.sh', 'release.sh',
+                     'scripts/install_deps.sh', 'scripts/setup-dev.sh',
+                     'scripts/tools/install-deps.sh', 'tools/bootstrap.sh',
+                     'setup.py', 'lib/setup.py', 'lib/skim/setup.py',
+                     'bin/skim', 'bin/tools/helper.py'):
+            with self.subTest(path=path):
+                self.assertIn('install_script', candidates(path, '', []))
+        for path in ('lib/skim/setup_utils.py', 'docs/setup.md',
+                     'scripts/release.sh', 'tools/install_deps.sh',
+                     'src/setup.py', 'setup.sh.md', 'Makefile', 'binary/tool'):
+            with self.subTest(path=path):
+                self.assertNotIn('install_script', candidates(path, '', []))
+
     def test_changed_evidence_only(self):
         for line, flag in (
             ('ALTER TABLE users ADD COLUMN x', 'db_schema_migration'),
