@@ -47,16 +47,16 @@ def parser():
     web.add_argument('--port', type=int, default=0)
     web.add_argument('--no-browser', action='store_true')
     web.add_argument('--offline', action='store_true', help='수집·분석 없이 저장된 데이터만 표시')
-    commands.add_parser('doctor', help='후속 PR에서 구현 예정')
+    commands.add_parser('doctor', help='인증·격리·로컬 권한 점검')
     return root
 
 
 def main(argv=None):
     args = parser().parse_args(argv)
-    if args.command == 'doctor':
-        print(f'{args.command}: 아직 구현되지 않았습니다.', file=sys.stderr)
-        return 2
     try:
+        if args.command == 'doctor':
+            from .doctor import run, paths
+            return run(paths())
         config = Config.load()
         if args.command == 'web':
             if not 0 <= args.port <= 65535:

@@ -107,7 +107,8 @@ class ScaffoldTests(unittest.TestCase):
         link.symlink_to(ROOT / 'bin/skim')
         result = subprocess.run([str(link), 'repo', 'add', 'a/b'], capture_output=True, text=True, cwd='/tmp')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.cli('doctor')[0], 2)
+        with patch('skim.doctor.run', return_value=1):
+            self.assertEqual(self.cli('doctor')[0], 1)
         with patch('skim.web.serve', return_value=0) as serve:
             self.assertEqual(self.cli('web', '--offline', '--no-browser')[0], 0)
             self.assertEqual(serve.call_args.args[1:], (0, False, True))

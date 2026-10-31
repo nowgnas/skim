@@ -64,7 +64,7 @@ SHA를 수집 전후 확인하고 설명·파일 목록·diff 해시를 스냅�
 `blocked` 상태와 이유를 기록합니다. 도움말 플래그 존재나 프롬프트만으로 우회하지
 않으며, 사용자 설정으로 이 검사를 해제하는 옵션도 없습니다. 어댑터의 실행 경로는
 검증 성공 후 빈 임시 디렉터리에서 `codex exec`를 호출하도록 분리되어 있습니다.
-`web`, `doctor`는 아직 종료 코드 2를 반환하는 스텁입니다.
+`doctor`는 인증·설치·격리·권한을 점검하며 실패 시 종료 코드 1을 반환합니다.
 
 가짜 어댑터를 주입하는 테스트에서 청크·합성 파이프라인 전체를 검증합니다.
 청크는 100단위·200 KiB(프롬프트와 메타데이터 포함), PR은 200파일·500단위·
@@ -100,3 +100,65 @@ Sessio의 실제 인덱스는 보통 저장소 이름만 기록하므로 그 이
 브랜치를 비교합니다(전체 `owner/repo` 값도 지원). 동일 이름의 저장소를
 여러 소유자 아래 사용하면 인덱스의 이름만으로 소유자를 구별할 수 없습니다.
 인덱스의 임의 URL은 사용하지 않고 검증한 harness·세션 ID로 링크를 생성합니다.
+
+## 설치와 Mac 실행
+
+Python 3.11 이상과 gh·Codex CLI를 미리 설치합니다. Python 외부 패키지는 없습니다.
+설치 스크립트는 다운로드나 관리자 권한 없이 사용자 링크를 생성합니다.
+저장소 폴더를 유지해야 링크가 동작합니다.
+
+```bash
+./setup.sh
+export PATH="$HOME/.local/bin:$PATH"
+gh auth login
+skim doctor
+skim repo add owner/repo
+skim collect
+skim web
+```
+
+Mac에서는 위 순서로 실행하면 브라우저가 열립니다. 터미널에서 Ctrl-C로 종료합니다.
+현재 Codex 격리 계약 미검증으로 doctor는 실패하고 실제 분석은 차단됩니다.
+수집과 로컬 웹은 사용할 수 있습니다. 등록만으로 코드 전송을 허용하지 않습니다.
+
+```bash
+./setup.sh --web
+./setup.sh --remove-web
+```
+
+--web은 로그인 시 macOS launchd 사용자 LaunchAgent
+(~/Library/LaunchAgents/dev.skim.web.plist) 또는 Linux systemd --user
+(~/.config/systemd/user/skim-web.service)를 등록합니다.
+브라우저는 자동으로 열지 않습니다. 로그인 후 skim web으로 기존 서버의 새 진입 URL을
+받으세요. --remove-web은 자동 시작과 서비스 파일만 제거하고 설정·DB는 보존합니다.
+CLI 제거는 자동 시작 제거 후 rm ~/.local/bin/skim으로 합니다.
+기존 일반 파일이나 다른 설치의 링크는 덮어쓰지 않습니다.
+SKIM_PYTHON으로 Python 실행 경로를 선택할 수 있습니다.
+서비스에는 설치 당시 PATH·Python·명시한 SKIM_HOME을 기록하므로 환경 변경 후
+./setup.sh --web을 다시 실행하세요. Linux에는 로그인한 systemd 사용자 세션이 필요합니다.
+Mac 상태는 launchctl print gui/$(id -u)/dev.skim.web,
+Linux 상태는 systemctl --user status skim-web.service로 확인합니다.
+서비스에서도 gh 인증과 로그인 키체인 접근이 가능해야 합니다.
+조직 SSO 승인·비공개 저장소 읽기 권한·팀 멤버십을 확인하세요.
+doctor의 gh 인증 성공만으로 모든 조직·팀 접근을 보장하지 않습니다.
+
+## 웹 기능과 보안
+
+skim web은 127.0.0.1 전용 대시보드와 5분 주기 수집·수동 갱신을 제공합니다.
+PR 목록·필터·상세에서 규칙 후보·미분석·high를 먼저 펼치고 mid/low는 접습니다.
+중요도는 검토 순서 참고이며 보안 감사나 정확성 보증이 아닙니다.
+GitHub 리뷰 작성·승인·머지는 하지 않습니다.
+
+데이터 화면은 인증이 필요합니다. fragment의 일회용 진입 토큰은 60초간 유효하며
+세션 수립 후 폐기됩니다. 진입 URL을 공유하지 마세요.
+Host·Origin·CSRF 검증, CSP, 콘텐츠 이스케이프를 적용합니다.
+로컬 HTTP 쿠키는 HttpOnly·SameSite=Strict이며 Secure는 사용하지 않습니다.
+동일 OS 사용자 권한의 악성 프로세스까지 방어하지는 않습니다.
+수집 원문 diff는 로컬 캐시에 저장됩니다. 전송 전 민감 정보 제외·가림은 완전하지
+않습니다. 허용한 분석 입력에는 선택 CLI 모델 서비스의 전송·보존 정책이 적용됩니다.
+별도 전송 API·원격 로그·텔레메트리는 없습니다.
+보존 기간 자동 정리·cache clear·uninstall --purge는 아직 구현하지 않았습니다.
+
+외부 통신 없는 화면 확인은 별도 SKIM_HOME에서 scripts/demo_seed.py 실행 후
+bin/skim web --offline으로 할 수 있습니다.
+테스트: python3 -m unittest discover -s tests (실제 LLM·외부 네트워크 사용 없음).
