@@ -449,5 +449,54 @@ class CollectionTests(unittest.TestCase):
         self.assertTrue(restarted.tick(collector))
 
 
+    def test_diff_422_is_a_collection_failure(self):
+        self.collector.collect()
+        def runner(command, **kwargs):
+            if '-H' in command:
+                return subprocess.CompletedProcess(command, 1, 'HTTP/2 422 Error\n\n{}', '')
+            return self.fake(command, **kwargs)
+        self.collector.gh.runner = runner
+        with self.assertRaises(CollectionError):
+            self.collector.collect()
+        self.assertEqual(self.count('snapshots'), 2)
+        for row in self.conn.execute('SELECT coverage FROM snapshots'):
+            coverage = json.loads(row[0])
+            self.assertEqual(coverage['status'], 'incomplete')
+            self.assertNotIn('omission_reason', coverage)
+
+    def test_oversized_diff_rechecks_sha_before_storing(self):
+        def runner(command, **kwargs):
+            if '-H' in command:
+                self.fake.head += 'x'
+                return subprocess.CompletedProcess(command, 1, 'HTTP/2 406 Error\n\n{}', '')
+            return self.fake(command, **kwargs)
+        self.collector.gh.runner = runner
+        with self.assertRaises(CollectionError):
+            self.collector.collect()
+        self.assertEqual(self.count('snapshots'), 0)
+        self.fake.head = 'stable'
+        def stable_runner(command, **kwargs):
+            if '-H' in command:
+                return subprocess.CompletedProcess(command, 1, 'HTTP/2 406 Error\n\n{}', '')
+            return self.fake(command, **kwargs)
+        self.collector.gh.runner = stable_runner
+        self.assertEqual(self.collector.collect(), 0)
+        self.assertEqual(self.count('snapshots'), 2)
+        self.assertEqual({r[0] for r in self.conn.execute('SELECT head_sha FROM snapshots')}, {'stable'})
+
+    def test_nested_different_lock_names_are_both_held(self):
+        code = "import fcntl,sys; f=open(sys.argv[1]); fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)"
+        def available(name):
+            return subprocess.run([sys.executable, '-c', code, str(self.config.data_dir / name)], capture_output=True).returncode == 0
+        with self.collector.lock():
+            with self.collector.lock('analysis.lock'):
+                with self.collector.lock('analysis.lock'):
+                    self.assertFalse(available('collection.lock'))
+                    self.assertFalse(available('analysis.lock'))
+            self.assertTrue(available('analysis.lock'))
+            self.assertFalse(available('collection.lock'))
+        self.assertTrue(available('collection.lock'))
+
+
 if __name__ == '__main__':
     unittest.main()

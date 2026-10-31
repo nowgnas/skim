@@ -59,6 +59,7 @@ class Analyzer:
                         return {key: clean(item) for key, item in value.items()}
                     return value
                 value = clean(value)
+                validate(value, schema)
                 return value
             except (IsolationError, BudgetExceeded):
                 raise
@@ -103,6 +104,11 @@ class Analyzer:
             self.conn.execute('BEGIN IMMEDIATE')
             if not self.conn.execute('SELECT 1 FROM snapshots WHERE id=?', (row['id'],)).fetchone():
                 return dict(result, status='cancelled', error='분석 도중 스냅샷이 삭제되었습니다')
+            previous = self.conn.execute(
+                'SELECT output_json FROM analyses WHERE snapshot_id=? AND input_hash=? AND provider=? AND model=? AND cli_version=? AND prompt_version=? AND schema_version=? ORDER BY id DESC LIMIT 1',
+                (row['id'], row.get('analysis_input_hash', ''), self.adapter.provider, self.adapter.model, self.adapter.cli_version, PROMPT_VERSION, SCHEMA_VERSION)).fetchone()
+            if previous and previous['output_json'] == encode(result):
+                return result
             self.conn.execute('INSERT INTO analyses(snapshot_id,input_hash,provider,model,cli_version,prompt_version,schema_version,status,output_json,error) VALUES(?,?,?,?,?,?,?,?,?,?)',
                               (row['id'], row.get('analysis_input_hash', ''), self.adapter.provider, self.adapter.model, self.adapter.cli_version, PROMPT_VERSION, SCHEMA_VERSION, status, encode(result), error))
         return result
@@ -177,10 +183,14 @@ class Analyzer:
                                         partial=any(u['change_id'] not in by_id or u.get('redacted') for u in members)))
         with self.conn:
             self.conn.execute('BEGIN IMMEDIATE')
-            if not self.conn.execute('SELECT 1 FROM snapshots WHERE id=?', (row['id'],)).fetchone():
+            current = self.conn.execute('SELECT coverage FROM snapshots WHERE id=?', (row['id'],)).fetchone()
+            if current is None:
                 return dict(result, status='cancelled', error='분석 도중 스냅샷이 삭제되었습니다')
             self.conn.execute('UPDATE snapshots SET input_hash=? WHERE id=?', (input_hash, row['id']))
-            stored_coverage = dict(source_coverage, analysis=coverage)
+            # 수집기가 갱신한 상태·오류를 보존하고 분석 통계만 합친다.
+            stored_coverage = json.loads(current['coverage'])
+            stored_coverage.setdefault('raw_input_hash', source_coverage['raw_input_hash'])
+            stored_coverage['analysis'] = coverage
             self.conn.execute('UPDATE snapshots SET coverage=? WHERE id=?', (encode(stored_coverage), row['id']))
             # 기존 성공 분석을 남겨 실패 시에도 이전 결과를 볼 수 있게 한다.
             analysis_id = self.conn.execute('INSERT INTO analyses(snapshot_id,input_hash,provider,model,cli_version,prompt_version,schema_version,status,intent,output_json,error) VALUES(?,?,?,?,?,?,?,?,?,?,?)',

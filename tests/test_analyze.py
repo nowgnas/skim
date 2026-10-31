@@ -375,3 +375,84 @@ new mode 100755
         self.analyzer.run()
         success_hash = self.conn.execute('SELECT input_hash FROM analyses ORDER BY id DESC').fetchone()[0]
         self.assertEqual(failure_hash, success_hash)
+
+    def test_collection_failure_during_model_call_is_preserved(self):
+        other = connect(self.config)
+        self.addCleanup(other.close)
+        original = self.fake.generate
+        def generate(request, schema):
+            if not self.fake.calls:
+                with other:
+                    other.execute('UPDATE snapshots SET coverage=? WHERE id=1',
+                                  (json.dumps(dict(status='incomplete', collection_error='수집 권한 실패', files=[])),))
+            return original(request, schema)
+        self.fake.generate = generate
+        self.assertEqual(self.analyzer.run()[0]['status'], 'completed')
+        coverage = json.loads(self.conn.execute('SELECT coverage FROM snapshots').fetchone()[0])
+        self.assertEqual(coverage['status'], 'incomplete')
+        self.assertEqual(coverage['collection_error'], '수집 권한 실패')
+        self.assertEqual(coverage['analysis']['analyzed'], 2)
+        self.assertEqual(coverage['raw_input_hash'], 'raw')
+        self.assertEqual(self.analyzer.run()[0]['status'], 'blocked')
+
+    def test_value_only_secrets_keep_candidates_even_when_model_says_low(self):
+        for token in ('AKIA' + 'A' * 16, 'ghp_abc', 'sk_live_abc', 'xoxb-abc'):
+            with self.subTest(token=token):
+                self.snapshot('diff --git a/a.txt b/a.txt\n@@ -1 +1 @@\n+' + token)
+                result = self.analyzer.run()[0]
+                self.assertEqual(result['items'][0]['importance'], 'low')
+                self.assertIn('secrets', result['units'][0]['candidates'])
+                self.assertIn('secrets', result['files'][0]['candidates'])
+                self.assertEqual(result['coverage']['redacted'], 1)
+                self.assertNotIn(token, json.dumps(result))
+        units, _ = parse_diff('diff --git a/.env b/.env\n@@ -1 +1 @@\n+ghp_abc')
+        self.assertTrue(units[0]['excluded'])
+        self.assertFalse(units[0]['redacted'])
+        self.assertIsNone(units[0]['redaction_reason'])
+
+    def test_redacted_model_output_is_revalidated(self):
+        original = self.fake.generate
+        def generate(request, schema):
+            value = json.loads(original(request, schema))
+            if 'items' in value:
+                for item in value['items']:
+                    item['reason'] = 'ghp_a ' * 80
+            else:
+                value['intent'] = 'ghp_a ' * 40
+            return json.dumps(value)
+        self.fake.generate = generate
+        result = self.analyzer.run()[0]
+        self.assertEqual(result['status'], 'failed')
+        self.assertEqual(result['items'], [])
+        self.assertEqual(len(self.fake.calls), 2)
+
+    def test_identical_preparation_failures_do_not_accumulate(self):
+        for coverage, path, status in ((dict(status='incomplete'), None, 'blocked'), ({}, None, 'failed')):
+            with self.subTest(status=status):
+                with self.conn:
+                    self.conn.execute('DELETE FROM analyses')
+                    self.conn.execute('UPDATE snapshots SET coverage=?,diff_path=?', (json.dumps(coverage), path))
+                for _ in range(3):
+                    self.assertEqual(self.analyzer.run()[0]['status'], status)
+                self.assertEqual(self.conn.execute('SELECT COUNT(*) FROM analyses').fetchone()[0], 1)
+
+    def test_dependency_and_plain_test_filename_candidates(self):
+        from skim.analyze.units import candidates
+        for path in ('pnpm-lock.yaml', 'go.sum', 'Gemfile', 'src/Gemfile'):
+            self.assertIn('dependency', candidates(path, '', []))
+        units, tests = parse_diff(DIFF, [{'filename': 'tests/app.py'}])
+        self.assertEqual(tests, ['tests/app.py'])
+        self.assertNotIn('logic_without_tests', units[0]['candidates'])
+
+    def test_redacted_synthesis_output_is_revalidated(self):
+        original = self.fake.generate
+        def generate(request, schema):
+            value = json.loads(original(request, schema))
+            if 'intent' in value:
+                value['intent'] = 'ghp_a ' * 40
+            return json.dumps(value)
+        self.fake.generate = generate
+        result = self.analyzer.run()[0]
+        self.assertEqual(result['status'], 'failed')
+        self.assertIsNone(result['intent'])
+        self.assertEqual(len(self.fake.calls), 3)

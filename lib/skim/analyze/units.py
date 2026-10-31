@@ -35,7 +35,7 @@ def candidates(path, text, tests):
              'db_schema_migration': r'migration|schema|\b(?:drop|alter) table',
              'config': r'config|settings|\.toml$|\.ini$|\.env',
              'ci_workflow': r'\.github/workflows/',
-             'dependency': r'(^|/)(package(-lock)?\.json|(?:[^/]+[.-])?lock|requirements[^/]*|pyproject\.toml|go\.mod|cargo\.toml)(\n|$)',
+             'dependency': r'(^|/)(package(-lock)?\.json|(?:[^/]+[.-])?lock|requirements[^/]*|pyproject\.toml|go\.(?:mod|sum)|pnpm-lock\.yaml|gemfile|cargo\.toml)(\n|$)',
              'secrets': r'secret|password|private.key|token|credentials'}
     for flag, pattern in rules.items():
         target = path.lower() if flag == 'dependency' else value
@@ -93,12 +93,14 @@ def parse_diff(diff, files=()):
         for index, (text, old, new) in enumerate(parts):
             excluded = secret_path(path) or bool(old_path and secret_path(old_path))
             flags = candidates(path, text, tests)
-            if excluded and 'secrets' not in flags:
+            cleaned = sanitize(text)
+            redacted = not excluded and cleaned != text
+            if (excluded or redacted) and 'secrets' not in flags:
                 flags.append('secrets')
             units.append(dict(change_id=f'h{len(units)+1}', file_path=sanitize(path), kind='hunk' if old else 'synthetic',
                               old_range=old, new_range=new, binary='GIT binary patch' in body or 'Binary files ' in body,
-                              diff='' if excluded else sanitize(text), raw_bytes=len(text.encode()) + max(0, overhead) * (index == 0), excluded=excluded,
+                              diff='' if excluded else cleaned, raw_bytes=len(text.encode()) + max(0, overhead) * (index == 0), excluded=excluded,
                               exclusion_reason='민감 경로' if excluded else None,
-                              redacted=sanitize(text) != text, redaction_reason='일부 민감 정보 가림' if sanitize(text) != text else None,
+                              redacted=redacted, redaction_reason='일부 민감 정보 가림' if redacted else None,
                               candidates=flags))
     return units, tests

@@ -87,7 +87,7 @@ class GitHub:
         if result.returncode or status >= 400:
             if self.not_before > self.clock():
                 raise Deferred(self.not_before)
-            if diff and status in (406, 413, 422):
+            if diff and status in (406, 413):
                 raise Oversized('GitHub diff 크기 한도 초과: 미분석')
             if status == 404:
                 raise Inaccessible('GitHub 접근 불가: 저장소 삭제 또는 접근 권한을 확인하세요')
@@ -126,28 +126,28 @@ class Collector:
         self.conn, self.config = conn, config
         self.gh = GitHub(runner, clock)
         self._mutex = threading.RLock()
-        self._lock_depth = 0
+        self._lock_depth = {}
 
     @contextmanager
     def lock(self, name="collection.lock"):
         # 수집·추적 해제·캐시 정리는 같은 프로세스 간 잠금을 공유한다.
         with self._mutex:
-            if self._lock_depth:
-                self._lock_depth += 1
+            if self._lock_depth.get(name):
+                self._lock_depth[name] += 1
                 try:
                     yield
                 finally:
-                    self._lock_depth -= 1
+                    self._lock_depth[name] -= 1
                 return
             path = self.config.data_dir / name
             private_file(path)
             with path.open('r+') as handle:
                 fcntl.flock(handle, fcntl.LOCK_EX)
-                self._lock_depth = 1
+                self._lock_depth[name] = 1
                 try:
                     yield
                 finally:
-                    self._lock_depth = 0
+                    del self._lock_depth[name]
                     fcntl.flock(handle, fcntl.LOCK_UN)
 
     def collect(self):
@@ -208,15 +208,21 @@ class Collector:
                     state = 'merged' if pr.get('merged_at') else pr['state']
                     snapshot = None
                     if state == 'open' and (full, number) in targets:
-                        files = gh.pages(endpoint + '/files')
-                        if len(files) != pr.get('changed_files', len(files)):
-                            raise Oversized('GitHub 파일 목록 한도 초과: 미분석')
-                        diff = gh.get(endpoint, diff=True)
+                        oversized = None
+                        try:
+                            files = gh.pages(endpoint + '/files')
+                            if len(files) != pr.get('changed_files', len(files)):
+                                raise Oversized('GitHub 파일 목록 한도 초과: 미분석')
+                            diff = gh.get(endpoint, diff=True)
+                        except Oversized as exc:
+                            oversized = exc
                         after = gh.get(endpoint)
                         if (pr['head']['sha'], pr['base']['sha']) != (after['head']['sha'], after['base']['sha']) or after['state'] != 'open':
                             if attempt == 0:
                                 continue
                             raise CollectionError('수집 도중 PR이 변경되어 기존 스냅샷을 보존합니다')
+                        if oversized is not None:
+                            raise oversized
                         snapshot = (files, diff)
                     collected.append((full, number, pr, state, snapshot))
                     break
