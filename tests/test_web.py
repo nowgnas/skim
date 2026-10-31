@@ -181,15 +181,16 @@ class WebTests(unittest.TestCase):
             unit = next(u for u in result['units']
                         if any(i['change_id'] == u['change_id'] for i in result['items']))
             item = next(i for i in result['items'] if i['change_id'] == unit['change_id'])
-            unit['candidates'] = ['logic_without_tests']
+            unit['candidates'] = ['logic_without_tests', 'install_script']
             item['risk_flags'] = ['config']
             conn.execute('UPDATE analyses SET output_json=? WHERE id=?', (json.dumps(result), row['id']))
         body = self.request('/pr/1')[2]
         hunk = next(part.split('</details>')[0] for part in body.split('<details')
                     if ' · ' + unit['change_id'] + ' · ' in part)
-        self.assertIn('<p>규칙 후보: logic_without_tests</p>', hunk)
+        self.assertIn('<p>규칙 후보: logic_without_tests · 설치 스크립트</p>', hunk)
         self.assertIn('<p>모델 판단: config</p>', hunk)
         for page in (body.split('<details')[0], self.request()[2]):
+            self.assertIn('설치 스크립트', page)
             self.assertIn('규칙 후보: ', page)
             self.assertIn('모델 판단: ', page)
 

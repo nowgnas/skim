@@ -24,6 +24,7 @@ from .sessio import session_link
 
 CSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'"
 STATIC = Path(__file__).with_name('web_static')
+RULE_LABELS = {'install_script': '설치 스크립트'}
 RANK = {'high': 3, 'mid': 2, 'low': 1}
 
 
@@ -129,7 +130,7 @@ def refresh_form(csrf):
 def badges(pr):
     labels = []
     if pr['rule_flags']:
-        labels.append('규칙 후보: ' + ' · '.join(pr['rule_flags']))
+        labels.append('규칙 후보: ' + ' · '.join(RULE_LABELS.get(flag, flag) for flag in pr['rule_flags']))
     if pr['model_flags']:
         labels.append('모델 판단: ' + ' · '.join(pr['model_flags']))
     if pr['unanalysed']:
@@ -210,7 +211,7 @@ def detail(pr, query, config, offline=False):
         content += (f'<details{" open" if opened else ""}><summary>{esc(unit["file_path"])} · {esc(unit["change_id"])} · {esc(importance)}'
                     + (' · 규칙 기반 후보' if flags else '') + '</summary>'
                     f'<p>{esc(item["reason"] if item else unit.get("exclusion_reason") or unit.get("omission_reason") or "분석되지 않은 변경입니다")}</p>'
-                    f'<p>규칙 후보: {esc(" · ".join(flags) or "없음")}</p>'
+                    f'<p>규칙 후보: {esc(" · ".join(RULE_LABELS.get(flag, flag) for flag in flags) or "없음")}</p>'
                     f'<p>모델 판단: {esc((" · ".join(item.get("risk_flags", [])) or "없음") if item else "미분석")}</p>'
                     f'<p class="muted">이전 {esc(unit.get("old_range"))} → 새 줄 {esc(unit.get("new_range"))}</p>')
         if 'logic_without_tests' in flags:
