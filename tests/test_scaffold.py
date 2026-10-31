@@ -55,7 +55,7 @@ class ScaffoldTests(unittest.TestCase):
     def test_schema_constraints_and_permissions(self):
         config = Config.load()
         with contextlib.closing(connect(config)) as conn:
-            self.assertEqual(conn.execute('PRAGMA user_version').fetchone()[0], 1)
+            self.assertEqual(conn.execute('PRAGMA user_version').fetchone()[0], 2)
             self.assertEqual(conn.execute('PRAGMA journal_mode').fetchone()[0], 'wal')
             conn.execute("INSERT INTO jobs(type,target_id,input_hash) VALUES('analyze',1,'a')")
             with self.assertRaises(sqlite3.IntegrityError):
@@ -91,7 +91,7 @@ class ScaffoldTests(unittest.TestCase):
         link.symlink_to(ROOT / 'bin/skim')
         result = subprocess.run([str(link), 'repo', 'add', 'a/b'], capture_output=True, text=True, cwd='/tmp')
         self.assertEqual(result.returncode, 0, result.stderr)
-        for command in ('analyze', 'web', 'doctor'):
+        for command in ('web', 'doctor'):
             self.assertEqual(self.cli(command)[0], 2)
 
     def test_review_request_survives_untracking(self):

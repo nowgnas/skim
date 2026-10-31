@@ -247,11 +247,11 @@ class Collector:
                     finally:
                         if os.path.exists(temporary):
                             os.unlink(temporary)
-                    existing = conn.execute('SELECT 1 FROM snapshots WHERE pr_id=? AND base_sha=? AND head_sha=? AND input_hash=?',
-                                            (pr_id, pr['base']['sha'], pr['head']['sha'], input_hash)).fetchone()
+                    existing = conn.execute("SELECT 1 FROM snapshots WHERE pr_id=? AND base_sha=? AND head_sha=? AND (input_hash=? OR json_extract(coverage,'$.raw_input_hash')=?)",
+                                            (pr_id, pr['base']['sha'], pr['head']['sha'], input_hash, input_hash)).fetchone()
                     if existing:
-                        for row in conn.execute('SELECT id,coverage FROM snapshots WHERE pr_id=? AND base_sha=? AND head_sha=? AND input_hash=?',
-                                                (pr_id, pr['base']['sha'], pr['head']['sha'], input_hash)):
+                        for row in conn.execute("SELECT id,coverage FROM snapshots WHERE pr_id=? AND base_sha=? AND head_sha=? AND (input_hash=? OR json_extract(coverage,'$.raw_input_hash')=?)",
+                                                (pr_id, pr['base']['sha'], pr['head']['sha'], input_hash, input_hash)):
                             coverage = json.loads(row['coverage'])
                             coverage.pop('collection_error', None)
                             coverage['status'] = 'collected'
