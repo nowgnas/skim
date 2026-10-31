@@ -36,8 +36,7 @@ class CodexTests(unittest.TestCase):
         self.features = 'apps stable true\nplugins under development false\nmulti_agent experimental true\nweb_search_cached stable true\nother stable true'
         self.answer = {'tool_ran': False, 'instructions_seen': ''}
         self.file_location = None
-        self.leak_canary = False
-        self.canaries = []
+        self.events = [{'type': 'item.completed', 'item': {'type': 'agent_message', 'text': 'x'}}]
         self.exitcode = 0
         self.adapter.init_home()
 
@@ -58,13 +57,7 @@ class CodexTests(unittest.TestCase):
         else:
             self.assertEqual(args[0], 'exec')
             self.assertEqual(command[command.index('-c') + 1], 'web_search="disabled"')
-            parent_rules = Path(kw['cwd']).parent / 'AGENTS.md'
-            if parent_rules.exists():
-                canary = parent_rules.read_text()
-                self.assertTrue(canary)
-                self.canaries.append(canary)
-                if self.leak_canary:
-                    self.answer = {'tool_ran': False, 'instructions_seen': canary}
+            self.assertEqual([p.name for p in Path(kw['cwd']).parent.iterdir()], ['work'])
             self.assertEqual(command[command.index('--sandbox') + 1], 'read-only')
             for flag in FLAGS:
                 self.assertIn(flag, command)
@@ -76,7 +69,11 @@ class CodexTests(unittest.TestCase):
                 directory = kw['cwd'] if self.file_location == 'cwd' else kw['env']['HOME']
                 (Path(directory) / 'probe.txt').touch()
             Path(command[command.index('--output-last-message') + 1]).write_text(json.dumps(self.answer))
-            return subprocess.CompletedProcess(command, self.exitcode, '', '')
+            stdout = ''
+            if '--json' in command:
+                events = self.events + [{'type': 'turn.completed'}]
+                stdout = '\n'.join(json.dumps(e) for e in events)
+            return subprocess.CompletedProcess(command, self.exitcode, stdout, '')
         return subprocess.CompletedProcess(command, 0, output, '')
 
     def test_init_explicit_idempotent_and_no_credential_reads(self):
@@ -163,15 +160,17 @@ class CodexTests(unittest.TestCase):
         with self.assertRaises(IsolationError):
             self.adapter.probe()
 
-    def test_probe_accepts_self_reports_but_blocks_parent_canary(self):
+    def test_probe_judges_tool_calls_from_events_not_self_report(self):
         self.answer = {'tool_ran': True, 'instructions_seen': 'Other instructions'}
         self.adapter.probe()
+        for item in ({'type': 'command_execution'}, {'type': 'mcp_tool_call'}, {'type': 'web_search'},
+                     {'type': 'file_change'}, 'bad'):
+            self.events = [{'type': 'item.started', 'item': item}]
+            with self.assertRaises(IsolationError):
+                self.adapter.probe()
+            self.assertFalse(self.adapter.probe_path.exists())
+        self.events = []
         self.adapter.probe()
-        self.assertEqual(len(set(self.canaries)), 2)
-        self.leak_canary = True
-        with self.assertRaises(IsolationError):
-            self.adapter.probe()
-        self.assertFalse(self.adapter.probe_path.exists())
 
     def test_generate_same_isolation_and_doctor(self):
         config = Config(self.root / 'absent', self.adapter.data_dir)

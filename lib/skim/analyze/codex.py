@@ -3,7 +3,6 @@ import hashlib
 import json
 import os
 import re
-import secrets
 import stat
 import shutil
 import subprocess
@@ -17,7 +16,9 @@ class IsolationError(ValueError):
     pass
 
 
-RISKY_FEATURES = frozenset('apps plugins hooks memories memory_tool browser_use browser_use_external computer_use web_search web_search_request web_search_cached multi_agent collab collab_spawn experimental_use_rmcp_client mcp shell_tool exec unified_exec shell_snapshot apply_patch freeform_apply_patch js_repl code_mode'.split())
+RISKY_FEATURES = frozenset('apps plugins hooks memories memory_tool browser_use browser_use_external computer_use web_search web_search_request web_search_cached multi_agent collab collab_spawn experimental_use_rmcp_client mcp shell_tool exec unified_exec shell_snapshot apply_patch freeform_apply_patch js_repl code_mode tool_search tool_suggest skill_search skill_mcp_dependency_install image_generation view_image in_app_browser browser_use_full_cdp_access remote_plugin plugin_sharing workspace_dependencies worktrees sleep_tool goals code_mode_host unified_exec_tty write_stdin_approval realtime_conversation tool_call_mcp_elicitation tool_search_always_defer_mcp_tools daemon_auto_start in_app_local_automation'.split())
+# error 항목은 설정 경고(사용 중단·비활성 기능 안내)이며 도구 호출이 아니다.
+PROBE_ALLOWED_ITEMS = frozenset({'agent_message', 'reasoning', 'error'})
 FLAGS = ('--skip-git-repo-check', '--ephemeral', '--ignore-user-config', '--ignore-rules',
          '--sandbox', '--output-schema', '--output-last-message')
 PROBE_SCHEMA = {'type': 'object', 'additionalProperties': False,
@@ -189,9 +190,6 @@ class CodexAdapter:
         with tempfile.TemporaryDirectory(prefix='skim-analysis-') as parent, tempfile.TemporaryDirectory(prefix='skim-home-') as home, tempfile.TemporaryDirectory(prefix='skim-schema-') as control, tempfile.TemporaryDirectory(prefix='skim-codex-') as runtime:
             work = Path(parent) / 'work'
             work.mkdir()
-            canary = secrets.token_hex(32) if probe else None
-            if probe:
-                (Path(parent) / 'AGENTS.md').write_text(canary)
             # 인증 갱신의 rename과 런타임 상태는 임시 홈에서만 발생한다.
             (Path(runtime) / 'auth.json').symlink_to(os.readlink(self.home / 'auth.json'))
             schema_path = Path(control) / 'schema.json'
@@ -201,6 +199,9 @@ class CodexAdapter:
             command = ['codex', 'exec', *FLAGS[:4], '--sandbox', 'read-only',
                        '--output-schema', str(schema_path), '--output-last-message', str(output),
                        '-c', 'web_search="disabled"']
+            if probe:
+                # 모델 자기보고 대신 이벤트 스트림으로 도구 호출을 객관적으로 판정한다.
+                command.append('--json')
             for name in self.disabled:
                 command.extend(['--disable', name])
             if self.model != 'unknown':
@@ -209,13 +210,14 @@ class CodexAdapter:
             try:
                 result = self.runner(command, input=prompt, text=True, capture_output=True,
                                      timeout=120, cwd=work, env=self._env(home, runtime))
-                if probe and (any(Path(work).iterdir()) or any(Path(home).iterdir())):
+                if probe and (any(Path(work).iterdir()) or any(Path(home).iterdir())
+                              or {p.name for p in Path(parent).iterdir()} != {'work'}):
                     raise IsolationError('Codex 격리 probe 파일 생성 감지')
                 if result.returncode:
                     raise ValueError('Codex 실행 실패')
                 raw = output.read_text()
-                if probe and any(canary in text for text in (raw, result.stdout, result.stderr)):
-                    raise IsolationError('Codex 격리 probe 지침 canary 감지')
+                if probe:
+                    self._check_events(result.stdout)
                 return raw
             except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
                 if probe:
@@ -223,6 +225,22 @@ class CodexAdapter:
                 if isinstance(exc, IsolationError):
                     raise
                 raise ValueError('Codex 실행 실패 또는 출력 누락') from None
+
+    @staticmethod
+    def _check_events(stdout):
+        seen = False
+        for line in stdout.splitlines():
+            if not line.strip():
+                continue
+            event = json.loads(line)
+            if not isinstance(event, dict):
+                raise ValueError('probe 이벤트 형식 오류')
+            seen = seen or event.get('type') == 'turn.completed'
+            item = event.get('item')
+            if item is not None and (not isinstance(item, dict) or item.get('type') not in PROBE_ALLOWED_ITEMS):
+                raise IsolationError('Codex 격리 probe 도구 호출 감지')
+        if not seen:
+            raise ValueError('probe 이벤트 누락')
 
     def generate(self, prompt, schema):
         self.verify()
