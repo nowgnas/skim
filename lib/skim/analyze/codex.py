@@ -95,6 +95,8 @@ class CodexAdapter:
 
     def _inspect(self, args):
         with tempfile.TemporaryDirectory(prefix='skim-check-') as work, tempfile.TemporaryDirectory(prefix='skim-check-home-') as home:
+            # 실제 CLI는 존재하지 않는 CODEX_HOME을 거부하므로 빈 디렉터리를 만든다.
+            (Path(home) / 'codex').mkdir(mode=0o700)
             try:
                 result = self.runner(['codex', *args], capture_output=True, text=True, timeout=15,
                                      cwd=work, env=self._env(home, Path(home) / 'codex'))
@@ -125,7 +127,7 @@ class CodexAdapter:
             fields = line.split()
             if not fields:
                 continue
-            if (len(fields) < 3 or not re.fullmatch(r'[a-z][a-z0-9_]*', fields[0])
+            if (len(fields) < 3 or not re.fullmatch(r'[a-z][a-z0-9_.]*', fields[0])
                     or fields[-1] not in ('true', 'false') or fields[0] in names):
                 raise IsolationError('Codex 분석 차단: 기능 목록 형식 오류')
             names.add(fields[0])
