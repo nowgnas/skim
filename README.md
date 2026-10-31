@@ -194,3 +194,9 @@ stderr의 `model:` 배너가 있는 경우에만 최선의 노력으로 감지�
 일반 검사에서는 캐시를 읽어 추가 모델 호출을 하지 않습니다. 감지 실패 시
 `unknown`을 유지하고 doctor에서 명시적 모델 설정을 권장합니다.
 모델은 doctor와 웹 PR 상세 화면에서 확인할 수 있습니다.
+
+현재 프롬프트의 실제 모델 회귀 평가가 없어 **출시는 차단**되어 있습니다.
+`python3 scripts/check_release.py`는 실패하며, 해제 조건은
+[출시 체크리스트](docs/release-checklist.md)에 정리했습니다.
+JS/TS의 문자열 모듈 경로 import는 테스트 대응 근거로 인식하지 못합니다.
+이 경우 관련 테스트를 수정했어도 `logic_without_tests` 후보가 남을 수 있습니다.

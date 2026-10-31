@@ -114,7 +114,9 @@ def load_prs(conn, config):
                   status=analysis['status'] if analysis else 'unanalyzed',
                   stale=bool(analysis and (analysis['head_sha'] != pr['head_sha'] or analysis['base_sha'] != pr['base_sha'] or (snapshot and snapshot['id'] != analysis['snapshot_id']))))
         pr['importance'] = max((item['importance'] for item in items.values()), key=lambda x: RANK.get(x, 0), default='unanalyzed')
-        pr['flags'] = sorted({flag for unit in units for flag in unit.get('candidates', [])} | {flag for item in items.values() for flag in item.get('risk_flags', [])})
+        pr['rule_flags'] = sorted({flag for unit in units for flag in unit.get('candidates', [])})
+        pr['model_flags'] = sorted({flag for item in items.values() for flag in item.get('risk_flags', [])})
+        pr['flags'] = sorted(set(pr['rule_flags']) | set(pr['model_flags']))
         pr['unanalysed'] = not units or any(u['change_id'] not in items for u in units)
         rows.append(pr)
     return sorted(rows, key=lambda p: (-bool(p['flags']), -p['unanalysed'], -RANK.get(p['importance'], 0), -p['id']))
@@ -125,8 +127,15 @@ def refresh_form(csrf):
 
 
 def badges(pr):
+    labels = []
+    if pr['rule_flags']:
+        labels.append('규칙 후보: ' + ' · '.join(pr['rule_flags']))
+    if pr['model_flags']:
+        labels.append('모델 판단: ' + ' · '.join(pr['model_flags']))
+    if pr['unanalysed']:
+        labels.append('모델 판단: 미분석' if not pr['items'] else '모델 판단: 일부 미분석')
     return (f'<span class="badge {esc(pr["importance"])}">{esc(pr["importance"])}</span> '
-            + esc(' · '.join(pr['flags'])) + (' · 미분석' if pr['unanalysed'] else '')
+            + esc(' / '.join(labels))
             + (' · 이전 SHA 결과' if pr['stale'] else '') + (' · draft' if pr['draft'] else ''))
 
 
@@ -201,7 +210,8 @@ def detail(pr, query, config, offline=False):
         content += (f'<details{" open" if opened else ""}><summary>{esc(unit["file_path"])} · {esc(unit["change_id"])} · {esc(importance)}'
                     + (' · 규칙 기반 후보' if flags else '') + '</summary>'
                     f'<p>{esc(item["reason"] if item else unit.get("exclusion_reason") or unit.get("omission_reason") or "분석되지 않은 변경입니다")}</p>'
-                    f'<p>{esc(" · ".join(flags + (item.get("risk_flags", []) if item else [])))}</p>'
+                    f'<p>규칙 후보: {esc(" · ".join(flags) or "없음")}</p>'
+                    f'<p>모델 판단: {esc((" · ".join(item.get("risk_flags", [])) or "없음") if item else "미분석")}</p>'
                     f'<p class="muted">이전 {esc(unit.get("old_range"))} → 새 줄 {esc(unit.get("new_range"))}</p>')
         if 'logic_without_tests' in flags:
             content += '<p>제공된 diff에서 관련 테스트 변경을 확인하지 못함</p>'

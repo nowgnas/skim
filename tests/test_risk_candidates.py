@@ -198,3 +198,57 @@ class RiskCandidatesTests(unittest.TestCase):
         text = '--- a/app.sql\n+++ b/app.sql\n@@ -1 +1 @@\n--- removed SQL comment\n+++ added comment'
         self.assertEqual(changed_lines(text), '-- removed SQL comment\n++ added comment')
         self.assertIn('secrets', candidates('app.py', '@@ -1 +1 @@\n+++ API_TOKEN=abcd1234', []))
+
+    def test_pr16_doctor_referenced_by_codex_test(self):
+        for reference in ('+from skim.doctor import run\n+run(config)',
+                          '+import doctor', '+doctor.run(config)', '+from .doctor import run'):
+            with self.subTest(reference=reference):
+                diff = f"""diff --git a/lib/skim/doctor.py b/lib/skim/doctor.py
+--- a/lib/skim/doctor.py
++++ b/lib/skim/doctor.py
+@@ -1 +1 @@
+-old(config)
++validate_model(config)
+diff --git a/tests/test_codex.py b/tests/test_codex.py
+--- a/tests/test_codex.py
++++ b/tests/test_codex.py
+@@ -1 +1,2 @@
+{reference}
+"""
+                units, tests = parse_diff(diff)
+                self.assertEqual(tests, ['tests/test_codex.py'])
+                self.assertEqual(units[0]['candidates'], [])
+
+    def test_test_references_and_identifier_boundaries(self):
+        path = 'tests/test_other.py'
+        for stem in ('config', '__init__', 'run', 'main', 'index', 'utils', 'doctor'):
+            for reference in ('+run(config)', '+def __init__(self):', '+rerun(config)',
+                              ' from skim.' + stem + ' import check',
+                              '-from skim.' + stem + ' import check',
+                              '+# doctor.run()', '+value = "doctor"'):
+                with self.subTest(stem=stem, reference=reference):
+                    diff = '@@ -1 +1 @@\n' + reference
+                    self.assertIn('logic_without_tests', candidates(
+                        'lib/' + stem + '.py', '+change()', [path], {path: diff}))
+            # 흔한 이름도 경로로 대응하는 테스트는 인정한다.
+            self.assertNotIn('logic_without_tests', candidates(
+                'lib/' + stem + '.py', '+change()', ['tests/test_' + stem + '.py']))
+        for reference in ('+from skim.doctor import check', '+import doctor',
+                          '+doctor.run(config)', '+from .doctor import check'):
+            self.assertNotIn('logic_without_tests', candidates('lib/doctor.py', '+check()',
+                [path], {path: '@@ -1 +1 @@\n' + reference}))
+        for stem in ('config', '__init__', 'run', 'main', 'index', 'utils'):
+            self.assertIn('logic_without_tests', candidates('lib/' + stem + '.py', '+change()',
+                [path], {path: '@@ -1 +1 @@\n+from skim.' + stem + ' import check'}))
+        for header in ('--- a/doctor.py', 'rename from doctor.py', '+++ b/doctor.py'):
+            self.assertIn('logic_without_tests', candidates('lib/doctor.py', '+check()',
+                [path], {path: header + '\n@@ -1 +1 @@\n+other()'}))
+
+    def test_exact_test_filename_only(self):
+        for source, test in (
+            ('lib/skim/__init__.py', 'tests/__init__.py'),
+            ('lib/skim/web.py', 'tests/web/test_anything.py'),
+            ('lib/run.py', 'tests/test_run_codex.py'),
+        ):
+            with self.subTest(source=source, test=test):
+                self.assertIn('logic_without_tests', candidates(source, '+change()', [test]))

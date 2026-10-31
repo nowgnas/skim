@@ -1,7 +1,10 @@
 """diff 단위, 민감 정보 제외와 독립적인 위험 후보 계산."""
 import fnmatch
 import ast
+import io
+import tokenize
 import re
+from functools import lru_cache
 from pathlib import PurePosixPath
 
 # 모델 출력에서는 값 자체가 확인되는 토큰·개인 키만 가린다.
@@ -94,7 +97,38 @@ def auth_candidate(parts, name, code):
                 r'\b' + auth_identifier + r'\s*\(|@' + auth_identifier + r'\b', code))
 
 
-def candidates(path, text, tests):
+# 흔한 모듈명은 식별자만으로 대응 테스트를 추정하지 않는다.
+COMMON_STEMS = {'__init__', 'index', 'main', 'config', 'utils', 'run', 'app', 'common', 'helpers', 'settings'}
+
+
+@lru_cache(maxsize=512)
+def test_reference_patterns(stem):
+    """여러 hunk에서 같은 모듈의 참조 정규식을 재사용한다."""
+    name = re.escape(stem)
+    return re.compile(r'^\s*(?:from\s+[\w.]*\b' + name + r'\s+import\b|import\s+' + name + r'(?:\s|\.|$))'
+                       r'|(?<![\w\'\"])' + name + r'\.[A-Za-z_]')
+
+
+def added_test_lines(text):
+    """테스트 diff의 헤더·문맥·삭제를 제외하고 추가 줄만 돌려준다."""
+    in_hunk = False
+    for line in text.splitlines():
+        if line.startswith('@@ '):
+            in_hunk = True
+        elif in_hunk and line.startswith('+'):
+            # 문자열·주석 속 예시를 실행 코드 참조로 오인하지 않는다.
+            tokens = []
+            try:
+                for token in tokenize.generate_tokens(io.StringIO(line[1:]).readline):
+                    if token.type in (tokenize.STRING, tokenize.COMMENT):
+                        token = token._replace(string=' ' * len(token.string))
+                    tokens.append(token)
+            except (tokenize.TokenError, IndentationError):
+                pass
+            yield tokenize.untokenize(tokens)
+
+
+def candidates(path, text, tests, test_diffs=None, *, test_lines=None):
     location = PurePosixPath(path.lower())
     # 경로 조각은 camelCase를 분리하고 확장자를 뗀 이름으로 통일한다.
     parts = tuple(re.sub(r'([a-z])([A-Z])', r'\1_\2', part).lower().split('.')[0]
@@ -115,7 +149,14 @@ def candidates(path, text, tests):
     flags = [flag for flag, matches in rules.items() if matches]
     if not is_test(path) and PurePosixPath(path).suffix in ('.py', '.js', '.ts', '.tsx', '.go', '.rs', '.java', '.rb', '.c', '.cpp'):
         stem = PurePosixPath(path).stem
-        if not any(stem == re.sub(r'^(?:test_|spec_)|(?:[._](?:test|spec)|_test)$', '', PurePosixPath(t).stem) for t in tests):
+        code_reference = test_reference_patterns(stem)
+        test_diffs = test_diffs if test_diffs is not None else {}
+        if test_lines is None:
+            test_lines = {t: tuple(added_test_lines(test_diffs.get(t, ''))) for t in tests}
+        # 테스트 패키지 초기화 파일 자체는 대응 테스트의 근거가 아니다.
+        if not any((PurePosixPath(t).stem != '__init__' and stem == re.sub(r'^(?:test_|spec_)|(?:[._](?:test|spec)|_test)$', '', PurePosixPath(t).stem))
+                   or (stem not in COMMON_STEMS and any(code_reference.search(line)
+                       for line in test_lines.get(t, ()))) for t in tests):
             flags.append('logic_without_tests')
     return flags
 
@@ -152,6 +193,7 @@ def parse_diff(diff, files=()):
         section_sizes[path] = len(('diff --git ' + block).encode())
     paths = sorted(set(sections) | {f['filename'] for f in files})
     tests = [p for p in paths if is_test(p) and not secret_path(p)]
+    test_lines = {p: tuple(added_test_lines(sections.get(p, ''))) for p in tests}
     units = []
     for path in paths:
         body = sections.get(path, '')
@@ -164,7 +206,7 @@ def parse_diff(diff, files=()):
         overhead = section_sizes.get(path, 0) - sum(len(p[0].encode()) for p in parts)
         for index, (text, old, new) in enumerate(parts):
             excluded = secret_path(path) or bool(old_path and secret_path(old_path))
-            flags = candidates(path, text, tests)
+            flags = candidates(path, text, tests, test_lines=test_lines)
             cleaned = sanitize(text)
             redacted = not excluded and cleaned != text
             if excluded and 'secrets' not in flags:
