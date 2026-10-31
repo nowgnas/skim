@@ -43,18 +43,26 @@ def parser():
     analyze = commands.add_parser('analyze', help='허용한 저장소의 최신 스냅샷 분석')
     analyze.add_argument('--snapshot', type=int)
     analyze.add_argument('--include-drafts', action='store_true', help='draft도 수동 분석')
-    for command in ('web', 'doctor'):
-        commands.add_parser(command, help='후속 PR에서 구현 예정')
+    web = commands.add_parser('web', help='로컬 PR 대시보드')
+    web.add_argument('--port', type=int, default=0)
+    web.add_argument('--no-browser', action='store_true')
+    web.add_argument('--offline', action='store_true', help='수집·분석 없이 저장된 데이터만 표시')
+    commands.add_parser('doctor', help='후속 PR에서 구현 예정')
     return root
 
 
 def main(argv=None):
     args = parser().parse_args(argv)
-    if args.command in ('web', 'doctor'):
+    if args.command == 'doctor':
         print(f'{args.command}: 아직 구현되지 않았습니다.', file=sys.stderr)
         return 2
     try:
         config = Config.load()
+        if args.command == 'web':
+            if not 0 <= args.port <= 65535:
+                raise ValueError('포트는 0~65535 범위여야 합니다')
+            from .web import serve
+            return serve(config, args.port, not args.no_browser, args.offline)
         conn = connect(config)
         try:
             if args.command == 'analyze':
