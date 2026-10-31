@@ -40,20 +40,33 @@ def parser():
         group.add_argument('repository', type=repository, nargs='?')
         group.add_argument('--org')
     commands.add_parser('collect', help='gh 로그인으로 PR 읽기 전용 수집')
-    for command in ('analyze', 'web', 'doctor'):
+    analyze = commands.add_parser('analyze', help='허용한 저장소의 최신 스냅샷 분석')
+    analyze.add_argument('--snapshot', type=int)
+    analyze.add_argument('--include-drafts', action='store_true', help='draft도 수동 분석')
+    for command in ('web', 'doctor'):
         commands.add_parser(command, help='후속 PR에서 구현 예정')
     return root
 
 
 def main(argv=None):
     args = parser().parse_args(argv)
-    if args.command in ('analyze', 'web', 'doctor'):
+    if args.command in ('web', 'doctor'):
         print(f'{args.command}: 아직 구현되지 않았습니다.', file=sys.stderr)
         return 2
     try:
         config = Config.load()
         conn = connect(config)
         try:
+            if args.command == 'analyze':
+                from .analyze import Analyzer
+                results = Analyzer(conn, config).run(args.snapshot, args.include_drafts)
+                for result in results:
+                    print(f"스냅샷 {result['snapshot_id']}: {result['status']}")
+                    if result.get('error'):
+                        print(result['error'], file=sys.stderr)
+                if not results:
+                    print('분석 가능한 허용 스냅샷이 없습니다.')
+                return int(any(r['status'] in ('failed', 'blocked', 'deferred') for r in results))
             if args.command == 'collect':
                 from .collect import Collector
                 count = Collector(conn, config).collect()

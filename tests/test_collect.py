@@ -105,6 +105,19 @@ class CollectionTests(unittest.TestCase):
             self.assertEqual(len(row['input_hash']), 64)
             self.assertEqual(json.loads(row['coverage'])['files'][0]['filename'], 'a.py')
 
+    def test_recollect_after_analysis_does_not_duplicate_snapshot(self):
+        from skim.analyze import Analyzer
+        from test_analyze import Fake
+        self.collector.collect()
+        with self.conn:
+            self.conn.execute("UPDATE repositories SET analysis_policy='allow'")
+        Analyzer(self.conn, self.config, Fake()).run()
+        self.collector.collect()
+        self.assertEqual(self.count('snapshots'), 2)
+        self.fake.body = '설명 변경'
+        self.collector.collect()
+        self.assertEqual(self.count('snapshots'), 4)
+
     def test_review_removal_and_closed_merged(self):
         self.collector.collect()
         self.fake.personal = False

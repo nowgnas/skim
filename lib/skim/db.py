@@ -52,7 +52,12 @@ CREATE TABLE jobs (
 CREATE UNIQUE INDEX jobs_active_dedupe ON jobs(type,target_id,input_hash)
  WHERE status IN ('pending','running');
 """
-MIGRATIONS = (SCHEMA,)
+MIGRATIONS = (SCHEMA, """
+ALTER TABLE changes ADD COLUMN unit_key TEXT;
+CREATE UNIQUE INDEX changes_unit_key ON changes(snapshot_id,unit_key) WHERE unit_key IS NOT NULL;
+CREATE TABLE analysis_budget (
+ day TEXT PRIMARY KEY, calls INTEGER NOT NULL DEFAULT 0 CHECK(calls BETWEEN 0 AND 20));
+""")
 
 
 def migrate(conn, path):

@@ -12,6 +12,8 @@ Python 3.11 이상과 표준 라이브러리만 사용합니다.
 bin/skim repo add owner/repo --source responsible
 bin/skim repo list
 bin/skim collect
+bin/skim analyze
+bin/skim analyze --snapshot 1 --include-drafts
 bin/skim repo list --candidates
 bin/skim analysis allow --org owner
 bin/skim analysis deny owner/repo
@@ -48,6 +50,32 @@ SHA를 수집 전후 확인하고 설명·파일 목록·diff 해시를 스냅�
 내장 도우미입니다. 주기 갱신과 `request()` 수동 갱신은 SQLite 작업 큐를 공유하고,
 실패 시 지수 백오프와 Retry-After/요청 제한 재개 시각을 적용합니다.
 `interval=config.poll_interval_seconds`를 전달하며 자체 데몬이나 스레드를 만들지 않습니다.
-현재 `analyze`, `web`, `doctor`는 종료 코드 2를 반환하는 스텁입니다.
-스냅샷의 `raw-v1` 입력 해시는 수집용이며, 후속 분석은 민감 정보 정제·분할 정책을
-적용한 별도 입력 해시를 만들어야 합니다. 실제 모델 호출은 구현하지 않았습니다.
+`analyze`는 분석을 허용한 저장소의 열린 최신 SHA 스냅샷만 처리합니다.
+기본적으로 draft를 건너뛰며 수동 `--include-drafts`도 허용 정책과 예산을 따릅니다.
+`--snapshot`은 로컬 스냅샷 ID입니다. 제외·누락·실패는 low로 취급하지 않습니다.
+분석 결과와 단위별 제외 사유·규칙 후보·coverage는 SQLite에 저장합니다.
+`logic_without_tests`는 “제공된 diff에서 관련 테스트 변경을 확인하지 못함”이라는
+규칙 후보이며 기존 테스트 커버리지를 검사했다는 뜻이 아닙니다.
+민감 정보 탐지는 완전하지 않습니다.
+
+**현재 실제 Codex 분석은 차단됩니다.** 설치 CLI의 빈 작업 디렉터리·read-only만으로는
+전역 설정·메모리·플러그인·hooks·MCP 로딩 및 모든 도구 실행 금지까지 보장할 수
+없습니다. 검증된 버전별 격리 계약이 아직 없어 `CodexAdapter.verify()`가 실패하고
+`blocked` 상태와 이유를 기록합니다. 도움말 플래그 존재나 프롬프트만으로 우회하지
+않으며, 사용자 설정으로 이 검사를 해제하는 옵션도 없습니다. 어댑터의 실행 경로는
+검증 성공 후 빈 임시 디렉터리에서 `codex exec`를 호출하도록 분리되어 있습니다.
+`web`, `doctor`는 아직 종료 코드 2를 반환하는 스텁입니다.
+
+가짜 어댑터를 주입하는 테스트에서 청크·합성 파이프라인 전체를 검증합니다.
+청크는 100단위·200 KiB(프롬프트와 메타데이터 포함), PR은 200파일·500단위·
+정제 전 diff 1 MiB로 제한하고 규칙 후보부터 배정합니다. 큰 단위는 잘라 보내지
+않고 누락 사유를 남깁니다. 합성 입력도 200 KiB를 넘으면 실패로 남깁니다.
+입출력 ID의 누락·중복·외부 ID·추가 필드를 거부하고 파일 중요도는 소속 단위의
+최고값으로 계산합니다. 검증 실패는 호출당 한 번 재시도하며 합성·실패·재시도를
+포함해 로컬 날짜당 최대 20회를 SQLite에서 실행 전에 예약합니다.
+수집과 분석은 공통 프로세스 잠금으로 직렬화됩니다.
+
+캐시는 정제 입력 해시·스냅샷·provider/model·CLI 버전·프롬프트/스키마 버전으로
+구분하며 모델이 `unknown`이면 영속 결과를 재사용하지 않습니다. 수집용 원문
+해시는 coverage에 별도로 보존해 분석 뒤 재수집도 중복 스냅샷을 만들지 않습니다.
+실제 LLM·네트워크를 호출하는 테스트는 없습니다.

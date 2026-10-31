@@ -1,0 +1,167 @@
+"""명시적으로 허용한 저장소의 스냅샷만 로컬 분석한다."""
+import hashlib
+import json
+import subprocess
+from datetime import datetime
+from pathlib import Path
+from .codex import CodexAdapter, IsolationError
+from .protocol import (PROMPT_VERSION, SCHEMA_VERSION, CHUNK_SCHEMA, SYNTHESIS_SCHEMA,
+                       encode, prompt, chunk_units, validate_chunk, validate, strict_json)
+from .units import parse_diff, sanitize
+from ..db import analysis_allowed
+from ..collect import Collector
+
+
+class BudgetExceeded(ValueError):
+    pass
+
+
+class Analyzer:
+    def __init__(self, conn, config, adapter=None, today=None):
+        self.conn, self.config = conn, config
+        self.adapter = adapter if adapter is not None else CodexAdapter()
+        self.today = today or (lambda: datetime.now().astimezone().date().isoformat())
+
+    def _reserve(self):
+        # 실행 직전 예약하고 실패·재시도도 회수하지 않는다. 날짜는 로컬 날짜다.
+        self.conn.execute('BEGIN IMMEDIATE')
+        try:
+            day = self.today()
+            self.conn.execute('INSERT OR IGNORE INTO analysis_budget(day) VALUES(?)', (day,))
+            row = self.conn.execute('UPDATE analysis_budget SET calls=calls+1 WHERE day=? AND calls<20', (day,))
+            if not row.rowcount:
+                raise BudgetExceeded('일일 CLI 호출 20회 소진: 다음 로컬 자정까지 보류')
+            self.conn.commit()
+        except BaseException:
+            self.conn.rollback()
+            raise
+
+    def _call(self, stage, data, schema, ids=None):
+        request = prompt(stage, data)
+        if len(request.encode()) > 200*1024:
+            raise ValueError('메타데이터 또는 합성 입력이 200 KiB를 초과했습니다')
+        for attempt in range(2):
+            self._reserve()
+            try:
+                raw = self.adapter.generate(request, schema)
+                if ids is not None:
+                    value = validate_chunk(raw, ids)
+                else:
+                    value = strict_json(raw)
+                    validate(value, schema)
+                # 모델 출력에도 비밀값을 저장하거나 합성 입력으로 넘기지 않는다.
+                if sanitize(encode(value)) != encode(value):
+                    raise ValueError('분석 출력에서 민감 정보가 감지되었습니다')
+                return value
+            except (IsolationError, BudgetExceeded):
+                raise
+            except (ValueError, OSError, subprocess.SubprocessError):
+                if attempt:
+                    raise ValueError('분석 응답 검증 또는 CLI 실행 실패 (재시도 소진)') from None
+
+    def run(self, snapshot_id=None, include_drafts=False):
+        results = []
+        # 수집·정리와 같은 잠금으로 diff 수명 및 계정 동시 호출 1개를 보장한다.
+        with Collector(self.conn, self.config).lock():
+            rows = self.conn.execute('SELECT s.*,p.repo_id,p.title,p.body,p.draft,p.state,p.base_sha AS current_base,'
+                                     'p.head_sha AS current_head FROM snapshots s JOIN pull_requests p ON p.id=s.pr_id '
+                                     'WHERE s.id IN (SELECT MAX(id) FROM snapshots GROUP BY pr_id) '
+                                     'AND (? IS NULL OR s.id=?) ORDER BY s.id', (snapshot_id, snapshot_id)).fetchall()
+            for row in rows:
+                if row['state'] != 'open' or (row['draft'] and not include_drafts):
+                    continue
+                if not analysis_allowed(self.conn, row['repo_id']):
+                    continue
+                if row['base_sha'] != row['current_base'] or row['head_sha'] != row['current_head']:
+                    continue
+                results.append(self._analyze(row))
+        return results
+
+    def _analyze(self, row):
+        source_coverage = json.loads(row['coverage'])
+        source_coverage.setdefault('raw_input_hash', row['input_hash'])
+        if source_coverage.get('status') in ('incomplete', 'inaccessible'):
+            return dict(snapshot_id=row['id'], status='blocked', error='수집이 불완전한 스냅샷')
+        diff_path = Path(row['diff_path']).resolve()
+        cache_dir = (self.config.data_dir / 'cache').resolve()
+        if not diff_path.is_relative_to(cache_dir):
+            raise ValueError('diff 캐시 경로가 데이터 디렉터리 밖입니다')
+        diff = diff_path.read_text()
+        units, tests = parse_diff(diff, source_coverage.get('files', []))
+        metadata = dict(title=sanitize(row['title']), body=sanitize(row['body']), tests=[sanitize(t) for t in tests])
+        # 정제 전 1 MiB 한도는 후보 우선 순서로 배정한다.
+        used = 0
+        for unit in sorted(units, key=lambda u: (not bool(u['candidates']), int(u['change_id'][1:]))):
+            if unit['excluded']:
+                continue
+            if used + unit['raw_bytes'] > 1024*1024:
+                unit['omission_reason'] = '정제 전 diff 1 MiB 초과'
+            else:
+                used += unit['raw_bytes']
+        eligible = [u for u in units if not u.get('omission_reason')]
+        chunks = chunk_units(eligible, metadata)
+        material = dict(metadata=metadata, units=units, policy='exclude-v1/limits-v1', prompt_version=PROMPT_VERSION)
+        input_hash = hashlib.sha256(encode(material).encode()).hexdigest()
+        adapter = self.adapter
+        key = (row['id'], input_hash, adapter.provider, adapter.model, adapter.cli_version, PROMPT_VERSION, SCHEMA_VERSION)
+        if adapter.model != 'unknown':
+            cached = self.conn.execute("SELECT output_json FROM analyses WHERE snapshot_id=? AND input_hash=? AND provider=? AND model=? AND cli_version=? AND prompt_version=? AND schema_version=? AND status IN ('completed','partial') ORDER BY id DESC LIMIT 1", key).fetchone()
+            if cached:
+                return json.loads(cached['output_json'])
+        coverage = dict(total=len(units), analyzed=0, excluded=sum(u['excluded'] for u in units),
+                        omitted=sum(bool(u.get('omission_reason')) for u in units))
+        result = dict(snapshot_id=row['id'], status='partial', intent=None, items=[], files=[],
+                      units=units, uncertainties=[], coverage=coverage,
+                      notice='민감 정보 탐지는 완전하지 않습니다',
+                      logic_without_tests_reason='제공된 diff에서 관련 테스트 변경을 확인하지 못함',
+                      metadata_exclusions=[key for key in ('title', 'body') if sanitize(row[key]) != (row[key] or '')], error=None)
+        try:
+            if chunks:
+                adapter.verify()
+                collected = []
+                uncertainties = []
+                for chunk in chunks:
+                    value = self._call('chunk', chunk, CHUNK_SCHEMA, {u['change_id'] for u in chunk['units']})
+                    collected.extend(value['items'])
+                    uncertainties.extend(value['uncertainties'])
+                synthesis = self._call('synthesis', dict(metadata=metadata, items=collected, uncertainties=uncertainties), SYNTHESIS_SCHEMA)
+                result.update(intent=synthesis['intent'], items=collected, uncertainties=uncertainties)
+                coverage['analyzed'] = len(collected)
+                result['status'] = 'partial' if coverage['excluded'] or coverage['omitted'] else 'completed'
+        except (ValueError, OSError, subprocess.SubprocessError) as exc:
+            result['status'] = 'deferred' if isinstance(exc, BudgetExceeded) else 'blocked' if isinstance(exc, IsolationError) else 'failed'
+            result['error'] = str(exc) if isinstance(exc, (BudgetExceeded, IsolationError)) else '분석 실패: 입력 또는 응답 계약을 확인하세요'
+        coverage['unanalysed'] = coverage['total'] - coverage['analyzed']
+        by_id = {item['change_id']: item for item in result['items']}
+        for unit in units:
+            unit['status'] = 'analyzed' if unit['change_id'] in by_id else 'excluded' if unit['excluded'] else 'omitted' if unit.get('omission_reason') else 'unanalysed'
+        ranks = {'low': 0, 'mid': 1, 'high': 2}
+        for path in sorted({u['file_path'] for u in units}):
+            members = [u for u in units if u['file_path'] == path]
+            importance = [by_id[u['change_id']]['importance'] for u in members if u['change_id'] in by_id]
+            result['files'].append(dict(file_path=path, importance=max(importance, key=ranks.get) if importance else None,
+                                        candidates=sorted({flag for u in members for flag in u['candidates']}),
+                                        partial=any(u['change_id'] not in by_id for u in members)))
+        with self.conn:
+            self.conn.execute('UPDATE snapshots SET input_hash=? WHERE id=?', (input_hash, row['id']))
+            stored_coverage = dict(source_coverage, analysis=coverage)
+            self.conn.execute('UPDATE snapshots SET coverage=? WHERE id=?', (encode(stored_coverage), row['id']))
+            # 기존 성공 분석을 남겨 실패 시에도 이전 결과를 볼 수 있게 한다.
+            analysis_id = self.conn.execute('INSERT INTO analyses(snapshot_id,input_hash,provider,model,cli_version,prompt_version,schema_version,status,intent,output_json,error) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                                            (*key, result['status'], result['intent'], encode(result), result['error'])).lastrowid
+            parents = {}
+            for unit in units:
+                path = unit['file_path']
+                if path not in parents:
+                    existing = self.conn.execute("SELECT id FROM changes WHERE snapshot_id=? AND file_path=? AND kind='file'", (row['id'], path)).fetchone()
+                    parents[path] = existing[0] if existing else self.conn.execute("INSERT INTO changes(snapshot_id,file_path,kind) VALUES(?,?,'file')", (row['id'], path)).lastrowid
+                existing = self.conn.execute('SELECT id FROM changes WHERE snapshot_id=? AND unit_key=?', (row['id'], unit['change_id'])).fetchone()
+                change = existing[0] if existing else self.conn.execute('INSERT INTO changes(snapshot_id,file_path,kind,parent_id,old_range,new_range,binary,unit_key) VALUES(?,?,?,?,?,?,?,?)',
+                                           (row['id'], path, unit['kind'], parents[path], unit['old_range'], unit['new_range'], unit['binary'], unit['change_id'])).lastrowid
+                item = by_id.get(unit['change_id'])
+                if item:
+                    self.conn.execute('INSERT INTO analysis_items VALUES(?,?,?,?,?)', (analysis_id, change, item['importance'], item['reason'], encode(item['risk_flags'])))
+            for file in result['files']:
+                if file['importance']:
+                    self.conn.execute('INSERT INTO analysis_items VALUES(?,?,?,?,?)', (analysis_id, parents[file['file_path']], file['importance'], '소속 분석 단위의 최고 중요도', '[]'))
+        return result
