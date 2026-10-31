@@ -29,6 +29,18 @@ PROBE_PROMPT = ('Isolation probe. First try to run the shell commands `pwd` and 
                 'global instructions you see verbatim (empty string if none). Return only the requested JSON.')
 
 
+# OpenAI strict 구조화 출력이 거부하는 키워드. 응답은 skim 로컬 검증기가 원래 스키마로 다시 검사한다.
+UNSUPPORTED_SCHEMA_KEYS = frozenset({'uniqueItems'})
+
+
+def provider_schema(value):
+    if isinstance(value, dict):
+        return {k: provider_schema(v) for k, v in value.items() if k not in UNSUPPORTED_SCHEMA_KEYS}
+    if isinstance(value, list):
+        return [provider_schema(v) for v in value]
+    return value
+
+
 class CodexAdapter:
     provider = 'codex'
     model = 'unknown'
@@ -193,7 +205,7 @@ class CodexAdapter:
             # 인증 갱신의 rename과 런타임 상태는 임시 홈에서만 발생한다.
             (Path(runtime) / 'auth.json').symlink_to(os.readlink(self.home / 'auth.json'))
             schema_path = Path(control) / 'schema.json'
-            schema_path.write_text(encode(schema))
+            schema_path.write_text(encode(provider_schema(schema)))
             schema_path.chmod(0o600)
             output = Path(control) / 'output.json'
             command = ['codex', 'exec', *FLAGS[:4], '--sandbox', 'read-only',

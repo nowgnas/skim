@@ -329,3 +329,12 @@ class CodexTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(main(['codex-home', 'init']), 0)
         self.assertTrue((self.root / 'skim/data/codex-home/auth.json').is_symlink())
+
+
+class ProviderSchemaTests(unittest.TestCase):
+    def test_strips_unique_items_recursively_without_mutation(self):
+        from skim.analyze.codex import provider_schema
+        schema = {'type': 'object', 'properties': {'a': {'type': 'array', 'uniqueItems': True, 'items': {'enum': ['x']}}}}
+        self.assertEqual(provider_schema(schema), {'type': 'object', 'properties': {'a': {'type': 'array', 'items': {'enum': ['x']}}}})
+        self.assertTrue(schema['properties']['a']['uniqueItems'])
+
