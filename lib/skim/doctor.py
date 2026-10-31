@@ -8,7 +8,8 @@ import subprocess
 from .analyze.codex import CodexAdapter, IsolationError
 
 
-def run(config, runner=None, which=None, adapter=None, probe=False):
+def run(config, runner=None, which=None, adapter=None, probe=False, out=print):
+    """웹 작업은 out으로 줄을 모으며 probe를 실행하지 않는다."""
     runner = runner or subprocess.run
     which = which or shutil.which
     failed = False
@@ -16,7 +17,7 @@ def run(config, runner=None, which=None, adapter=None, probe=False):
     def report(ok, name, detail):
         nonlocal failed
         failed |= not ok
-        print(f'{"정상" if ok else "실패"}: {name} — {detail}')
+        out(f'{"정상" if ok else "실패"}: {name} — {detail}')
 
     if not which('gh'):
         report(False, 'gh', 'PATH에서 실행 파일을 찾지 못했습니다.')
@@ -52,7 +53,7 @@ def run(config, runner=None, which=None, adapter=None, probe=False):
             method()
             report(True, label, '격리 검사 통과')
             if label == 'flags' and getattr(adapter, 'unknown_enabled', []):
-                print('경고: 차단 목록 밖의 활성 Codex 기능: ' + ', '.join(adapter.unknown_enabled))
+                out('경고: 차단 목록 밖의 활성 Codex 기능: ' + ', '.join(adapter.unknown_enabled))
         except (IsolationError, OSError, ValueError, subprocess.TimeoutExpired):
             ready = False
             details = {
@@ -66,7 +67,7 @@ def run(config, runner=None, which=None, adapter=None, probe=False):
         if adapter.model != 'unknown':
             report(True, 'model', adapter.model)
         else:
-            print('경고: model — Codex 모델을 알 수 없습니다. codex_model 설정 또는 SKIM_CODEX_MODEL을 지정하세요.')
+            out('경고: model — Codex 모델을 알 수 없습니다. codex_model 설정 또는 SKIM_CODEX_MODEL을 지정하세요.')
     # Config.load 이전의 상태도 보존하도록 CLI는 경로만 전달한다.
     roots = [config.config_dir, config.data_dir]
     if os.environ.get('SKIM_HOME'):
@@ -94,8 +95,8 @@ def run(config, runner=None, which=None, adapter=None, probe=False):
                     or stat.S_IMODE(info.st_mode) != expected):
                 unsafe = True
         report(not unsafe, '로컬 권한', f'{root}: ' + ('소유자·심볼릭 링크·0700/0600 권한을 확인하세요.' if unsafe else '사용자 전용'))
-    print('안내: 조직 SSO는 gh 자격 증명의 SSO 승인을 확인하세요. 비공개 저장소 읽기 권한과 팀 멤버십·리뷰 요청 접근 권한도 필요합니다.')
-    print('안내: gh 인증 성공만으로 모든 조직·팀 접근을 보장하지 않습니다. PATH와 로그인 키체인 접근은 실행 터미널에서 확인하세요.')
+    out('안내: 조직 SSO는 gh 자격 증명의 SSO 승인을 확인하세요. 비공개 저장소 읽기 권한과 팀 멤버십·리뷰 요청 접근 권한도 필요합니다.')
+    out('안내: gh 인증 성공만으로 모든 조직·팀 접근을 보장하지 않습니다. PATH와 로그인 키체인 접근은 실행 터미널에서 확인하세요.')
     return int(failed)
 
 

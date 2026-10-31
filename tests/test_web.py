@@ -258,12 +258,17 @@ class WebTests(unittest.TestCase):
             server = Server(self.config)
             self.assertTrue(server.entry_url().startswith(self.server.origin + '/entry#'))
         stop = SimpleNamespace(is_set=lambda: False, wait=lambda seconds: None)
-        with patch('skim.web.CollectionScheduler') as scheduler, patch('skim.web.Collector'), patch('skim.analyze.Analyzer') as analyzer:
+        with patch('skim.jobs.CollectionScheduler') as scheduler, patch('skim.jobs.Collector'), patch('skim.analyze.Analyzer') as analyzer:
             stop.is_set = unittest.mock.Mock(side_effect=[False, True])
             scheduler.return_value.tick.return_value = True
+            scheduler.return_value.last_ok = True
+            analyzer.return_value.run.return_value = []
             worker(self.config, stop)
             scheduler.return_value.tick.assert_called_once()
-            analyzer.return_value.run.assert_called_once()
+            # 수집 성공 후 자동 분석은 같은 큐의 analyze 작업으로 실행된다.
+            analyzer.return_value.run.assert_called_once_with()
+        with closing(connect(self.config)) as conn:
+            self.assertEqual(conn.execute("SELECT type,status FROM jobs").fetchall()[0][:], ('analyze', 'completed'))
 
 
 if __name__ == '__main__':

@@ -62,6 +62,31 @@ ALTER TABLE jobs ADD COLUMN refresh_requested INTEGER NOT NULL DEFAULT 0 CHECK(r
 ALTER TABLE jobs ADD COLUMN retry_not_before TEXT;
 -- 기존 대기 시각도 보존해 업그레이드 직후 요청 제한을 무시하지 않는다.
 UPDATE jobs SET retry_not_before=next_run_at WHERE status='pending';
+""", """
+-- 종류·상태 CHECK를 넓히려면 테이블을 재생성해야 한다. jobs를 참조하는 외래 키는 없다.
+CREATE TABLE jobs_v4 (
+ id INTEGER PRIMARY KEY, type TEXT NOT NULL CHECK(type IN ('collect','analyze','doctor','repos')),
+ target_id INTEGER NOT NULL, input_hash TEXT NOT NULL DEFAULT '',
+ status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','running','completed','failed','deferred','cancelled')),
+ attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0),
+ next_run_at TEXT, last_error TEXT,
+ refresh_requested INTEGER NOT NULL DEFAULT 0 CHECK(refresh_requested IN (0,1)),
+ retry_not_before TEXT,
+ target TEXT NOT NULL DEFAULT '', params TEXT NOT NULL DEFAULT '{}', model TEXT, input_sha TEXT,
+ stage TEXT, processed INTEGER CHECK(processed IS NULL OR processed >= 0),
+ total INTEGER CHECK(total IS NULL OR total >= 0), result TEXT,
+ created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, started_at TEXT, finished_at TEXT);
+INSERT INTO jobs_v4(id,type,target_id,input_hash,status,attempts,next_run_at,last_error,refresh_requested,retry_not_before)
+ SELECT id,type,target_id,input_hash,status,attempts,next_run_at,last_error,refresh_requested,retry_not_before FROM jobs;
+DROP TABLE jobs;
+ALTER TABLE jobs_v4 RENAME TO jobs;
+-- 종류별 활성 작업 하나 제약 전에 오래된 중복 활성 작업을 정리한다.
+UPDATE jobs SET status='cancelled',last_error='종류별 단일 작업 전환으로 정리했습니다'
+ WHERE status IN ('pending','running') AND id NOT IN
+ (SELECT MIN(id) FROM jobs WHERE status IN ('pending','running') GROUP BY type);
+CREATE UNIQUE INDEX jobs_active_dedupe ON jobs(type,target_id,input_hash)
+ WHERE status IN ('pending','running');
+CREATE UNIQUE INDEX jobs_active_kind ON jobs(type) WHERE status IN ('pending','running');
 """)
 
 

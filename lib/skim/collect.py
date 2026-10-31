@@ -125,6 +125,8 @@ class Collector:
     def __init__(self, conn, config, runner=None, clock=time.time):
         self.conn, self.config = conn, config
         self.gh = GitHub(runner, clock)
+        # 웹 작업 진행 표시용 콜백(stage, processed, total). 실패해도 수집을 막지 않는다.
+        self.progress = None
         self._mutex = threading.RLock()
         self._lock_depth = {}
 
@@ -193,7 +195,9 @@ class Collector:
             names.setdefault((r['owner'] + '/' + r['name']).lower(), r['owner'] + '/' + r['name'])
         collected = []
         failures = []
-        for (full, number) in sorted(set(targets) | old):
+        pending = sorted(set(targets) | old)
+        for index, (full, number) in enumerate(pending):
+            self._report('PR 수집', index, len(pending))
             endpoint = f'repos/{full}/pulls/{int(number)}'
             try:
                 for attempt in range(2):
@@ -230,6 +234,7 @@ class Collector:
                 failures.append((full, number, exc))
                 if isinstance(exc, Oversized):
                     collected.append((full, number, pr, state, ([], '')))
+        self._report('저장', len(pending), len(pending))
         now = datetime.now(timezone.utc).isoformat()
         cache = private_dir(self.config.data_dir / 'cache' / 'diffs')
         # 크기 초과는 미분석 스냅샷으로 남기고 접근 불가는 출처를 제거한다.
@@ -311,6 +316,13 @@ class Collector:
         return sum(snapshot is not None and not any(f == full and n == number for f, n, _ in failures)
                    for full, number, pr, state, snapshot in collected)
 
+    def _report(self, stage, processed, total):
+        if self.progress:
+            try:
+                self.progress(stage, processed, total)
+            except Exception:
+                pass
+
     def clean_cache(self):
         with self.lock():
             self._clean_cache()
@@ -327,6 +339,8 @@ class CollectionScheduler:
     def __init__(self, conn, interval=300, clock=time.time):
         self.conn, self.interval, self.clock = conn, interval, clock
         self.next_poll = 0
+        # 마지막 tick이 수집에 성공했는지. 수집 후 자동 분석 등록에 사용한다.
+        self.last_ok = False
 
     def request(self, manual=True):
         with self.conn:
@@ -340,7 +354,7 @@ class CollectionScheduler:
             # 잠금을 확보했으므로 이전 running 작업을 실행하는 수집기는 없다.
             # 프로세스 중단·DB 기록 실패 후에도 다음 tick에서 복구한다.
             with self.conn:
-                self.conn.execute("UPDATE jobs SET status='pending',next_run_at=retry_not_before,last_error='중단된 수집 작업을 복구했습니다' WHERE type='collect' AND status='running'")
+                self.conn.execute("UPDATE jobs SET status='pending',next_run_at=retry_not_before,last_error='중단된 수집 작업을 복구했습니다',stage='재시도 대기' WHERE type='collect' AND status='running'")
             return self._tick(collector)
 
     def _tick(self, collector):
@@ -353,7 +367,8 @@ class CollectionScheduler:
             self.conn.execute('BEGIN IMMEDIATE')
             row = self.conn.execute("SELECT id,attempts FROM jobs WHERE type='collect' AND status='pending' AND (next_run_at IS NULL OR next_run_at<=?) ORDER BY id LIMIT 1", (stamp,)).fetchone()
             if row is not None:
-                self.conn.execute("UPDATE jobs SET status='running',attempts=attempts+1 WHERE id=?", (row['id'],))
+                self.conn.execute("UPDATE jobs SET status='running',attempts=attempts+1,started_at=?,finished_at=NULL,stage='수집 중',processed=NULL,total=NULL WHERE id=?", (stamp, row['id']))
+        self.last_ok = False
         if row is None:
             return False
         try:
@@ -365,14 +380,16 @@ class CollectionScheduler:
             with self.conn:
                 self.conn.execute('BEGIN IMMEDIATE')
                 followup = self.conn.execute('SELECT refresh_requested FROM jobs WHERE id=?', (row['id'],)).fetchone()[0]
-                self.conn.execute("UPDATE jobs SET status='pending',next_run_at=?,last_error=?,retry_not_before=?,refresh_requested=0 WHERE id=?",
+                self.conn.execute("UPDATE jobs SET status='pending',next_run_at=?,last_error=?,retry_not_before=?,refresh_requested=0,stage='재시도 대기' WHERE id=?",
                                   (None if followup and not isinstance(exc, Deferred) else retry_stamp,
                                    error_message(exc), retry_stamp if isinstance(exc, Deferred) else None, row['id']))
         else:
+            self.last_ok = True
+            done = datetime.fromtimestamp(self.clock(), timezone.utc).isoformat()
             with self.conn:
                 self.conn.execute('BEGIN IMMEDIATE')
                 followup = self.conn.execute('SELECT refresh_requested FROM jobs WHERE id=?', (row['id'],)).fetchone()[0]
-                self.conn.execute("UPDATE jobs SET status='completed',last_error=NULL,refresh_requested=0,retry_not_before=NULL WHERE id=?", (row['id'],))
+                self.conn.execute("UPDATE jobs SET status='completed',last_error=NULL,refresh_requested=0,retry_not_before=NULL,stage='완료',finished_at=?,result='수집 완료' WHERE id=?", (done, row['id']))
                 if followup:
                     self.request()
         return True

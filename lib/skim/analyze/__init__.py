@@ -21,6 +21,15 @@ class Analyzer:
         self.conn, self.config = conn, config
         self.adapter = adapter if adapter is not None else CodexAdapter(data_dir=config.data_dir, model=config.codex_model)
         self.today = today or (lambda: datetime.now().astimezone().date().isoformat())
+        # 웹 작업 진행 표시용 콜백(stage, processed, total). 실패해도 분석을 막지 않는다.
+        self.progress = None
+
+    def _report(self, stage, processed=None, total=None):
+        if self.progress:
+            try:
+                self.progress(stage, processed, total)
+            except Exception:
+                pass
 
     def _reserve(self):
         # 실행 직전 예약하고 실패·재시도도 회수하지 않는다. 날짜는 로컬 날짜다.
@@ -164,10 +173,12 @@ class Analyzer:
             if chunks:
                 collected = []
                 uncertainties = []
-                for chunk in chunks:
+                for index, chunk in enumerate(chunks):
+                    self._report('모델 분석', index, len(chunks) + 1)
                     value = self._call('chunk', chunk, CHUNK_SCHEMA, {u['change_id'] for u in chunk['units']})
                     collected.extend(value['items'])
                     uncertainties.extend(value['uncertainties'])
+                self._report('결과 합성', len(chunks), len(chunks) + 1)
                 synthesis = self._call('synthesis', dict(metadata=metadata, items=collected, uncertainties=uncertainties), SYNTHESIS_SCHEMA)
                 result.update(intent=synthesis['intent'], items=collected, uncertainties=uncertainties)
                 coverage['analyzed'] = len(collected)
