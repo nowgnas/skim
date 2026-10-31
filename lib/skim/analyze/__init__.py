@@ -141,6 +141,12 @@ class Analyzer:
         input_hash = hashlib.sha256(encode(material).encode()).hexdigest()
         row['analysis_input_hash'] = input_hash
         adapter = self.adapter
+        try:
+            if chunks:
+                adapter.verify()
+        except (ValueError, OSError, subprocess.SubprocessError) as exc:
+            return self._failure(row, str(exc) if isinstance(exc, IsolationError) else 'CLI 검증 실패',
+                                 'blocked' if isinstance(exc, IsolationError) else 'failed')
         key = (row['id'], input_hash, adapter.provider, adapter.model, adapter.cli_version, PROMPT_VERSION, SCHEMA_VERSION)
         if adapter.model != 'unknown':
             cached = self.conn.execute("SELECT output_json FROM analyses WHERE snapshot_id=? AND input_hash=? AND provider=? AND model=? AND cli_version=? AND prompt_version=? AND schema_version=? AND status IN ('completed','partial') ORDER BY id DESC LIMIT 1", key).fetchone()
@@ -156,7 +162,6 @@ class Analyzer:
                       metadata_exclusions=[key for key in ('title', 'body') if sanitize(row[key]) != (row[key] or '')], error=None)
         try:
             if chunks:
-                adapter.verify()
                 collected = []
                 uncertainties = []
                 for chunk in chunks:

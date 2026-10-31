@@ -41,7 +41,13 @@ def run(config, runner=None, which=None, adapter=None, probe=False):
             report(True, label, '격리 검사 통과')
         except (IsolationError, OSError, ValueError, subprocess.TimeoutExpired):
             ready = False
-            report(False, label, 'Codex 분석 차단: 전용 홈·버전·필수 플래그를 확인하고 skim doctor --probe를 실행하세요.')
+            details = {
+                'codex-home': 'skim codex-home init --reset으로 인증 링크·0700 전용 홈을 복구하세요.',
+                'version': 'Codex 안정 버전 0.165.0 이상과 버전 출력 형식을 확인하세요.',
+                'flags': 'exec --help의 필수 격리 플래그와 features list 형식을 확인하세요.',
+                'probe': 'skim doctor --probe로 격리를 재검증하세요. 도구 실행·지침·파일 생성 시 차단됩니다.',
+            }
+            report(False, label, 'Codex 분석 차단: ' + details[label])
     # Config.load 이전의 상태도 보존하도록 CLI는 경로만 전달한다.
     roots = [config.config_dir, config.data_dir]
     if os.environ.get('SKIM_HOME'):

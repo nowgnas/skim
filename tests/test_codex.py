@@ -44,7 +44,7 @@ class CodexTests(unittest.TestCase):
         if command[0] == 'gh':
             return subprocess.CompletedProcess(command, 0, '', '')
         self.assertEqual(set(kw['env']), {'PATH', 'HOME', 'CODEX_HOME'})
-        self.assertEqual(kw['env']['CODEX_HOME'], str(self.adapter.home))
+        self.assertNotEqual(kw['env']['CODEX_HOME'], str(self.adapter.home))
         self.assertEqual(list(Path(kw['cwd']).iterdir()), [])
         args = command[1:]
         if args == ['--version']:
@@ -165,6 +165,58 @@ class CodexTests(unittest.TestCase):
         self.assertNotIn('정제된 자료', execs[0]['input'])
         self.assertEqual(execs[-1]['input'], '정제된 자료')
         self.assertEqual(execs[0]['env'].keys(), execs[-1]['env'].keys())
+
+    def test_feature_format_and_flag_suffixes_block(self):
+        for output in ('', 'FEATURE STAGE ENABLED', '{"shell_tool":true}',
+                       'other stable true', 'apps stable maybe', 'apps stable true\nheader'):
+            self.features = output
+            with self.assertRaises(IsolationError):
+                self.adapter.check_flags()
+        self.features = 'shell_tool stable false'
+        for flag in (*FLAGS, '--disable'):
+            self.help = (' '.join(FLAGS) + ' --disable').replace(flag, flag + '-extra')
+            with self.assertRaises(IsolationError):
+                self.adapter.check_flags()
+
+    def test_runtime_state_and_auth_rename_are_temporary(self):
+        original = self.adapter.runner
+
+        def runner(command, **kw):
+            result = original(command, **kw)
+            runtime = Path(kw['env']['CODEX_HOME'])
+            runtime.mkdir(exist_ok=True)
+            (runtime / 'log').touch()
+            if '--output-last-message' in command:
+                replacement = runtime / 'replacement'
+                replacement.write_text('갱신 자격 증명')
+                replacement.replace(runtime / 'auth.json')
+            return result
+
+        self.adapter.runner = runner
+        self.adapter.probe()
+        self.adapter.generate('자료', {})
+        self.adapter.check_home()
+        self.assertEqual((self.source / 'auth.json').read_text(), 'credential-never-read')
+        for _, kw in self.calls:
+            self.assertFalse(Path(kw['env']['CODEX_HOME']).exists())
+
+    def test_reset_repairs_contamination_without_following_links(self):
+        (self.adapter.home / 'log').touch()
+        (self.adapter.home / 'linked-directory').symlink_to(self.source, target_is_directory=True)
+        auth = self.adapter.home / 'auth.json'
+        auth.unlink()
+        auth.write_text('갱신된 사본')
+        with self.assertRaises(IsolationError):
+            self.adapter.init_home()
+        self.adapter.init_home(reset=True)
+        self.adapter.check_home()
+        self.assertTrue((self.source / 'auth.json').is_file())
+
+    def test_probe_model_must_match(self):
+        self.adapter.probe()
+        self.adapter.model = 'different'
+        with self.assertRaises(IsolationError):
+            self.adapter.check_probe()
 
     def test_cli_init(self):
         with contextlib.redirect_stdout(io.StringIO()):

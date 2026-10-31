@@ -50,7 +50,8 @@ def parser():
     doctor = commands.add_parser('doctor', help='인증·격리·로컬 권한 점검')
     doctor.add_argument('--probe', action='store_true', help='코드 없이 실제 모델 격리 검사 실행')
     codex_home = commands.add_parser('codex-home', help='분석 전용 인증 링크 관리')
-    codex_home.add_subparsers(dest='action', required=True).add_parser('init')
+    codex_init = codex_home.add_subparsers(dest='action', required=True).add_parser('init')
+    codex_init.add_argument('--reset', action='store_true', help='전용 홈 항목을 제거하고 인증 링크 재생성')
     return root
 
 
@@ -63,7 +64,7 @@ def main(argv=None):
         config = Config.load()
         if args.command == 'codex-home':
             from .analyze.codex import CodexAdapter
-            CodexAdapter(data_dir=config.data_dir).init_home()
+            CodexAdapter(data_dir=config.data_dir).init_home(reset=args.reset)
             print('분석 전용 Codex 인증 링크를 만들었습니다.')
             return 0
         if args.command == 'web':

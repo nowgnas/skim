@@ -3,6 +3,7 @@ import json
 import os
 import re
 import stat
+import shutil
 import subprocess
 import tempfile
 import time
@@ -40,7 +41,7 @@ class CodexAdapter:
         self.model = model or 'unknown'
         self.disabled = []
 
-    def init_home(self):
+    def init_home(self, reset=False):
         """자격 증명 내용은 열지 않고 사용자가 지정한 홈의 링크만 만든다."""
         source = (Path(os.environ['CODEX_HOME']).expanduser() if os.environ.get('CODEX_HOME')
                   else Path.home() / '.codex') / 'auth.json'
@@ -53,11 +54,20 @@ class CodexAdapter:
         info = self.home.lstat()
         if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
             raise IsolationError('codex-home 소유자·0700 권한을 확인하세요.')
+        if reset:
+            # 링크 대상은 따라가지 않고 전용 홈 내부 항목만 제거한다.
+            for entry in self.home.iterdir():
+                if entry.is_dir() and not entry.is_symlink():
+                    shutil.rmtree(entry)
+                else:
+                    entry.unlink()
+            for cache in self.data_dir.glob('codex-probe-*.json'):
+                cache.unlink(missing_ok=True)
         link = self.home / 'auth.json'
         if not list(self.home.iterdir()):
             link.symlink_to(source)
         elif not link.is_symlink() or Path(os.readlink(link)) != source:
-            raise IsolationError('기존 codex-home을 덮어쓰지 않습니다.')
+            raise IsolationError('기존 codex-home을 덮어쓰지 않습니다. skim codex-home init --reset으로 복구하세요.')
         self.check_home()
 
     def check_home(self):
@@ -75,21 +85,21 @@ class CodexAdapter:
                     or target not in sources or target == link or not link.is_file()):
                 raise ValueError()
         except (OSError, ValueError, RuntimeError):
-            raise IsolationError('Codex 분석 차단: skim codex-home init 및 전용 홈(auth.json 링크만, 0700)을 확인하세요.') from None
+            raise IsolationError('Codex 분석 차단: skim codex-home init --reset 및 전용 홈(auth.json 링크만, 0700)을 확인하세요.') from None
 
     def _inspect(self, args):
-        with tempfile.TemporaryDirectory(prefix='skim-check-') as work:
+        with tempfile.TemporaryDirectory(prefix='skim-check-') as work, tempfile.TemporaryDirectory(prefix='skim-check-home-') as home:
             try:
                 result = self.runner(['codex', *args], capture_output=True, text=True, timeout=15,
-                                     cwd=work, env=self._env(work))
+                                     cwd=work, env=self._env(home, Path(home) / 'codex'))
                 if result.returncode != 0 or not isinstance(result.stdout, str):
                     raise ValueError()
                 return result.stdout
             except (OSError, subprocess.TimeoutExpired, ValueError):
                 raise IsolationError('Codex 분석 차단: CLI 기능 확인 실패') from None
 
-    def _env(self, home):
-        return {'PATH': os.environ.get('PATH', ''), 'HOME': home, 'CODEX_HOME': str(self.home)}
+    def _env(self, home, codex_home):
+        return {'PATH': os.environ.get('PATH', ''), 'HOME': home, 'CODEX_HOME': str(codex_home)}
 
     def check_version(self):
         output = self._inspect(['--version']).strip()
@@ -100,20 +110,22 @@ class CodexAdapter:
 
     def check_flags(self):
         help_text = self._inspect(['exec', '--help'])
-        if any(not re.search(re.escape(flag) + r'\b', help_text) for flag in FLAGS):
+        if any(not re.search(re.escape(flag) + r'(?![\w-])', help_text) for flag in FLAGS):
             raise IsolationError('Codex 분석 차단: 필수 격리 플래그 누락')
         features = self._inspect(['features', 'list'])
         names = set()
         for line in features.splitlines():
             fields = line.split()
-            if fields and fields[0] in RISKY_FEATURES:
-                if fields[-1] not in ('true', 'false'):
-                    raise IsolationError('Codex 분석 차단: 기능 목록 형식 오류')
-                names.add(fields[0])
-        if not features.strip():
-            raise IsolationError('Codex 분석 차단: 빈 기능 목록')
-        self.disabled = sorted(names)
-        if self.disabled and '--disable' not in self._inspect(['--help']):
+            if not fields:
+                continue
+            if (len(fields) < 3 or not re.fullmatch(r'[a-z][a-z0-9_]*', fields[0])
+                    or fields[-1] not in ('true', 'false') or fields[0] in names):
+                raise IsolationError('Codex 분석 차단: 기능 목록 형식 오류')
+            names.add(fields[0])
+        if not names or not names.intersection(RISKY_FEATURES):
+            raise IsolationError('Codex 분석 차단: 알려진 핵심 기능이 없는 기능 목록')
+        self.disabled = sorted(names.intersection(RISKY_FEATURES))
+        if not re.search(r'--disable(?![\w-])', help_text):
             raise IsolationError('Codex 분석 차단: 기능 비활성화 플래그 누락')
 
     @property
@@ -127,7 +139,7 @@ class CodexAdapter:
             age = time.time() - value['checked_at']
             if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
                     or stat.S_IMODE(info.st_mode) != 0o600 or value['version'] != self.cli_version
-                    or value['disabled'] != self.disabled or value['passed'] is not True
+                    or value.get('model') != self.model or value['disabled'] != self.disabled or value['passed'] is not True
                     or not 0 <= age < 7 * 86400):
                 raise ValueError()
         except (OSError, ValueError, KeyError, TypeError):
@@ -157,10 +169,12 @@ class CodexAdapter:
         fd = os.open(self.probe_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, 'w') as stream:
             json.dump({'version': self.cli_version, 'checked_at': time.time(),
-                       'disabled': self.disabled, 'passed': True}, stream)
+                       'disabled': self.disabled, 'model': self.model, 'passed': True}, stream)
 
     def _execute(self, prompt, schema, probe=False):
-        with tempfile.TemporaryDirectory(prefix='skim-analysis-') as work, tempfile.TemporaryDirectory(prefix='skim-home-') as home, tempfile.TemporaryDirectory(prefix='skim-schema-') as control:
+        with tempfile.TemporaryDirectory(prefix='skim-analysis-') as work, tempfile.TemporaryDirectory(prefix='skim-home-') as home, tempfile.TemporaryDirectory(prefix='skim-schema-') as control, tempfile.TemporaryDirectory(prefix='skim-codex-') as runtime:
+            # 인증 갱신의 rename과 런타임 상태는 임시 홈에서만 발생한다.
+            (Path(runtime) / 'auth.json').symlink_to(os.readlink(self.home / 'auth.json'))
             schema_path = Path(control) / 'schema.json'
             schema_path.write_text(encode(schema))
             schema_path.chmod(0o600)
@@ -174,7 +188,7 @@ class CodexAdapter:
             command.append('-')
             try:
                 result = self.runner(command, input=prompt, text=True, capture_output=True,
-                                     timeout=120, cwd=work, env=self._env(home))
+                                     timeout=120, cwd=work, env=self._env(home, runtime))
                 if result.returncode or (probe and (any(Path(work).iterdir()) or any(Path(home).iterdir()))):
                     raise IsolationError('Codex 실행 또는 격리 probe 실패')
                 return output.read_text()
