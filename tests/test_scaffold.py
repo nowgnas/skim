@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'lib'))
 from skim.cli import main
 from skim.config import Config
-from skim.db import analysis_allowed, connect, migrate
+from skim.db import MIGRATIONS, analysis_allowed, connect, migrate
 
 
 class ScaffoldTests(unittest.TestCase):
@@ -55,7 +55,7 @@ class ScaffoldTests(unittest.TestCase):
     def test_schema_constraints_and_permissions(self):
         config = Config.load()
         with contextlib.closing(connect(config)) as conn:
-            self.assertEqual(conn.execute('PRAGMA user_version').fetchone()[0], 4)
+            self.assertEqual(conn.execute('PRAGMA user_version').fetchone()[0], len(MIGRATIONS))
             self.assertEqual(conn.execute('PRAGMA journal_mode').fetchone()[0], 'wal')
             conn.execute("INSERT INTO jobs(type,target_id,input_hash) VALUES('analyze',1,'a')")
             with self.assertRaises(sqlite3.IntegrityError):

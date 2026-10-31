@@ -89,6 +89,18 @@ CREATE UNIQUE INDEX jobs_active_dedupe ON jobs(type,target_id,input_hash)
 CREATE UNIQUE INDEX jobs_active_kind ON jobs(type) WHERE status IN ('pending','running');
 """)
 
+# v4의 모든 열·기록을 보존하면서 격리 종료 상태만 추가한다.
+_JOB_V5_SCHEMA = MIGRATIONS[3].split('INSERT INTO jobs_v4', 1)[0].replace(
+    'jobs_v4', 'jobs_v5').replace("'deferred','cancelled'", "'deferred','blocked','cancelled'")
+MIGRATIONS += (_JOB_V5_SCHEMA + """
+INSERT INTO jobs_v5 SELECT * FROM jobs;
+DROP TABLE jobs;
+ALTER TABLE jobs_v5 RENAME TO jobs;
+CREATE UNIQUE INDEX jobs_active_dedupe ON jobs(type,target_id,input_hash)
+ WHERE status IN ('pending','running');
+CREATE UNIQUE INDEX jobs_active_kind ON jobs(type) WHERE status IN ('pending','running');
+""",)
+
 
 def migrate(conn, path):
     version = conn.execute("PRAGMA user_version").fetchone()[0]

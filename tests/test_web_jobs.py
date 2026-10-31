@@ -107,7 +107,7 @@ class JobTests(unittest.TestCase):
         cases = [([{'status': 'completed'}], 'completed', None),
                  ([{'status': 'partial'}], 'completed', None),
                  ([{'status': 'deferred', 'error': '일일 CLI 호출 20회 소진'}], 'deferred', '20회'),
-                 ([{'status': 'blocked', 'error': '유효한 probe 없음'}], 'failed', 'probe'),
+                 ([{'status': 'blocked', 'error': '유효한 probe 없음'}], 'blocked', 'probe'),
                  ([], 'failed', '대상이 없습니다')]
         for results, status, error in cases:
             with self.subTest(status=status, error=error):
@@ -128,6 +128,55 @@ class JobTests(unittest.TestCase):
         self.runner(analyzer).step()
         analyzer.return_value.run.assert_not_called()
         self.assertIn('허용이 꺼져', self.rows('analyze')[-1]['last_error'])
+
+    def test_batch_analysis_preserves_non_success_outcomes(self):
+        cases = [([], 'completed'), ([{'status': 'partial'}], 'completed'),
+                 ([{'status': 'deferred'}], 'deferred'),
+                 ([{'status': 'completed'}, {'status': 'deferred'}], 'deferred'),
+                 ([{'status': 'failed'}, {'status': 'deferred'}], 'failed'),
+                 ([{'status': 'deferred'}, {'status': 'blocked'}], 'blocked')]
+        for results, expected in cases:
+            with self.subTest(results=results):
+                with closing(connect(self.config)) as conn:
+                    row, _ = jobs.enqueue(conn, 'analyze')
+                self.runner(self.fake_analyzer(results)).step()
+                data = json.loads(self.request('/jobs/' + str(row['id']))[2])
+                self.assertEqual(data['status'], expected)
+                self.assertFalse(data['active'])
+                self.assertIsNotNone(data['finished_at'])
+                self.assertEqual(data['status_label'], jobs.STATUS[expected])
+                if expected == 'blocked':
+                    self.assertIn('복구 안내', data['error'])
+                if expected == 'deferred':
+                    self.assertIn('예산', data['error'])
+
+    def test_status_polls_recent_and_older_active_jobs(self):
+        with closing(connect(self.config)) as conn:
+            active, _ = jobs.enqueue(conn, 'analyze')
+            for _ in range(11):
+                row, _ = jobs.enqueue(conn, 'doctor')
+                jobs.finish(conn, row['id'], 'completed')
+        body = self.request('/status')[2]
+        self.assertIn(f'data-job-id="{active["id"]}" data-job-active="1"', body)
+        self.post('/jobs/doctor')
+        body = self.request('/status')[2]
+        recent = body.split('<h2>최근 작업</h2>', 1)[1]
+        self.assertIn('data-job-active="1"', recent)
+        self.assertIn('data-job-active="0"', recent)
+        self.assertIn('<script src="/static/jobs.js" defer></script>', body)
+        self.assertNotIn('<script>', body)
+
+    def test_poll_script_retries_with_bounded_backoff(self):
+        # 표준 라이브러리만으로 제공 스크립트의 재시도·종료 경로를 검사한다.
+        script = self.request('/static/jobs.js', authenticated=False)[2]
+        failure = script.split('.catch(() => {', 1)[1]
+        self.assertIn('setTimeout(tick, retryDelay)', failure)
+        self.assertIn('Math.min(retryDelay * 2, 30000)', failure)
+        success = script.split('.then(job => {', 1)[1].split('.catch', 1)[0]
+        self.assertIn('retryDelay = 2000', success)
+        self.assertIn('if (job.active) setTimeout(tick, 2000)', success)
+        self.assertIn('else location.reload()', success)
+        self.assertNotIn('innerHTML', script)
 
     def test_runner_rejects_stale_snapshot_and_hides_raw_errors(self):
         self.post('/jobs/analyze', repository='demo/checkout', number='1')
@@ -169,6 +218,7 @@ class JobTests(unittest.TestCase):
         self.assertEqual(len(self.rows('doctor')), 1)
         self.runner(doctor=doctor).step()
         self.assertFalse(doctor.call_args.kwargs['probe'])
+        self.assertEqual(self.rows('doctor')[0]['status'], 'failed')
         body = self.request('/status')[2]
         for text in ['점검 실패 항목', 'gh auth login', 'skim codex-home init', 'skim doctor --probe', '상태 점검 #']:
             self.assertIn(text, body)
@@ -294,6 +344,27 @@ class JobTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 jobs.enqueue(conn, 'collect')
 
+    def test_migration_v4_preserves_all_job_fields_and_adds_blocked(self):
+        import os
+        import tempfile
+        from skim.config import Config
+        from skim.db import MIGRATIONS
+        with tempfile.TemporaryDirectory() as home, patch.dict(os.environ, SKIM_HOME=home):
+            config = Config.load()
+            with patch('skim.db.MIGRATIONS', MIGRATIONS[:4]):
+                with closing(connect(config)) as conn:
+                    row, _ = jobs.enqueue(conn, 'analyze', 7, '테스트 대상', 'sha', {'snapshot_id': 9})
+                    jobs.claim(conn)
+                    jobs.progress(conn, row['id'], '분석 중', 1, 2)
+                    before = dict(jobs.get(conn, row['id']))
+            with closing(connect(config)) as conn:
+                self.assertEqual(dict(jobs.get(conn, row['id'])), before)
+                jobs.finish(conn, row['id'], 'blocked', error='복구 안내')
+                self.assertEqual(jobs.describe(jobs.get(conn, row['id']))['status_label'], '격리')
+                jobs.enqueue(conn, 'analyze')
+                with self.assertRaises(sqlite3.IntegrityError):
+                    conn.execute("INSERT INTO jobs(type,target_id) VALUES('analyze',8)")
+
     def test_migration_v3_preserves_jobs_and_closes_duplicate_active(self):
         import os
         import tempfile
@@ -307,7 +378,7 @@ class JobTests(unittest.TestCase):
                     conn.execute("INSERT INTO jobs(type,target_id,input_hash) VALUES('analyze',1,'a')")
                     conn.execute("INSERT INTO jobs(type,target_id,input_hash) VALUES('analyze',2,'b')")
             with closing(connect(config)) as conn:
-                self.assertEqual(conn.execute('PRAGMA user_version').fetchone()[0], 4)
+                self.assertEqual(conn.execute('PRAGMA user_version').fetchone()[0], len(MIGRATIONS))
                 rows = conn.execute('SELECT type,status,last_error,retry_not_before FROM jobs ORDER BY id').fetchall()
                 self.assertEqual([tuple(r) for r in rows][0], ('collect', 'pending', '요청 제한', '2026-11-01T00:00:00+00:00'))
                 self.assertEqual([r['status'] for r in rows[1:]], ['pending', 'cancelled'])

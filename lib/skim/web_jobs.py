@@ -117,9 +117,12 @@ def status_page(conn, csrf, offline):
     body += job_box(jobs.latest(conn, 'doctor'))
     body += '<h2>복구 안내</h2><ul>' + ''.join(f'<li><strong>{esc(name)}</strong> — {esc(text)}</li>' for name, text in RECOVERY) + '</ul></article>'
     body += collect_panel(conn, csrf, offline)
+    body += '<h2>활성 작업</h2>'
+    active_rows = conn.execute("SELECT * FROM jobs WHERE status IN ('pending','running') ORDER BY id").fetchall()
+    body += ''.join('<article>' + job_box(row) + '</article>' for row in active_rows) or '<p class="muted">활성 작업이 없습니다.</p>'
     body += '<h2>최근 작업</h2>'
     rows = jobs.recent(conn)
-    body += ''.join('<article>' + job_box(row, poll=False) + '</article>' for row in rows) or '<p class="muted">작업 기록이 없습니다.</p>'
+    body += ''.join('<article>' + job_box(row) + '</article>' for row in rows) or '<p class="muted">작업 기록이 없습니다.</p>'
     return body + script()
 
 
