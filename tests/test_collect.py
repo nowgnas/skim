@@ -140,7 +140,8 @@ class CollectionTests(unittest.TestCase):
         self.collector.collect()
         self.assertEqual({r[0] for r in self.conn.execute('SELECT head_sha FROM snapshots')}, {'head1x'})
         self.fake.race = 2
-        self.collector.collect()
+        with self.assertRaises(CollectionError):
+            self.collector.collect()
         self.assertEqual(self.count('snapshots'), 3)  # 다른 PR은 계속 갱신한다.
         self.fake.fail = True
         with self.assertRaises(CollectionError) as raised:
@@ -192,7 +193,11 @@ class CollectionTests(unittest.TestCase):
         self.fake.file_count = 3001
         self.assertEqual(self.collector.collect(), 0)
         self.assertEqual(self.count('snapshots'), 4)
-        self.assertTrue(all(json.loads(r[0])['status'] == 'incomplete' for r in self.conn.execute('SELECT coverage FROM snapshots')))
+        old = list(self.conn.execute('SELECT coverage FROM snapshots WHERE id<=2'))
+        self.assertTrue(all(json.loads(r[0])['status'] == 'collected' for r in old))
+        self.assertTrue(all('omitted' not in json.loads(r[0]) for r in old))
+        latest = list(self.conn.execute('SELECT coverage FROM snapshots WHERE id>2'))
+        self.assertTrue(all(json.loads(r[0])['omitted'] == 3001 for r in latest))
 
     def test_per_pr_http_failures_keep_snapshot_and_allow_reconciliation(self):
         self.collector.collect()
@@ -203,7 +208,8 @@ class CollectionTests(unittest.TestCase):
             return self.fake(command, **kwargs)
         self.collector.gh.runner = runner
         self.fake.state = 'closed'
-        self.assertEqual(self.collector.collect(), 0)
+        with self.assertRaisesRegex(CollectionError, '인증·권한'):
+            self.collector.collect()
         self.assertEqual(self.count('pr_sources'), 1)
         coverage = json.loads(self.conn.execute('SELECT coverage FROM snapshots WHERE id=?', (before['id'],)).fetchone()[0])
         self.assertEqual(coverage['status'], 'incomplete')
@@ -269,7 +275,8 @@ class CollectionTests(unittest.TestCase):
                 return subprocess.CompletedProcess(command, 0, '{}', '')
             return self.fake(command, **kwargs)
         self.collector.gh.runner = runner
-        self.collector.collect()
+        with self.assertRaises(CollectionError):
+            self.collector.collect()
         self.assertEqual(self.count('pull_requests'), 1)
         coverage = json.loads(self.conn.execute('SELECT coverage FROM snapshots').fetchone()[0])
         self.assertEqual(coverage['status'], 'incomplete')
@@ -282,7 +289,8 @@ class CollectionTests(unittest.TestCase):
                 return subprocess.CompletedProcess(command, 1, 'HTTP/2.0 404 Error\n\n{}', '')
             return self.fake(command, **kwargs)
         self.collector.gh.runner = runner
-        self.assertEqual(self.collector.collect(), 1)
+        with self.assertRaisesRegex(CollectionError, '저장소 목록.*접근 불가'):
+            self.collector.collect()
         self.assertEqual(self.count('snapshots'), 2)
         self.assertEqual(self.count('pr_sources'), 1)
 
@@ -399,6 +407,46 @@ class CollectionTests(unittest.TestCase):
         runner = lambda c, **kw: subprocess.CompletedProcess(c, 0, json.dumps(dict(total_count=1001, items=[])), '')
         with self.assertRaises(CollectionError):
             GitHub(runner).pages('search/issues', q='is:pr')
+
+
+    def test_new_pr_failures_remain_visible_in_job(self):
+        for status in (500, 403):
+            with self.subTest(status=status):
+                def runner(command, **kwargs):
+                    if command[7] == 'repos/org/outside/pulls/2':
+                        return subprocess.CompletedProcess(command, 1, f'HTTP/2 {status} Error\n\n{{}}', '비밀')
+                    return self.fake(command, **kwargs)
+                self.collector.gh.runner = runner
+                scheduler = CollectionScheduler(self.conn, clock=lambda: 1000)
+                scheduler.request()
+                self.assertTrue(scheduler.tick(self.collector))
+                row = self.conn.execute("SELECT * FROM jobs WHERE status='pending'").fetchone()
+                self.assertIn('org/outside#2', row['last_error'])
+                self.assertNotIn('비밀', row['last_error'])
+                self.assertEqual(row['next_run_at'], '1970-01-01T00:17:10+00:00')
+                self.assertEqual(self.count('pull_requests'), 1)
+                with self.conn:
+                    self.conn.execute('DELETE FROM jobs')
+
+    def test_manual_refresh_preserves_retry_after_across_restart(self):
+        scheduler = CollectionScheduler(self.conn, clock=lambda: 1000)
+        def deferred_collect():
+            scheduler.request()
+            raise Deferred(1300)
+        with patch.object(self.collector, 'collect', side_effect=deferred_collect):
+            self.assertTrue(scheduler.tick(self.collector))
+        row = self.conn.execute('SELECT * FROM jobs').fetchone()
+        self.assertEqual(row['next_run_at'], '1970-01-01T00:21:40+00:00')
+        self.assertEqual(row['refresh_requested'], 0)
+        restarted_conn = connect(self.config)
+        self.addCleanup(restarted_conn.close)
+        restarted = CollectionScheduler(restarted_conn, clock=lambda: 1001)
+        restarted.request()
+        collector = Collector(restarted_conn, self.config, self.fake)
+        self.assertFalse(restarted.tick(collector))
+        self.assertEqual(self.fake.calls, [])
+        restarted.clock = lambda: 1300
+        self.assertTrue(restarted.tick(collector))
 
 
 if __name__ == '__main__':

@@ -321,3 +321,57 @@ new mode 100755
         result = self.analyzer.run(snapshot_id=1)[0]
         self.assertEqual(result['status'], 'blocked')
         self.assertIn('최신', result['error'])
+        self.assertEqual(self.conn.execute('SELECT COUNT(*) FROM analyses').fetchone()[0], 0)
+
+
+    def test_auth_variants_and_dependency_paths(self):
+        from skim.analyze.units import candidates
+        for term in ('permissions/check.py', 'sessions', 'authorize', 'authenticated',
+                     'isAuthenticated', 'checkPermission', 'authz', 'OAuth', 'authentication'):
+            with self.subTest(term=term):
+                self.assertIn('auth', candidates(term, '', []))
+                self.assertIn('auth', candidates('app.py', '+' + term, []))
+        for path in ('clock', 'src/clock', 'src/author.py'):
+            self.assertNotIn('dependency', candidates(path, '', []))
+            self.assertNotIn('auth', candidates(path, '', []))
+        for path in ('yarn.lock', 'Cargo.lock', 'package-lock.json', 'poetry.lock'):
+            self.assertIn('dependency', candidates(path, '', []))
+
+    def test_deleted_snapshot_during_model_call_does_not_stop_next_pr(self):
+        with self.conn:
+            self.conn.execute("INSERT INTO pull_requests(repo_id,number,title,body,base_sha,head_sha) VALUES(1,2,'다음','설명','base','head')")
+            self.conn.execute("INSERT INTO snapshots(pr_id,base_sha,head_sha,diff_hash,input_hash,diff_path) SELECT 2,base_sha,head_sha,diff_hash,input_hash,diff_path FROM snapshots WHERE id=1")
+        other = connect(self.config)
+        self.addCleanup(other.close)
+        original = self.fake.generate
+        def generate(request, schema):
+            if not self.fake.calls:
+                with other:
+                    other.execute('DELETE FROM pull_requests WHERE id=1')
+            return original(request, schema)
+        self.fake.generate = generate
+        results = self.analyzer.run()
+        self.assertEqual([r['status'] for r in results], ['cancelled', 'completed'])
+        self.assertIn('삭제', results[0]['error'])
+        self.assertEqual(self.conn.execute('SELECT COUNT(*) FROM analyses').fetchone()[0], 1)
+        self.assertEqual(self.conn.execute('SELECT calls FROM analysis_budget').fetchone()[0], 4)
+
+    def test_failure_after_snapshot_deleted_and_analysis_hash(self):
+        other = connect(self.config)
+        self.addCleanup(other.close)
+        def reserve():
+            with other:
+                other.execute('DELETE FROM pull_requests WHERE id=1')
+            raise RuntimeError('실패')
+        with patch.object(self.analyzer, '_reserve', side_effect=reserve):
+            self.assertEqual(self.analyzer.run()[0]['status'], 'cancelled')
+        self.assertEqual(self.conn.execute('SELECT COUNT(*) FROM analyses').fetchone()[0], 0)
+
+    def test_failure_stores_prepared_hash_instead_of_collection_hash(self):
+        with patch.object(self.analyzer, '_reserve', side_effect=RuntimeError('실패')):
+            self.assertEqual(self.analyzer.run()[0]['status'], 'failed')
+        failure_hash = self.conn.execute('SELECT input_hash FROM analyses').fetchone()[0]
+        self.assertNotEqual(failure_hash, 'raw')
+        self.analyzer.run()
+        success_hash = self.conn.execute('SELECT input_hash FROM analyses ORDER BY id DESC').fetchone()[0]
+        self.assertEqual(failure_hash, success_hash)

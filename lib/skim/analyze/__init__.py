@@ -75,13 +75,17 @@ class Analyzer:
                                      'WHERE (? IS NOT NULL OR s.id IN (SELECT MAX(id) FROM snapshots GROUP BY pr_id)) '
                                      'AND (? IS NULL OR s.id=?) ORDER BY s.id', (snapshot_id, snapshot_id, snapshot_id)).fetchall()
             for row in rows:
+                row = dict(row)
                 if row['state'] != 'open' or (row['draft'] and not include_drafts):
                     continue
                 if not analysis_allowed(self.conn, row['repo_id']):
                     continue
-                if row['base_sha'] != row['current_base'] or row['head_sha'] != row['current_head'] or row['id'] != self.conn.execute('SELECT MAX(id) FROM snapshots WHERE pr_id=?', (row['pr_id'],)).fetchone()[0]:
+                latest_id = self.conn.execute(
+                    'SELECT MAX(id) FROM snapshots WHERE pr_id=?', (row['pr_id'],)).fetchone()[0]
+                if (row['base_sha'] != row['current_base'] or
+                        row['head_sha'] != row['current_head'] or row['id'] != latest_id):
                     if snapshot_id is not None:
-                        results.append(self._failure(row, '최신 SHA의 최신 스냅샷이 아닙니다', 'blocked'))
+                        results.append(self._failure(row, '최신 SHA의 최신 스냅샷이 아닙니다', 'blocked', persist=False))
                     continue
                 try:
                     results.append(self._analyze(row))
@@ -90,11 +94,17 @@ class Analyzer:
                     results.append(self._failure(row, '분석 실패: diff 캐시 또는 로컬 DB를 확인하세요'))
         return results
 
-    def _failure(self, row, error, status='failed'):
+    def _failure(self, row, error, status='failed', persist=True):
         result = dict(snapshot_id=row['id'], status=status, error=error, items=[], intent=None)
+        if not persist:
+            return result
         with self.conn:
+            # 존재 확인부터 저장까지 삭제와 경합하지 않도록 쓰기 잠금을 잡는다.
+            self.conn.execute('BEGIN IMMEDIATE')
+            if not self.conn.execute('SELECT 1 FROM snapshots WHERE id=?', (row['id'],)).fetchone():
+                return dict(result, status='cancelled', error='분석 도중 스냅샷이 삭제되었습니다')
             self.conn.execute('INSERT INTO analyses(snapshot_id,input_hash,provider,model,cli_version,prompt_version,schema_version,status,output_json,error) VALUES(?,?,?,?,?,?,?,?,?,?)',
-                              (row['id'], row['input_hash'], self.adapter.provider, self.adapter.model, self.adapter.cli_version, PROMPT_VERSION, SCHEMA_VERSION, status, encode(result), error))
+                              (row['id'], row.get('analysis_input_hash', ''), self.adapter.provider, self.adapter.model, self.adapter.cli_version, PROMPT_VERSION, SCHEMA_VERSION, status, encode(result), error))
         return result
 
     def _analyze(self, row):
@@ -123,6 +133,7 @@ class Analyzer:
         chunks = chunk_units(eligible, metadata)
         material = dict(metadata=metadata, units=units, policy='redact-v2/limits-v1', prompt_version=PROMPT_VERSION)
         input_hash = hashlib.sha256(encode(material).encode()).hexdigest()
+        row['analysis_input_hash'] = input_hash
         adapter = self.adapter
         key = (row['id'], input_hash, adapter.provider, adapter.model, adapter.cli_version, PROMPT_VERSION, SCHEMA_VERSION)
         if adapter.model != 'unknown':
@@ -165,6 +176,9 @@ class Analyzer:
                                         candidates=sorted({flag for u in members for flag in u['candidates']}),
                                         partial=any(u['change_id'] not in by_id or u.get('redacted') for u in members)))
         with self.conn:
+            self.conn.execute('BEGIN IMMEDIATE')
+            if not self.conn.execute('SELECT 1 FROM snapshots WHERE id=?', (row['id'],)).fetchone():
+                return dict(result, status='cancelled', error='분석 도중 스냅샷이 삭제되었습니다')
             self.conn.execute('UPDATE snapshots SET input_hash=? WHERE id=?', (input_hash, row['id']))
             stored_coverage = dict(source_coverage, analysis=coverage)
             self.conn.execute('UPDATE snapshots SET coverage=? WHERE id=?', (encode(stored_coverage), row['id']))

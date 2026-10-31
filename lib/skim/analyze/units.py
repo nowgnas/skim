@@ -4,21 +4,19 @@ import ast
 import re
 from pathlib import PurePosixPath
 
-SECRET = re.compile(
+# 모델 출력에서는 값 자체가 확인되는 토큰·개인 키만 가린다.
+SECRET_VALUE = re.compile(
     r'-----BEGIN (?:[A-Z ]*PRIVATE KEY)-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)'
     r'|(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|sk_(?:live|test)_[A-Za-z0-9]+'
-    r'|(?:AKIA|ASIA)[A-Z0-9]{16}|xox[baprs]-[A-Za-z0-9-]+|AIza[A-Za-z0-9_-]{30,})'
-    r"|(?im:\b(?:api[_-]?key|[a-z0-9_]*(?:secret|password|token|private[_-]?key)[a-z0-9_]*|authorization)[\"']?\s*[=:][^\n]*)")
+    r'|(?:AKIA|ASIA)[A-Z0-9]{16}|xox[baprs]-[A-Za-z0-9-]+|AIza[A-Za-z0-9_-]{30,})')
+SECRET_ASSIGNMENT = re.compile(r"(?im:\b(?:api[_-]?key|[a-z0-9_]*(?:secret|password|token|private[_-]?key)[a-z0-9_]*|authorization)[\"']?\s*[=:][^\n]*)")
 
 EXCLUDED = ('.env', '.env.*', '*.pem', '*.key', '*credentials*', 'id_rsa*', 'id_ed25519*', '*.p12', '*.pfx')
 
 
-# 모델 출력에서는 값 자체가 확인되는 토큰·개인 키만 가린다.
-SECRET_VALUE = re.compile(SECRET.pattern.split('|(?im:', 1)[0])
-
-
 def sanitize(text, assignments=True):
-    return (SECRET if assignments else SECRET_VALUE).sub('[민감 정보 제외]', text or '')
+    cleaned = SECRET_VALUE.sub('[민감 정보 제외]', text or '')
+    return SECRET_ASSIGNMENT.sub('[민감 정보 제외]', cleaned) if assignments else cleaned
 
 
 def secret_path(path):
@@ -30,13 +28,14 @@ def is_test(path):
 
 
 def candidates(path, text, tests):
-    value = (path + '\n' + text).lower()
+    # camelCase도 단어 경계로 취급해 인증 함수 이름을 놓치지 않는다.
+    value = re.sub(r'([a-z])([A-Z])', r'\1_\2', path + '\n' + text).lower()
     flags = []
-    rules = {'auth': r'(?<![a-z])(?:auth|authentication|authorization|permission|oauth|session|acl)(?![a-z])', 'payments': r'payment|billing|checkout|refund|charge',
+    rules = {'auth': r'(?<![a-z])(?:auth(?:entication|enticated|enticate|orization|orized|orize|z|n)?|permissions?|oauth|sessions?|acl)(?![a-z])', 'payments': r'payment|billing|checkout|refund|charge',
              'db_schema_migration': r'migration|schema|\b(?:drop|alter) table',
              'config': r'config|settings|\.toml$|\.ini$|\.env',
              'ci_workflow': r'\.github/workflows/',
-             'dependency': r'(^|/)(package(-lock)?\.json|.*lock|requirements[^/]*|pyproject\.toml|go\.mod|cargo\.toml)(\n|$)',
+             'dependency': r'(^|/)(package(-lock)?\.json|(?:[^/]+[.-])?lock|requirements[^/]*|pyproject\.toml|go\.mod|cargo\.toml)(\n|$)',
              'secrets': r'secret|password|private.key|token|credentials'}
     for flag, pattern in rules.items():
         target = path.lower() if flag == 'dependency' else value

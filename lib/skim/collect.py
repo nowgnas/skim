@@ -278,7 +278,11 @@ class Collector:
                 if row:
                     if isinstance(exc, Inaccessible):
                         conn.execute('DELETE FROM pr_sources WHERE pr_id=?', (row['id'],))
-                    for snapshot in conn.execute('SELECT id,coverage FROM snapshots WHERE pr_id=?', (row['id'],)):
+                    snapshot_query = 'SELECT id,coverage FROM snapshots WHERE pr_id=?'
+                    if isinstance(exc, Oversized):
+                        snapshot_query += ' AND id=(SELECT MAX(id) FROM snapshots WHERE pr_id=?)'
+                    params = (row['id'], row['id']) if isinstance(exc, Oversized) else (row['id'],)
+                    for snapshot in conn.execute(snapshot_query, params):
                         coverage = json.loads(snapshot['coverage'])
                         coverage.update(status='inaccessible' if isinstance(exc, Inaccessible) else 'incomplete', collection_error=error_message(exc))
                         if isinstance(exc, Oversized):
@@ -290,8 +294,14 @@ class Collector:
         deferred = [exc.retry_at for exc in listing_failures + [f[2] for f in failures] if isinstance(exc, Deferred)]
         if deferred:
             raise Deferred(max(deferred))
-        if any(not isinstance(exc, Inaccessible) for exc in listing_failures):
-            raise CollectionError('저장소 목록 수집 실패: ' + error_message(listing_failures[0]))
+        if listing_failures:
+            error = next((exc for exc in listing_failures if not isinstance(exc, Inaccessible)), listing_failures[0])
+            raise CollectionError('저장소 목록 수집 실패: ' + error_message(error))
+        errors = [(full, number, exc) for full, number, exc in failures
+                  if not isinstance(exc, (Inaccessible, Oversized))]
+        if errors:
+            full, number, exc = errors[0]
+            raise CollectionError(f'PR 수집 실패 ({len(errors)}건, {full}#{number}): ' + error_message(exc))
         return sum(snapshot is not None and not any(f == full and n == number for f, n, _ in failures)
                    for full, number, pr, state, snapshot in collected)
 
@@ -315,8 +325,8 @@ class CollectionScheduler:
     def request(self, manual=True):
         with self.conn:
             if manual:
-                self.conn.execute("UPDATE jobs SET next_run_at=NULL WHERE type='collect' AND status='pending'")
-                self.conn.execute("UPDATE jobs SET last_error='수동 갱신 대기' WHERE type='collect' AND status='running'")
+                self.conn.execute("UPDATE jobs SET next_run_at=retry_not_before WHERE type='collect' AND status='pending'")
+                self.conn.execute("UPDATE jobs SET refresh_requested=1 WHERE type='collect' AND status='running'")
             self.conn.execute("INSERT OR IGNORE INTO jobs(type,target_id) VALUES('collect',0)")
 
     def tick(self, collector):
@@ -324,7 +334,7 @@ class CollectionScheduler:
             # 잠금을 확보했으므로 이전 running 작업을 실행하는 수집기는 없다.
             # 프로세스 중단·DB 기록 실패 후에도 다음 tick에서 복구한다.
             with self.conn:
-                self.conn.execute("UPDATE jobs SET status='pending',next_run_at=NULL,last_error='중단된 수집 작업을 복구했습니다' WHERE type='collect' AND status='running'")
+                self.conn.execute("UPDATE jobs SET status='pending',next_run_at=retry_not_before,last_error='중단된 수집 작업을 복구했습니다' WHERE type='collect' AND status='running'")
             return self._tick(collector)
 
     def _tick(self, collector):
@@ -343,14 +353,20 @@ class CollectionScheduler:
         try:
             collector.collect()
         except Exception as exc:
+            # 점유 전 attempts이므로 첫 실패의 지연은 30초다.
             retry = exc.retry_at if isinstance(exc, Deferred) else now + min(3600, 30 * 2 ** min(row['attempts'], 7))
+            retry_stamp = datetime.fromtimestamp(retry, timezone.utc).isoformat()
             with self.conn:
-                self.conn.execute("UPDATE jobs SET status='pending',next_run_at=?,last_error=? WHERE id=?",
-                                  (None if self.conn.execute('SELECT last_error FROM jobs WHERE id=?', (row['id'],)).fetchone()[0] == '수동 갱신 대기' else datetime.fromtimestamp(retry, timezone.utc).isoformat(), error_message(exc), row['id']))
+                self.conn.execute('BEGIN IMMEDIATE')
+                followup = self.conn.execute('SELECT refresh_requested FROM jobs WHERE id=?', (row['id'],)).fetchone()[0]
+                self.conn.execute("UPDATE jobs SET status='pending',next_run_at=?,last_error=?,retry_not_before=?,refresh_requested=0 WHERE id=?",
+                                  (None if followup and not isinstance(exc, Deferred) else retry_stamp,
+                                   error_message(exc), retry_stamp if isinstance(exc, Deferred) else None, row['id']))
         else:
             with self.conn:
-                followup = self.conn.execute('SELECT last_error FROM jobs WHERE id=?', (row['id'],)).fetchone()[0] == '수동 갱신 대기'
-                self.conn.execute("UPDATE jobs SET status='completed',last_error=NULL WHERE id=?", (row['id'],))
+                self.conn.execute('BEGIN IMMEDIATE')
+                followup = self.conn.execute('SELECT refresh_requested FROM jobs WHERE id=?', (row['id'],)).fetchone()[0]
+                self.conn.execute("UPDATE jobs SET status='completed',last_error=NULL,refresh_requested=0,retry_not_before=NULL WHERE id=?", (row['id'],))
                 if followup:
                     self.request()
         return True
