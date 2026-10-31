@@ -42,7 +42,7 @@ def run(config, runner=None, which=None, adapter=None, probe=False):
             report(False, label, 'Codex 분석 차단: 선행 검사 실패 또는 CLI 없음')
             ready = False
             continue
-        if label == 'probe' and probe and not model_ok:
+        if label == 'probe' and not model_ok:
             report(False, label, '모델 설정을 수정한 뒤 skim doctor --probe를 실행하세요.')
             ready = False
             continue

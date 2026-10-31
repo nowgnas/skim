@@ -338,8 +338,41 @@ class CodexTests(unittest.TestCase):
         command = self.calls[-1][0]
         self.assertEqual(command[command.index('--model') + 1], 'gpt-5.4')
 
+    def test_model_banner_boundaries(self):
+        cases = (
+            ('model: stray\n', None),
+            ('model: stray\nOpenAI Codex v0.165.0\nmodel: actual\n--------\nmodel: later\n', 'actual'),
+            ('OpenAI Codex\n--------\nmodel: later\n', None),
+            ('OpenAI Codex\nprovider: openai\n--------\nmodel: later\n', None),
+            ('warning: OpenAI Codex\nmodel: stray\n', None),
+            ('OpenAI Codex\nmodel: unknown\n--------\nmodel: later\n', None),
+            ('OpenAI Codex\nmodel: two words\n--------\n', None),
+            ('  OpenAI Codex v0.165.0  \n  model: actual  \n--------\n', 'actual'),
+        )
+        for stderr, expected in cases:
+            with self.subTest(stderr=stderr):
+                self.assertEqual(CodexAdapter._output_model('', stderr), expected)
+
+    def test_doctor_invalid_model_blocks_cached_and_live_probe(self):
+        self.adapter.probe()
+        config = Config(self.root / 'config', self.adapter.data_dir)
+        for probe in (False, True):
+            with self.subTest(probe=probe):
+                out = io.StringIO()
+                with patch.object(Config, 'doctor_codex_model', side_effect=ValueError), \
+                        patch.object(self.adapter, 'check_probe') as check_probe, \
+                        patch.object(self.adapter, 'probe') as live_probe, \
+                        contextlib.redirect_stdout(out):
+                    self.assertEqual(run(config, self.runner, lambda _: '/fake',
+                                         self.adapter, probe=probe), 1)
+                self.assertIn('실패: model', out.getvalue())
+                self.assertIn('실패: probe', out.getvalue())
+                self.assertNotIn('정상: probe', out.getvalue())
+                check_probe.assert_not_called()
+                live_probe.assert_not_called()
+
     def test_model_event_precedes_banner_and_unknown_fallback(self):
-        self.stderr = 'model: banner-model\n'
+        self.stderr = 'OpenAI Codex v0.165.0\nmodel: banner-model\n--------\n'
         self.events = [{'type': 'thread.started', 'metadata': {'model': 'event-model'}}]
         self.adapter.probe()
         self.assertEqual(self.adapter.model, 'event-model')
@@ -363,7 +396,7 @@ class CodexTests(unittest.TestCase):
             with self.subTest(configured=configured, probe=probe):
                 config = Config(self.root / 'config', self.adapter.data_dir,
                                 codex_model='configured' if configured else None)
-                self.stderr = 'model: detected\n'
+                self.stderr = 'OpenAI Codex v0.165.0\nmodel: detected\n--------\n'
                 if not configured and not probe:
                     self.adapter.probe()
                 out = io.StringIO()

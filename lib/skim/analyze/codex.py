@@ -277,8 +277,20 @@ class CodexAdapter:
                 found = metadata(json.loads(line))
                 if found:
                     return found
-        match = re.search(r'^\s*model:\s*(\S+)\s*$', stderr, re.MULTILINE)
-        return match.group(1) if match and valid_model(match.group(1)) else None
+        # stderr의 경고·응답 대신 Codex 배너 내부에서만 모델을 읽는다.
+        in_banner = False
+        for line in stderr.splitlines():
+            line = line.strip()
+            if not in_banner:
+                if re.fullmatch(r'OpenAI Codex(?:\s+.*)?', line):
+                    in_banner = True
+                continue
+            if line == '--------':
+                break
+            match = re.fullmatch(r'model:\s*(\S+)', line)
+            if match and valid_model(match.group(1)):
+                return match.group(1)
+        return None
 
     @staticmethod
     def _check_events(stdout):
