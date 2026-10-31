@@ -37,6 +37,7 @@ class CodexTests(unittest.TestCase):
         self.answer = {'tool_ran': False, 'instructions_seen': ''}
         self.file_location = None
         self.events = [{'type': 'item.completed', 'item': {'type': 'agent_message', 'text': 'x'}}]
+        self.stderr = ''
         self.exitcode = 0
         self.adapter.init_home()
 
@@ -72,7 +73,7 @@ class CodexTests(unittest.TestCase):
             self.assertIn('--json', command)
             events = self.events + [{'type': 'turn.completed'}]
             stdout = '\n'.join(json.dumps(e) for e in events)
-            return subprocess.CompletedProcess(command, self.exitcode, stdout, '')
+            return subprocess.CompletedProcess(command, self.exitcode, stdout, self.stderr)
         return subprocess.CompletedProcess(command, 0, output, '')
 
     def test_init_explicit_idempotent_and_no_credential_reads(self):
@@ -322,6 +323,143 @@ class CodexTests(unittest.TestCase):
         self.assertTrue(first.exists())
         self.adapter.model = 'unknown'
         self.adapter.check_probe()
+
+    def test_model_banner_cached_without_extra_execution(self):
+        self.stderr = 'OpenAI Codex\nmodel: gpt-5.4\nprovider: openai\n'
+        self.adapter.probe()
+        self.assertEqual(self.adapter.model, 'gpt-5.4')
+        self.assertEqual(json.loads(self.adapter.probe_path.read_text())['model'], 'gpt-5.4')
+        fresh = CodexAdapter(self.runner, self.adapter.data_dir)
+        before = len(self.calls)
+        fresh.verify()
+        self.assertEqual(fresh.model, 'gpt-5.4')
+        self.assertFalse(any('--output-last-message' in c for c, _ in self.calls[before:]))
+        fresh.generate('자료', {})
+        command = self.calls[-1][0]
+        self.assertEqual(command[command.index('--model') + 1], 'gpt-5.4')
+
+    def test_model_event_precedes_banner_and_unknown_fallback(self):
+        self.stderr = 'model: banner-model\n'
+        self.events = [{'type': 'thread.started', 'metadata': {'model': 'event-model'}}]
+        self.adapter.probe()
+        self.assertEqual(self.adapter.model, 'event-model')
+        self.stderr = 'WARNING: proceeding, even though we could not update PATH alias\n'
+        self.events = [{'type': 'thread.started', 'thread_id': 'test-thread'}]
+        self.adapter.probe()
+        self.assertEqual(self.adapter.model, 'unknown')
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            run(Config(self.root / 'config', self.adapter.data_dir), self.runner,
+                lambda _: '/fake', self.adapter)
+        self.assertIn('경고: model —', out.getvalue())
+        self.assertIn('codex_model 설정', out.getvalue())
+        self.assertIn('SKIM_CODEX_MODEL', out.getvalue())
+        self.assertNotIn('정상: model', out.getvalue())
+        self.assertNotIn('Codex 모델: unknown', out.getvalue())
+        self.assertEqual(sum('model —' in line for line in out.getvalue().splitlines()), 1)
+
+    def test_doctor_reports_one_known_model_after_checks(self):
+        for configured, probe in ((True, True), (True, False), (False, True), (False, False)):
+            with self.subTest(configured=configured, probe=probe):
+                config = Config(self.root / 'config', self.adapter.data_dir,
+                                codex_model='configured' if configured else None)
+                self.stderr = 'model: detected\n'
+                if not configured and not probe:
+                    self.adapter.probe()
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    self.assertEqual(run(config, self.runner, lambda _: '/fake', probe=probe), 0)
+                model = 'configured' if configured else 'detected'
+                self.assertIn(f'정상: model — {model}\n', out.getvalue())
+                self.assertEqual(sum('model —' in line for line in out.getvalue().splitlines()), 1)
+                self.assertNotIn('Codex 모델:', out.getvalue())
+
+    def test_configured_model_and_environment_override(self):
+        config = Config.load()
+        (config.config_dir / 'config.json').write_text(json.dumps({'codex_model': 'configured'}))
+        self.assertEqual(Config.load().codex_model, 'configured')
+        with patch.dict(os.environ, SKIM_CODEX_MODEL='override'):
+            config = Config.load()
+            self.assertEqual(config.codex_model, 'override')
+            adapter = CodexAdapter(self.runner, self.adapter.data_dir,
+                                   model=config.resolved_codex_model())
+            self.stderr = 'model: ignored-banner\n'
+            adapter.probe()
+            adapter.verify()
+            self.assertEqual(adapter.model, 'override')
+            command = next(c for c, _ in reversed(self.calls) if '--output-last-message' in c)
+            self.assertEqual(command[command.index('--model') + 1], 'override')
+
+    def test_loaded_config_is_stable_after_file_and_environment_changes(self):
+        from skim.analyze import Analyzer
+        config = Config.load()
+        path = config.config_dir / 'config.json'
+        path.write_text(json.dumps({'codex_model': 'original'}))
+        config = Config.load()
+        for contents in ('[]', '{', '{"codex_model": "replacement"}'):
+            path.write_text(contents)
+            with patch.dict(os.environ, SKIM_CODEX_MODEL=''):
+                analyzer = Analyzer(None, config)
+                self.assertEqual(analyzer.adapter.model, 'original')
+                self.assertEqual(config.resolved_codex_model(), 'original')
+        explicit = Config(config.config_dir, config.data_dir, codex_model='explicit')
+        self.assertEqual(Analyzer(None, explicit).adapter.model, 'explicit')
+
+    def test_invalid_model_identifiers(self):
+        config = Config.load()
+        path = config.config_dir / 'config.json'
+        for model in ('', 'unknown', '-model', 'two words', ' spaced ', 123):
+            with self.subTest(model=model):
+                path.write_text(json.dumps({'codex_model': model}))
+                with self.assertRaises(ValueError):
+                    Config.load()
+                with self.assertRaises(ValueError):
+                    CodexAdapter(self.runner, self.adapter.data_dir, model=model)
+        for model in ('-model', 'two words', 'unknown'):
+            self.assertIsNone(CodexAdapter._output_model(
+                json.dumps({'metadata': {'model': model}}), ''))
+        self.adapter.probe()
+        path = self.adapter.probe_path
+        value = json.loads(path.read_text())
+        value['model'] = '-invalid'
+        path.write_text(json.dumps(value))
+        with self.assertRaises(IsolationError):
+            self.adapter.check_probe()
+
+    def test_doctor_reports_invalid_settings_and_continues(self):
+        config = Config.load()
+        path = config.config_dir / 'config.json'
+        for contents, env in (('[]', {}), ('{', {}), ('{}', {'SKIM_CODEX_MODEL': ''})):
+            path.write_text(contents)
+            before = path.stat().st_mode
+            out = io.StringIO()
+            self.calls.clear()
+            with patch.dict(os.environ, env), contextlib.redirect_stdout(out):
+                self.assertEqual(run(config, self.runner, lambda _: '/fake', self.adapter), 1)
+            self.assertIn('실패: model', out.getvalue())
+            for label in ('codex-home', 'version', 'flags', 'probe', '로컬 권한'):
+                self.assertIn(label, out.getvalue())
+            self.assertNotIn('Traceback', out.getvalue())
+            self.assertFalse(any('--output-last-message' in c for c, _ in self.calls))
+            self.assertEqual(path.stat().st_mode, before)
+        path.write_text('{}')
+        path.chmod(0o644)
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(run(config, self.runner, lambda _: '/fake', self.adapter), 1)
+        self.assertIn('실패: model', out.getvalue())
+        self.assertEqual(path.stat().st_mode & 0o777, 0o644)
+
+    def test_generate_blocks_model_change_after_verification(self):
+        self.adapter.probe()
+        self.adapter.verify()
+        path = self.adapter.probe_path
+        value = json.loads(path.read_text())
+        value['model'] = 'changed-model'
+        path.write_text(json.dumps(value))
+        before = len(self.calls)
+        with self.assertRaises(IsolationError):
+            self.adapter.generate('자료', {})
+        self.assertFalse(any('--output-last-message' in c for c, _ in self.calls[before:]))
 
     def test_cli_init(self):
         with contextlib.redirect_stdout(io.StringIO()):

@@ -174,6 +174,8 @@ def detail(pr, query, config, offline=False):
         sid, url = session
         content += f'<p><a href="{esc(url)}" rel="noreferrer">Sessio · {esc(sid)} ↗</a></p>'
     content += f'<article><h2>의도</h2><p>{esc(a["intent"] if a and a["intent"] else "미분석 — 분석 결과가 없습니다.")}</p><h2>위험 요약</h2><p>{badges(pr)}</p><p>{esc(pr["status"])} {esc(a["error"] if a else "")}</p>'
+    if a:
+        content += f'<p class="muted">모델 {esc(a["model"])} · Codex CLI {esc(a["cli_version"])}</p>'
     if s:
         coverage = json.loads(s['coverage'])
         stats = coverage.get('analysis', {})

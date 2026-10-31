@@ -10,6 +10,7 @@ import tempfile
 import time
 from pathlib import Path
 from .protocol import encode
+from ..config import valid_model
 
 
 class IsolationError(ValueError):
@@ -55,7 +56,10 @@ class CodexAdapter:
             data_dir = paths().data_dir
         self.data_dir = Path(data_dir).absolute()
         self.home = self.data_dir / 'codex-home'
-        self.model = model or 'unknown'
+        if model is not None and not valid_model(model):
+            raise ValueError('Codex 모델 식별자 형식을 확인하세요.')
+        self.model = model if model is not None else 'unknown'
+        self._detected_model = None
         self.disabled = []
         self.unknown_enabled = []
 
@@ -130,7 +134,11 @@ class CodexAdapter:
         match = re.fullmatch(r'codex(?:-cli)? (\d+)\.(\d+)\.(\d+)', output)
         if not match or tuple(map(int, match.groups())) < (0, 165, 0):
             raise IsolationError('Codex 분석 차단: 검증된 최소 버전 0.165.0 이상이 필요합니다.')
-        self.cli_version = '.'.join(match.groups())
+        version = '.'.join(match.groups())
+        if version != self.cli_version and self.model == self._detected_model:
+            self.model = 'unknown'
+            self._detected_model = None
+        self.cli_version = version
 
     def check_flags(self):
         help_text = self._inspect(['exec', '--help'])
@@ -158,7 +166,7 @@ class CodexAdapter:
 
     @property
     def probe_path(self):
-        model_key = hashlib.sha256(self.model.encode()).hexdigest()
+        model_key = hashlib.sha256(('unknown' if self.model == self._detected_model else self.model).encode()).hexdigest()
         return self.data_dir / f'codex-probe-{self.cli_version}-{model_key}.json'
 
     def check_probe(self):
@@ -168,9 +176,14 @@ class CodexAdapter:
             age = time.time() - value['checked_at']
             if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
                     or stat.S_IMODE(info.st_mode) != 0o600 or value['version'] != self.cli_version
-                    or value.get('model') != self.model or value['disabled'] != self.disabled or value['passed'] is not True
+                    or (self.model != 'unknown' and value.get('model') != self.model) or value['disabled'] != self.disabled or value['passed'] is not True
                     or not 0 <= age < 7 * 86400):
                 raise ValueError()
+            if self.model == 'unknown' or self.model == self._detected_model:
+                model = value['model']
+                if model != 'unknown' and not valid_model(model):
+                    raise ValueError()
+                self.model = self._detected_model = model
         except (OSError, ValueError, KeyError, TypeError):
             raise IsolationError('Codex 분석 차단: 유효한 probe 없음. skim doctor --probe를 실행하세요.') from None
 
@@ -186,6 +199,8 @@ class CodexAdapter:
         self.check_flags()
         # 실패한 재검사가 이전 성공 캐시로 우회되지 않게 먼저 폐기한다.
         self.probe_path.unlink(missing_ok=True)
+        if self.model == self._detected_model:
+            self.model = 'unknown'
         raw = self._execute(PROBE_PROMPT, PROBE_SCHEMA, probe=True)
         try:
             value = json.loads(raw)
@@ -217,6 +232,7 @@ class CodexAdapter:
             command.append('--json')
             for name in self.disabled:
                 command.extend(['--disable', name])
+            # 기본 모델은 probe로 감지한 뒤 분석에서 명시해 같은 모델로 고정한다.
             if self.model != 'unknown':
                 command.extend(['--model', self.model])
             command.append('-')
@@ -230,6 +246,10 @@ class CodexAdapter:
                     raise ValueError('Codex 실행 실패')
                 raw = output.read_text()
                 self._check_events(result.stdout)
+                if probe and self.model == 'unknown':
+                    model = self._output_model(result.stdout, result.stderr)
+                    if model:
+                        self.model = self._detected_model = model
                 return raw
             except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
                 if probe:
@@ -237,6 +257,28 @@ class CodexAdapter:
                 if isinstance(exc, IsolationError):
                     raise
                 raise ValueError('Codex 실행 실패 또는 출력 누락') from None
+
+    @staticmethod
+    def _output_model(stdout, stderr):
+        # 응답 본문의 자기보고는 제외하고 이벤트 메타데이터만 확인한다.
+        def metadata(value):
+            if isinstance(value, dict):
+                model = value.get('model')
+                if valid_model(model):
+                    return model
+                for key in ('session', 'thread', 'turn', 'response', 'metadata'):
+                    found = metadata(value.get(key))
+                    if found:
+                        return found
+            return None
+
+        for line in stdout.splitlines():
+            if line.strip():
+                found = metadata(json.loads(line))
+                if found:
+                    return found
+        match = re.search(r'^\s*model:\s*(\S+)\s*$', stderr, re.MULTILINE)
+        return match.group(1) if match and valid_model(match.group(1)) else None
 
     @staticmethod
     def _check_events(stdout):
@@ -255,7 +297,10 @@ class CodexAdapter:
             raise ValueError('probe 이벤트 누락')
 
     def generate(self, prompt, schema):
+        identity = (self.model, self.cli_version)
         self.verify()
+        if identity[1] != 'unknown' and identity != (self.model, self.cli_version):
+            raise IsolationError('Codex 모델·버전이 분석 도중 변경되었습니다. 다시 분석하세요.')
         try:
             return self._execute(prompt, schema)
         finally:
