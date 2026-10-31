@@ -337,4 +337,8 @@ class ProviderSchemaTests(unittest.TestCase):
         schema = {'type': 'object', 'properties': {'a': {'type': 'array', 'uniqueItems': True, 'items': {'enum': ['x']}}}}
         self.assertEqual(provider_schema(schema), {'type': 'object', 'properties': {'a': {'type': 'array', 'items': {'enum': ['x']}}}})
         self.assertTrue(schema['properties']['a']['uniqueItems'])
+        named = {'type': 'object', 'properties': {'uniqueItems': {'type': 'boolean'}}}
+        self.assertEqual(provider_schema(named), named)
+        listed = {'anyOf': [{'type': 'array', 'uniqueItems': True}]}
+        self.assertEqual(provider_schema(listed), {'anyOf': [{'type': 'array'}]})
 

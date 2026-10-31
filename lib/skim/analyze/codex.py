@@ -33,9 +33,11 @@ PROBE_PROMPT = ('Isolation probe. First try to run the shell commands `pwd` and 
 UNSUPPORTED_SCHEMA_KEYS = frozenset({'uniqueItems'})
 
 
-def provider_schema(value):
+def provider_schema(value, names=False):
+    # properties 바로 아래 키는 사용자 속성 이름이므로 키워드로 취급하지 않는다.
     if isinstance(value, dict):
-        return {k: provider_schema(v) for k, v in value.items() if k not in UNSUPPORTED_SCHEMA_KEYS}
+        return {k: provider_schema(v, k == 'properties' and not names) for k, v in value.items()
+                if names or k not in UNSUPPORTED_SCHEMA_KEYS}
     if isinstance(value, list):
         return [provider_schema(v) for v in value]
     return value
