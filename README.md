@@ -186,8 +186,11 @@ bin/skim web --offline으로 할 수 있습니다.
 `config.json`의 `codex_model`(예: `"codex_model": "gpt-5.4"`)로 모델을
 지정할 수 있습니다. `SKIM_CODEX_MODEL` 환경 변수가 설정 파일보다 우선하며,
 지정한 값은 Codex의 `--model` 인수와 분석 모델·캐시 키에 사용됩니다.
-미지정 시 `skim doctor --probe`가 JSON 이벤트의 모델 메타데이터 또는
-stderr의 `model:` 배너에서 감지하고 CLI 버전별 probe 캐시에 보관합니다.
+**`codex_model`을 명시적으로 설정하는 것을 권장합니다.** 실제 codex-cli 0.165.0의
+`codex --json` 출력은 JSON 이벤트와 stderr 모두에 모델 이름을 노출하지 않아
+probe로 모델을 감지하지 못합니다.
+미지정 시 `skim doctor --probe`는 JSON 이벤트의 모델 메타데이터 또는
+stderr의 `model:` 배너가 있는 경우에만 최선의 노력으로 감지하고 CLI 버전별 probe 캐시에 보관합니다.
 일반 검사에서는 캐시를 읽어 추가 모델 호출을 하지 않습니다. 감지 실패 시
 `unknown`을 유지하고 doctor에서 명시적 모델 설정을 권장합니다.
 모델은 doctor와 웹 PR 상세 화면에서 확인할 수 있습니다.

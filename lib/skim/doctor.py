@@ -30,7 +30,6 @@ def run(config, runner=None, which=None, adapter=None, probe=False):
     model_ok = True
     try:
         model = config.doctor_codex_model()
-        report(True, 'model', model or 'probe에서 모델 감지')
     except (OSError, ValueError):
         model, model_ok = None, False
         report(False, 'model', 'config.json 객체·JSON·권한과 codex_model / SKIM_CODEX_MODEL을 수정하세요.')
@@ -61,12 +60,11 @@ def run(config, runner=None, which=None, adapter=None, probe=False):
                 'probe': 'skim doctor --probe로 격리를 재검증하세요. 도구 실행·지침·파일 생성 시 차단됩니다.',
             }
             report(False, label, 'Codex 분석 차단: ' + details[label])
-    print('Codex 모델: ' + adapter.model)
-    if adapter.model == 'unknown':
-        if not ready:
-            print('경고: 선행 오류를 수정하고 skim doctor --probe로 모델 감지를 재검증하세요.')
+    if model_ok:
+        if adapter.model != 'unknown':
+            report(True, 'model', adapter.model)
         else:
-            print('경고: Codex 모델을 감지하지 못했습니다. codex_model 설정 또는 SKIM_CODEX_MODEL을 지정하세요.')
+            print('경고: model — Codex 모델을 알 수 없습니다. codex_model 설정 또는 SKIM_CODEX_MODEL을 지정하세요.')
     # Config.load 이전의 상태도 보존하도록 CLI는 경로만 전달한다.
     roots = [config.config_dir, config.data_dir]
     if os.environ.get('SKIM_HOME'):

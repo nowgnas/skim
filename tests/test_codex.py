@@ -343,16 +343,36 @@ class CodexTests(unittest.TestCase):
         self.events = [{'type': 'thread.started', 'metadata': {'model': 'event-model'}}]
         self.adapter.probe()
         self.assertEqual(self.adapter.model, 'event-model')
-        self.stderr = ''
-        self.events = []
+        self.stderr = 'WARNING: proceeding, even though we could not update PATH alias\n'
+        self.events = [{'type': 'thread.started', 'thread_id': 'test-thread'}]
         self.adapter.probe()
         self.assertEqual(self.adapter.model, 'unknown')
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             run(Config(self.root / 'config', self.adapter.data_dir), self.runner,
                 lambda _: '/fake', self.adapter)
-        self.assertIn('Codex 모델: unknown', out.getvalue())
+        self.assertIn('경고: model —', out.getvalue())
         self.assertIn('codex_model 설정', out.getvalue())
+        self.assertIn('SKIM_CODEX_MODEL', out.getvalue())
+        self.assertNotIn('정상: model', out.getvalue())
+        self.assertNotIn('Codex 모델: unknown', out.getvalue())
+        self.assertEqual(sum('model —' in line for line in out.getvalue().splitlines()), 1)
+
+    def test_doctor_reports_one_known_model_after_checks(self):
+        for configured, probe in ((True, True), (True, False), (False, True), (False, False)):
+            with self.subTest(configured=configured, probe=probe):
+                config = Config(self.root / 'config', self.adapter.data_dir,
+                                codex_model='configured' if configured else None)
+                self.stderr = 'model: detected\n'
+                if not configured and not probe:
+                    self.adapter.probe()
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    self.assertEqual(run(config, self.runner, lambda _: '/fake', probe=probe), 0)
+                model = 'configured' if configured else 'detected'
+                self.assertIn(f'정상: model — {model}\n', out.getvalue())
+                self.assertEqual(sum('model —' in line for line in out.getvalue().splitlines()), 1)
+                self.assertNotIn('Codex 모델:', out.getvalue())
 
     def test_configured_model_and_environment_override(self):
         config = Config.load()
