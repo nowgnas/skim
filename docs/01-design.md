@@ -8,7 +8,7 @@
 
 ## 사용자 흐름
 
-1. `skim doctor`로 `gh`·분석 CLI의 PATH·인증·격리 기능을 확인하고 `skim repo add owner/repo`로 소유/담당 저장소를 등록한다. 소유 저장소는 후보로 제시하고 사용자가 선택한다. 담당 여부는 자동 추측하지 않고 명시적 목록으로 관리한다.
+1. `skim doctor`로 `gh`·분석 CLI의 PATH·인증·격리 기능을 확인하고 `skim repo add owner/repo`로 소유/담당 저장소를 등록한다. 조직 소유·관리 권한 저장소도 추적 대상에 포함하며, 소유·관리 저장소는 후보로 제시하고 사용자가 선택한다. 담당 여부는 자동 추측하지 않고 명시적 목록으로 관리한다.
 2. MVP는 Codex CLI를 사용한다. 코드의 모델 서비스 전송을 안내한 뒤 `skim analysis allow owner/repo` 또는 `--org owner`로 명시적으로 허용한다(저장소별 deny가 우선). 등록·리뷰 요청만으로 전송을 허용하지 않으며 별도 API 키는 받지 않는다.
 3. MVP는 `skim web` 프로세스 안의 스케줄러가 기본 5분 간격으로 수집한다. 수동 새로고침도 같은 작업 큐를 사용한다. launchd/systemd daemon 등록은 이후로 미룬다.
 4. `skim web`이 `127.0.0.1`의 로컬 대시보드를 열고 최신 저장 결과를 즉시 표시한다. 수집·분석 중에도 기존 결과를 볼 수 있다.
@@ -26,8 +26,8 @@
                                 └─ Codex CLI ── 모델 서비스
 ```
 
-- **수집:** 명시적 저장소의 열린 PR과 현재 사용자에게 온 리뷰 요청을 `gh`로 조회한다. 리뷰 요청은 등록 목록 밖의 저장소도 포함하며 `(repo, PR 번호)`로 중복을 제거한다. 목록 밖 저장소도 기본적으로 수집만 하며, org/repo 분석 opt-in 전에는 모델로 보내지 않는다. MVP는 개인 리뷰 요청만 수집한다.
-- **스냅샷:** base/head SHA, PR 설명, 파일 목록과 diff를 수집한다. 수집 전후 SHA가 달라지면 결과를 버리고 재시도한다. 닫힘·머지·리뷰 요청 해제도 주기적으로 조정한다.
+- **수집:** 조직 소유·관리 권한 저장소를 포함한 명시적 추적 저장소의 열린 PR과 현재 사용자에게 온 개인·팀 리뷰 요청을 기존 `gh` 로그인 권한으로 읽기 전용 조회한다. 리뷰 요청은 등록 목록 밖의 저장소도 포함하며 `(repo, PR 번호)`로 중복을 제거한다. 모든 저장소는 org/repo 분석 opt-in 전에는 모델로 보내지 않는다.
+- **스냅샷:** base/head SHA, PR 설명, 파일 목록과 diff를 수집한다. 수집 전후 SHA가 달라지면 결과를 버리고 재시도한다. 닫힘·머지·리뷰 요청 해제도 주기적으로 조정하며, merged 또는 closed 상태의 PR은 목록에서 제외한다.
 - **분석:** PR 전체 요약과 파일/hunk 분류를 생성한다. diff 크기에 따라 나누고 파일 경로·분석 단위 ID는 skim이 부여한다. 전송 전에 민감 정보 제외 규칙을 적용한다. 초과·누락 구간은 미분석으로 남기며 조용히 잘라내지 않는다.
 - **운영:** `skim web` 단일 실행 잠금, SQLite WAL, 트랜잭션으로 결과를 원자적으로 교체한다. 초기 동시 분석은 1개로 제한한다. 네트워크·CLI 실패는 지수 백오프하고 인증 실패는 사용자 조치를 표시한다.
 - **웹/워커 통신:** 상태 조회는 SQLite를 읽고, 인증·Origin·CSRF 검증을 통과한 수동 갱신만 정해진 `type`과 검증된 대상 ID로 `jobs`에 삽입한다. 브라우저는 SQL·명령·임의 경로를 전달할 수 없다. 워커는 트랜잭션으로 작업을 점유한다. 향후 daemon도 이 큐를 공유하며 별도 명령 실행 API는 두지 않는다.
@@ -40,8 +40,8 @@ SQLite를 기준 저장소로 사용한다. 설정·DB·캐시는 사용자 전�
 
 | 엔터티 | 주요 필드 |
 | --- | --- |
-| `repositories` | `id`, `owner/name`, `source`(owned/responsible), `enabled`, `analysis_policy`(org/repo allow/deny), `last_synced_at` |
-| `pull_requests` | `repo_id`, `number`, `url`, `title`, `author`, `state`, `draft`, `base_sha`, `head_sha`, `updated_at`, `last_seen_at` |
+| `repositories` | `id`, `owner/name`, `source`(owned/managed/responsible; 조직 소유 포함), `enabled`, `analysis_policy`(org/repo allow/deny), `last_synced_at` |
+| `pull_requests` | `repo_id`, `number`, `url`, `title`, `author`, `state`, `draft`, `head_branch`, `base_sha`, `head_sha`, `updated_at`, `last_seen_at` |
 | `pr_sources` | `pr_id`, `source`(repository/review_request); 여러 유입 경로 보존 |
 | `snapshots` | `id`, `pr_id`, `base_sha`, `head_sha`, `diff_hash`, `input_hash`, `diff_path`, `coverage`, `collected_at` |
 | `changes` | `id`, `snapshot_id`, `file_path`, `kind`(file/hunk/synthetic), `parent_id`, `old_range`, `new_range`, `binary`, `generated` |
@@ -50,6 +50,8 @@ SQLite를 기준 저장소로 사용한다. 설정·DB·캐시는 사용자 전�
 | `jobs` | `id`, `type`, `target_id`, `input_hash`, `status`, `attempts`, `next_run_at`, `last_error`; 대기/실행 중 `(type, target_id, input_hash)` unique |
 
 분석 캐시 키는 `repo + PR + base/head SHA + input_hash + provider/model + cli_version + prompt_version + schema_version`이다. `input_hash`는 전송할 제목·설명·정제 diff·테스트 목록·제외/분할 정책의 해시이며 스냅샷과 분석에 기록한다. 모델 식별자가 `unknown`이면 CLI 버전을 기록하고 영속 캐시는 재사용하지 않는다. `coverage`에는 전체/분석/제외/누락 단위 수와 사유를 보관한다. 기본 보존 기간은 30일이다.
+
+Sessio 연동은 sangwon 본인이 로컬에서 만든 PR에만 적용한다. 로컬 Sessio 인덱스에서 PR 브랜치 이름으로 세션을 찾으며, 없으면 아무것도 표시하지 않는다. 다른 사람의 PR에는 Sessio 링크를 표시하지 않는다.
 
 DB는 버전별 트랜잭션 마이그레이션과 사전 백업을 사용한다. 로그는 데이터 디렉터리의 `logs/`에 두고 5 MiB × 3개로 순환한다. `skim cache clear`로 캐시를, 프로세스 종료 후 `skim uninstall --purge`로 설정·DB·로그까지 삭제한다.
 
@@ -136,8 +138,8 @@ CLI 어댑터는 설치된 버전의 비대화형 실행 방식을 검증한 뒤
 
 ## 화면
 
-- **PR 목록:** 저장소, PR 제목, 의도 한 줄, 작성자, 리뷰 요청 여부, 최고 중요도, 위험 플래그, 최신 수집/분석 시각. 리뷰 요청·저장소·중요도·상태 필터를 제공한다.
-- **PR 상세:** 의도 → 위험 요약 → 규칙 후보·미분석·high 파일/hunk → 나머지 접힌 mid/low 순서. 각 변경에 근거·플래그·라인 범위와 GitHub 링크를 표시한다. 전체 diff 보기와 원래 파일 순서 전환을 제공한다.
+- **PR 목록:** 열린 PR만 표시하며 merged 또는 closed되면 목록에서 제외한다. 저장소, PR 제목, 의도 한 줄, 작성자, 리뷰 요청 여부, 최고 중요도, 위험 플래그, 최신 수집/분석 시각. 리뷰 요청·저장소·중요도·상태 필터를 제공한다.
+- **PR 상세:** 의도 → 위험 요약 → 규칙 후보·미분석·high 파일/hunk → 나머지 접힌 mid/low 순서. 각 변경에 근거·플래그·라인 범위와 GitHub 링크를 표시한다. sangwon 본인이 로컬에서 만든 PR은 로컬 Sessio 인덱스에 브랜치 이름으로 일치하는 세션이 있을 때만 Sessio 링크를 표시한다. 세션이 없거나 다른 사람의 PR이면 아무것도 표시하지 않는다. 전체 diff 보기와 원래 파일 순서 전환을 제공한다.
 - **상태 표시:** 수집 실패, 분석 대기/실패, 이전 SHA 결과, 부분 분석을 명확히 구분한다. 분석이 없으면 원본 diff는 계속 볼 수 있다.
 - **설정:** 담당 저장소, CLI 선택, 수집 간격, 보존 기간. MVP에서는 로컬 설정 파일을 기준으로 하고 화면은 설정값과 연결 상태만 보여준다.
 
@@ -149,7 +151,7 @@ CLI 어댑터는 설치된 버전의 비대화형 실행 방식을 검증한 뒤
 - **토큰:** `skim web` 실행 시 암호학적 난수 256비트 진입 토큰을 발급한다. 토큰은 1회용·TTL 60초이며 상수 시간 비교 후 세션 수립과 동시에 폐기한다. 탭을 닫은 뒤에는 `skim web`을 다시 실행해 기존 서버에서 새 URL을 발급받는다(0700 데이터 디렉터리 안의 0600 Unix socket으로 URL 발급만 요청). 브라우저 진입 URL의 fragment로 전달하고 즉시 URL에서 제거한 뒤 토큰 인증으로 세션을 만든다. 토큰은 query·접근 로그·localStorage에 남기지 않는다. 모든 HTML/API/diff는 인증을 요구하며 초기 진입 셸에는 데이터가 없다.
 - **세션·요청 검증:** 실행별 난수 접미사가 붙은 host-only `HttpOnly; SameSite=Strict` 세션 쿠키를 사용하고 재시작 시 만료한다. 로컬 HTTP 환경에서 `Secure` 쿠키 동작을 검증한다. 변경 요청에는 정확한 Origin 검사와 CSRF 토큰을 요구한다. 쿠키와 SameSite는 포트를 구분하지 않아 다른 포트의 로컬 서비스에도 쿠키가 전송될 수 있다. SameSite만으로 포트 간 요청을 막을 수 없으며 정확한 Origin 검사가 이 경계의 필수 방어선이다. CORS를 열지 않고 GET으로 상태를 변경하지 않는다.
 - **엄격한 CSP:** 기본값은 `default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'`. 인라인 스크립트·스타일과 외부 리소스를 사용하지 않는다. `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`, 민감 응답의 `Cache-Control: no-store`도 설정한다.
-- **비신뢰 콘텐츠:** PR 본문·diff·LLM 출력은 HTML로 실행하지 않고 이스케이프한다. 링크는 `https://github.com`의 검증된 저장소/PR 경로만(MVP는 GHE 미지원) 생성한다. 경로를 로컬 파일 읽기나 셸 명령으로 직접 연결하지 않는다. 프로세스 인수는 셸 문자열 조합 없이 전달한다.
+- **비신뢰 콘텐츠:** PR 본문·diff·LLM 출력은 HTML로 실행하지 않고 이스케이프한다. 링크는 `https://github.com`의 검증된 저장소/PR 경로(MVP는 GHE 미지원)와 로컬 Sessio 인덱스에서 확인한 세션 링크만 생성한다. 경로를 로컬 파일 읽기나 셸 명령으로 직접 연결하지 않는다. 프로세스 인수는 셸 문자열 조합 없이 전달한다.
 - **LLM 격리:** 저장소 밖의 빈 작업 디렉터리에서 실행하고, 저장소 지침뿐 아니라 사용자 전역 설정·메모리·플러그인·hooks(셸 실행)·MCP 설정 로딩과 도구 실행까지 비활성화한 분석 전용 모드를 사용한다. 선택한 CLI에서 이 제약을 강제할 수 없다면 분석을 시작하지 않고 이유를 표시한다. 입력 내 프롬프트 인젝션은 지시만으로 방어하지 않는다.
 - **민감 정보 제외(MVP):** `.env`, `.env.*`, `*.pem`, `*.key`, 자격 증명 파일을 기본 전송 제외하고 private key·알려진 토큰 접두사·키 할당 패턴을 제목·본문·주변 문맥·diff 전체에 검사해 해당 구간을 가린다. 합성과 재시도에도 정제 입력만 사용한다. 탐지는 완전하지 않음을 명시하고 화면에는 제외 위치·사유·미분석 상태를 표시하며 원문 비밀값을 배지·로그에 복사하지 않는다.
 - **데이터 경로:** GitHub와는 `gh`로만 통신하고, 분석용 코드는 선택한 LLM CLI에만 전달한다. 해당 CLI의 모델 서비스 전송·보존 정책이 적용된다. skim은 코드 전송용 별도 API·텔레메트리를 두지 않는다. 로그에는 코드·토큰·전체 CLI 출력을 남기지 않는다.
@@ -159,13 +161,13 @@ CLI 어댑터는 설치된 버전의 비대화형 실행 방식을 검증한 뒤
 
 | MVP | 이후 |
 | --- | --- |
-| 명시적 저장소 목록 + 개인 리뷰 요청 수집 | 팀 리뷰 요청, 담당 저장소 추천 |
+| 조직 소유·관리 권한 저장소를 포함한 명시적 저장소 목록 + 기존 `gh` 로그인 권한으로 개인·팀 리뷰 요청 읽기 전용 수집 | 담당 저장소 추천 |
 | `skim web` 내장 스케줄러, 주기 수집·수동 갱신 | launchd/systemd 사용자 daemon, 서비스 환경 PATH·키체인·인증 검증 |
 | CLI 어댑터 공통 계약, Codex CLI로 먼저 검증 | 다른 CLI 어댑터 추가 및 품질 비교 |
 | PR 의도, 파일/hunk 중요도·이유, 위험 플래그·독립 규칙 후보·민감 정보 제외 | 사용자 피드백과 저장소별 기준 |
 | SQLite, SHA 기반 캐시, 재시도·부분 분석 표시 | 더 정교한 증분 분석·대규모 PR 처리 |
 | 인증된 로컬 웹 대시보드 | Mac 앱 래퍼: 같은 로컬 서버와 보안 경계 재사용 |
-| GitHub 원문 링크 | PR을 만든 Sessio 세션 링크: 명시적 세션 ID/메타데이터로 연결, 근거 없는 자동 추정 금지 |
+| GitHub 원문 링크 + sangwon 본인이 로컬에서 만든 PR의 Sessio 링크: 로컬 인덱스에서 브랜치 이름으로 조회, 없거나 다른 사람의 PR이면 표시 없음 | — |
 
 MVP 한도는 PR당 200파일·정제 전 diff 1 MiB·분석 단위 500개, 청크당 100단위·200 KiB, CLI 호출당 120초다. 메타데이터도 청크 바이트 한도에 포함한다. 상한 초과는 규칙 후보부터 결정적으로 배정하고 나머지를 사유와 함께 미분석으로 남긴다. 재시도는 호출당 1회이며 일일 예산 안에서만 수행한다. 첫 CLI는 Codex로 고정하고 실제 설치 버전의 격리·인증·스키마 계약을 `skim doctor`로 검증하지 못하면 분석을 차단한다.
 
@@ -173,6 +175,4 @@ MVP 완료 조건은 중복 없는 수집, 입력 변경 재분석, 누락/실�
 
 ## 열린 질문
 
-- 소유 저장소 후보에서 조직 소유·관리 권한을 어디까지 포함할 것인가? 팀 리뷰 요청은 어떤 권한으로 확인할 것인가?
-- 리뷰 완료 후 목록 유지 정책은 무엇인가?
-- Sessio 세션 ID를 PR 본문, 브랜치 메타데이터, 로컬 매핑 중 어디에 보관할 것인가?
+없음 (2026-10-31 결정)
