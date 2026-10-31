@@ -8,7 +8,7 @@ import subprocess
 from .analyze.codex import CodexAdapter, IsolationError
 
 
-def run(config, runner=None, which=None, adapter=None):
+def run(config, runner=None, which=None, adapter=None, probe=False):
     runner = runner or subprocess.run
     which = which or shutil.which
     failed = False
@@ -18,23 +18,38 @@ def run(config, runner=None, which=None, adapter=None):
         failed |= not ok
         print(f'{"정상" if ok else "실패"}: {name} — {detail}')
 
-    for name, args in (('gh', ['gh', 'auth', 'status', '--hostname', 'github.com']),
-                       ('codex', ['codex', '--version'])):
-        if not which(name):
-            report(False, name, 'PATH에서 실행 파일을 찾지 못했습니다.')
+    if not which('gh'):
+        report(False, 'gh', 'PATH에서 실행 파일을 찾지 못했습니다.')
+    else:
+        try:
+            result = runner(['gh', 'auth', 'status', '--hostname', 'github.com'],
+                            capture_output=True, text=True, timeout=15)
+            report(result.returncode == 0, 'gh', '인증 확인' if result.returncode == 0 else 'gh auth login으로 인증을 확인하세요.')
+        except (OSError, subprocess.TimeoutExpired):
+            report(False, 'gh', '실행 실패 또는 시간 초과')
+    adapter = adapter or CodexAdapter(runner=runner, data_dir=config.data_dir)
+    ready = True
+    for label, method in (('codex-home', adapter.check_home), ('version', adapter.check_version),
+                          ('flags', adapter.check_flags),
+                          ('probe', adapter.probe if probe else adapter.check_probe)):
+        if label != 'codex-home' and (not ready or not which('codex')):
+            report(False, label, 'Codex 분석 차단: 선행 검사 실패 또는 CLI 없음')
+            ready = False
             continue
         try:
-            result = runner(args, capture_output=True, text=True, timeout=15)
-            report(result.returncode == 0, name,
-                   ('인증 확인' if name == 'gh' else '설치 확인') if result.returncode == 0
-                   else ('gh auth login으로 인증을 확인하세요.' if name == 'gh' else '실행에 실패했습니다.'))
-        except (OSError, subprocess.TimeoutExpired):
-            report(False, name, '실행 실패 또는 시간 초과')
-    try:
-        (adapter or CodexAdapter()).verify()
-        report(True, '분석 격리', '어댑터의 격리 계약 확인')
-    except (IsolationError, OSError, ValueError):
-        report(False, '분석 격리', '전역 설정·메모리·플러그인·hooks·MCP 및 도구 금지 계약 미검증. 실제 분석은 차단됩니다.')
+            method()
+            report(True, label, '격리 검사 통과')
+            if label == 'flags' and getattr(adapter, 'unknown_enabled', []):
+                print('경고: 차단 목록 밖의 활성 Codex 기능: ' + ', '.join(adapter.unknown_enabled))
+        except (IsolationError, OSError, ValueError, subprocess.TimeoutExpired):
+            ready = False
+            details = {
+                'codex-home': '초기화 때와 같은 CODEX_HOME 환경인지 확인하세요. 본인 소유 디렉터리는 skim codex-home init --reset으로 복구하세요. 링크·일반 파일·타인 소유 경로는 직접 확인해야 합니다.',
+                'version': 'Codex 안정 버전 0.165.0 이상과 버전 출력 형식을 확인하세요.',
+                'flags': 'exec --help의 필수 격리 플래그와 features list 형식을 확인하세요.',
+                'probe': 'skim doctor --probe로 격리를 재검증하세요. 도구 실행·지침·파일 생성 시 차단됩니다.',
+            }
+            report(False, label, 'Codex 분석 차단: ' + details[label])
     # Config.load 이전의 상태도 보존하도록 CLI는 경로만 전달한다.
     roots = [config.config_dir, config.data_dir]
     if os.environ.get('SKIM_HOME'):
@@ -51,6 +66,12 @@ def run(config, runner=None, which=None, adapter=None):
             except FileNotFoundError:
                 # 실행 중 소켓·WAL 등이 삭제되면 해당 항목만 건너뛴다.
                 continue
+            if path == config.data_dir / 'codex-home/auth.json':
+                try:
+                    adapter.check_home()
+                    continue
+                except (IsolationError, OSError, ValueError):
+                    pass
             expected = 0o700 if stat.S_ISDIR(info.st_mode) else 0o600
             if (stat.S_ISLNK(info.st_mode) or info.st_uid != os.getuid()
                     or stat.S_IMODE(info.st_mode) != expected):

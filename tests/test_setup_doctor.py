@@ -32,9 +32,9 @@ class SetupDoctorTests(unittest.TestCase):
         self.assertNotIn('TOKEN', out.getvalue())
         self.assertIn('차단', out.getvalue())
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(run(config, runner, lambda n: '/fake', Mock()), 0)
+            self.assertEqual(run(config, runner, lambda n: '/fake', Mock(unknown_enabled=[])), 0)
             self.home.chmod(0o755)
-            self.assertEqual(run(config, runner, lambda n: '/fake', Mock()), 1)
+            self.assertEqual(run(config, runner, lambda n: '/fake', Mock(unknown_enabled=[])), 1)
             self.assertEqual(self.home.stat().st_mode & 0o777, 0o755)
             runner.reset_mock()
             self.assertEqual(run(config, runner, lambda n: None), 1)
@@ -62,7 +62,7 @@ class SetupDoctorTests(unittest.TestCase):
         self.home.chmod(0o755)
         with patch.dict(os.environ, SKIM_HOME=str(self.home)), contextlib.redirect_stdout(io.StringIO()):
             runner = Mock(return_value=subprocess.CompletedProcess([], 0))
-            self.assertEqual(run(config, runner, lambda n: '/fake', Mock()), 1)
+            self.assertEqual(run(config, runner, lambda n: '/fake', Mock(unknown_enabled=[])), 1)
         self.assertEqual(self.home.stat().st_mode & 0o777, 0o755)
 
     def test_doctor_skips_disappearing_files(self):
@@ -77,7 +77,7 @@ class SetupDoctorTests(unittest.TestCase):
         with patch.object(Path, 'rglob', return_value=iter([missing])), patch.object(Path, 'lstat', lstat), contextlib.redirect_stdout(io.StringIO()):
             runner = Mock(return_value=subprocess.CompletedProcess([], 0))
             self.assertEqual(run(Config(self.home, self.home / 'absent'), runner,
-                                 lambda n: '/fake', Mock()), 0)
+                                 lambda n: '/fake', Mock(unknown_enabled=[])), 0)
 
     def test_doctor_timeout_and_auth_failure(self):
         config = Config(self.home, self.home / 'absent')

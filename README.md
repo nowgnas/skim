@@ -58,13 +58,42 @@ SHA를 수집 전후 확인하고 설명·파일 목록·diff 해시를 스냅�
 규칙 후보이며 기존 테스트 커버리지를 검사했다는 뜻이 아닙니다.
 민감 정보 탐지는 완전하지 않습니다.
 
-**현재 실제 Codex 분석은 차단됩니다.** 설치 CLI의 빈 작업 디렉터리·read-only만으로는
-전역 설정·메모리·플러그인·hooks·MCP 로딩 및 모든 도구 실행 금지까지 보장할 수
-없습니다. 검증된 버전별 격리 계약이 아직 없어 `CodexAdapter.verify()`가 실패하고
-`blocked` 상태와 이유를 기록합니다. 도움말 플래그 존재나 프롬프트만으로 우회하지
-않으며, 사용자 설정으로 이 검사를 해제하는 옵션도 없습니다. 어댑터의 실행 경로는
-검증 성공 후 빈 임시 디렉터리에서 `codex exec`를 호출하도록 분리되어 있습니다.
-`doctor`는 인증·설치·격리·권한을 점검하며 실패 시 종료 코드 1을 반환합니다.
+실제 Codex 분석은 다음 격리 검사를 모두 통과한 뒤 실행합니다.
+
+```bash
+skim codex-home init
+skim doctor --probe
+skim analysis allow owner/repo
+skim analyze
+```
+
+`codex-home init`은 `<data_dir>/codex-home`(0700)에 기존
+`$CODEX_HOME/auth.json` 또는 `~/.codex/auth.json`의 심볼릭 링크만 만듭니다.
+자격 증명 내용은 읽거나 복사하지 않습니다. 이 명령은 명시적으로 실행해야 하며
+다른 항목(config.toml·AGENTS.md·skills·plugins·memories·hooks 등)이 있으면
+분석을 거부합니다. 원본 인증 경로를 지정했다면 이후 실행에도 같은 CODEX_HOME을 유지하세요.
+
+Codex CLI는 안정 버전 0.165.0 이상이어야 합니다. 버전·필수 격리 플래그와
+`features list`를 확인하고, 목록에 존재하는 위험 기능만 명시적으로 `--disable`합니다.
+버전·기능 검사는 인증 없는 임시 CODEX_HOME에서 실행합니다. 분석·probe는 전용 홈의
+인증 링크만 새 임시 CODEX_HOME에 연결합니다. 빈 임시 cwd와 별도 임시 HOME,
+임시 CODEX_HOME 및 PATH 세 변수만 전달하며
+`--skip-git-repo-check --ephemeral --ignore-user-config --ignore-rules --sandbox read-only`
+및 JSON 스키마·최종 메시지 출력 옵션을 사용합니다.
+
+`doctor --probe`는 **실제 모델을 호출**하지만 저장소 코드는 보내지 않습니다.
+파일 생성 시도와 전역 지침 노출을 검사하며, 도구 실행 보고·지침 노출·임시 디렉터리
+파일 생성·비정상 종료·잘못된 JSON이면 실패합니다. 성공 기록은 데이터 디렉터리에
+CLI 버전·모델·비활성 기능 목록별로 저장하며 7일 동안만 유효합니다. 일반 `doctor`와
+분석은 probe를 자동 호출하지 않고 유효한 성공 기록을 요구합니다.
+`doctor`는 codex-home·version·flags·probe 및 gh 인증·로컬 권한을 각각 표시하고,
+실패 시 종료 코드 1을 반환합니다. 런타임 로그·캐시와 인증 rename 결과는 호출 후
+임시 홈과 함께 삭제합니다. 원본 인증 파일을 링크를 통해 갱신하는 동작은 Codex에 맡깁니다.
+실제 0.165.0의 인증 갱신 방식은 검증하지 않았으며, rename 방식의 갱신은 원본에
+반영되지 않아 재인증이 필요할 수 있습니다. 영구 전용 홈이 오염되면
+`skim codex-home init --reset`으로 내부 항목을 삭제하고 링크를 재생성하세요.
+원본 링크 대상은 삭제하지 않으며 기존 probe 기록은 폐기합니다. probe는 관찰한 동작의 검사이며 모든 도구·파일 읽기에 대한 증명은 아닙니다.
+모델 이름을 알 수 없으면 `unknown`으로 기록하고 영속 분석 캐시는 재사용하지 않습니다.
 
 가짜 어댑터를 주입하는 테스트에서 청크·합성 파이프라인 전체를 검증합니다.
 청크는 100단위·200 KiB(프롬프트와 메타데이터 포함), PR은 200파일·500단위·
@@ -111,15 +140,16 @@ Python 3.11 이상과 gh·Codex CLI를 미리 설치합니다. Python 외부 패
 ./setup.sh
 export PATH="$HOME/.local/bin:$PATH"
 gh auth login
-skim doctor
+skim codex-home init
+skim doctor --probe
 skim repo add owner/repo
 skim collect
 skim web
 ```
 
 Mac에서는 위 순서로 실행하면 브라우저가 열립니다. 터미널에서 Ctrl-C로 종료합니다.
-현재 Codex 격리 계약 미검증으로 doctor는 실패하고 실제 분석은 차단됩니다.
-수집과 로컬 웹은 사용할 수 있습니다. 등록만으로 코드 전송을 허용하지 않습니다.
+격리 검사에 실패하거나 probe 기록이 만료되면 실제 분석은 차단됩니다.
+수집과 로컬 웹은 계속 사용할 수 있습니다. 등록만으로 코드 전송을 허용하지 않습니다.
 
 로그인 시 자동 시작 등록은 MVP 범위 밖입니다. 터미널에서 `skim web`을 실행하세요.
 CLI 제거는 `rm ~/.local/bin/skim`으로 합니다.
@@ -148,3 +178,5 @@ Host·Origin·CSRF 검증, CSP, 콘텐츠 이스케이프를 적용합니다.
 외부 통신 없는 화면 확인은 별도 SKIM_HOME에서 scripts/demo_seed.py 실행 후
 bin/skim web --offline으로 할 수 있습니다.
 테스트: python3 -m unittest discover -s tests (실제 LLM·외부 네트워크 사용 없음).
+
+인증 refresh token이 교체되면 임시 홈의 갱신 결과가 삭제되어 원본 Codex CLI 로그인도 무효화될 수 있습니다. 이 경우 원본 CLI에서 다시 로그인하세요.

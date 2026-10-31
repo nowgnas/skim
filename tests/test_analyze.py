@@ -64,6 +64,25 @@ class AnalysisTests(unittest.TestCase):
         self.fake = Fake()
         self.analyzer = Analyzer(self.conn, self.config, self.fake, today=lambda: '2026-10-31')
 
+    def test_first_analysis_records_verified_version_including_failure(self):
+        self.fake.cli_version = 'unknown'
+
+        def verify():
+            self.fake.cli_version = 'verified-1'
+
+        self.fake.verify = verify
+        self.analyzer.run()
+        self.assertEqual(self.conn.execute('SELECT cli_version FROM analyses').fetchone()[0], 'verified-1')
+        self.fake.cli_version = 'unknown'
+
+        def fail():
+            self.fake.cli_version = 'verified-2'
+            raise IsolationError('probe 필요')
+
+        self.fake.verify = fail
+        self.analyzer.run()
+        self.assertEqual(self.conn.execute('SELECT cli_version FROM analyses ORDER BY id DESC').fetchone()[0], 'verified-2')
+
     def snapshot(self, diff, files=()):
         path = self.config.data_dir / 'cache' / 'diff'
         path.write_text(diff)
