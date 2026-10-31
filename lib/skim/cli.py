@@ -56,7 +56,8 @@ def parser():
 
 
 def main(argv=None):
-    args = parser().parse_args(argv)
+    argv = list(sys.argv[1:] if argv is None else argv)
+    args = parser().parse_args(argv or ['web'])
     try:
         if args.command == 'doctor':
             from .doctor import run, paths
@@ -103,23 +104,12 @@ def main(argv=None):
                                 print(f"{row['owner']}/{row['name']}\t{row['source']}\t{row['enabled']}\t"
                                       f"{row['analysis_policy']}\t{int(analysis_allowed(conn, row['id']))}")
                         elif args.action == 'add':
-                            conn.execute('INSERT INTO repositories(owner,name,source,tracked) VALUES(?,?,?,1) '
-                                         'ON CONFLICT(owner,name) DO UPDATE SET source=excluded.source,enabled=1,tracked=1',
-                                         (*args.repository, args.source))
+                            from .repos import add_repository
+                            add_repository(conn, args.repository, args.source)
                             print('저장소를 등록했습니다. 분석은 별도 허용이 필요합니다.')
                         else:
-                            result = conn.execute('UPDATE repositories SET tracked=0 WHERE owner=? AND name=? AND tracked=1',
-                                                  args.repository)
-                            if not result.rowcount:
-                                raise ValueError('등록되지 않은 저장소입니다')
-                            # 리뷰 요청 출처와 그 스냅샷·분석은 추적 해제 후에도 보존한다.
-                            conn.execute("DELETE FROM pr_sources WHERE source='repository' AND pr_id IN "
-                                         '(SELECT p.id FROM pull_requests p JOIN repositories r ON r.id=p.repo_id '
-                                         'WHERE r.owner=? AND r.name=?)', args.repository)
-                            conn.execute('DELETE FROM pull_requests WHERE repo_id IN '
-                                         '(SELECT id FROM repositories WHERE owner=? AND name=?) '
-                                         'AND NOT EXISTS (SELECT 1 FROM pr_sources WHERE pr_id=pull_requests.id)',
-                                         args.repository)
+                            from .repos import remove_repository
+                            remove_repository(conn, args.repository)
                             print('저장소 추적을 해제했습니다.')
                     elif args.org is not None:
                         if not re.fullmatch(OWNER_PATTERN, args.org):

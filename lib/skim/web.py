@@ -18,6 +18,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from .db import connect
+from .web_settings import POST_PATHS, RepoLookup, render, mutate
 from .collect import Collector, CollectionScheduler
 from .analyze.units import parse_diff
 from .sessio import session_link
@@ -41,7 +42,7 @@ def page(title, content):
             '<meta name="viewport" content="width=device-width,initial-scale=1">'
             f'<title>{esc(title)} · skim</title><link rel="stylesheet" href="/static/app.css">'
             '<header><a class="brand" href="/">skim</a><span>PR 검토 대시보드</span>'
-            '<a href="/settings">설정 · 상태</a></header><main>' + content + '</main></html>')
+            '<a href="/repos">저장소</a><a href="/settings">분석 허용 · 모델 설정</a></header><main>' + content + '</main></html>')
 
 
 class Auth:
@@ -50,6 +51,7 @@ class Auth:
         self.lock = threading.Lock()
         self.tokens = {}
         self.sessions = {}
+        self.posts = {}
         self.cookie = 'skim_' + secrets.token_hex(8)
 
     def issue(self):
@@ -80,6 +82,16 @@ class Auth:
             return None
         with self.lock:
             return next((csrf for key, csrf in self.sessions.items() if constant_equal(key, value)), None)
+
+
+    def allow_post(self, csrf):
+        with self.lock:
+            now = self.clock()
+            recent = [t for t in self.posts.get(csrf, []) if now - t < 60]
+            if len(recent) >= 30:
+                return False
+            self.posts[csrf] = recent + [now]
+            return True
 
 
 def read_diff(config, snapshot):
@@ -123,10 +135,6 @@ def load_prs(conn, config):
     return sorted(rows, key=lambda p: (-bool(p['flags']), -p['unanalysed'], -RANK.get(p['importance'], 0), -p['id']))
 
 
-def refresh_form(csrf):
-    return f'<form method="post" action="/refresh"><input type="hidden" name="csrf" value="{esc(csrf)}"><button>수동 새로고침</button></form>'
-
-
 def badges(pr):
     labels = []
     if pr['rule_flags']:
@@ -145,7 +153,7 @@ def listing(prs, query, csrf):
               ('importance', '중요도', ['high', 'mid', 'low', 'unanalyzed']),
               ('status', '상태', ['completed', 'partial', 'failed', 'blocked', 'deferred', 'unanalyzed', 'stale']),
               ('review', '리뷰 요청', ['1'])]
-    content = '<div class="heading"><h1>먼저 볼 변경</h1>' + refresh_form(csrf) + '</div><form class="filters" method="get">'
+    content = '<div class="heading"><h1>먼저 볼 변경</h1></div><form class="filters" method="get">' + f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
     for name, label, values in fields:
         content += f'<label>{label}<select name="{name}"><option value="">전체</option>'
         for value in values:
@@ -163,7 +171,7 @@ def listing(prs, query, csrf):
                     f'<h2><a href="/pr/{pr["id"]}">{esc(pr["title"])}</a></h2>'
                     f'<p>{esc(a["intent"] if a and a["intent"] else "의도 미분석")}</p><p>{badges(pr)}</p>'
                     f'<div class="muted">{esc(pr["status"])} · 수집 {esc(s["collected_at"] if s else "대기")} · 분석 {esc(a["created_at"] if a else "대기")}</div></article>')
-    return content + ('<p class="muted">열린 PR이 없습니다.</p>' if not prs else '')
+    return content + ('<p class="muted">열린 PR이 없습니다. <a href="/repos">저장소 연결</a>과 <a href="/settings">설정</a>을 확인하세요. 상태 점검: skim doctor</p>' if not prs else '')
 
 
 def github(pr):
@@ -256,6 +264,8 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     def send_error(self, code, message=None, explain=None):
+        if code == 501:
+            code = 405
         if hasattr(self, 'headers') and self.headers.get_all('Host') != [self.server.authority]:
             code = 403
         self.reply(code, '요청을 처리할 수 없습니다')
@@ -274,14 +284,11 @@ class Handler(BaseHTTPRequestHandler):
         csrf = self.server.auth.csrf(self.headers.get('Cookie'))
         if not csrf:
             return self.reply(401, page('인증 필요', '<p>skim web으로 새 진입 URL을 발급받으세요.</p>'))
+        if url.path in POST_PATHS or url.path in ('/refresh', '/session'):
+            return self.reply(405, 'POST만 허용합니다', extra=[('Allow', 'POST')])
         with closing(connect(self.server.config)) as conn:
-            if url.path == '/settings':
-                jobs = conn.execute('SELECT type,status,last_error FROM jobs ORDER BY id DESC LIMIT 20').fetchall()
-                body = '<h1>설정 · 상태</h1><p>수집 간격 ' + str(self.server.config.poll_interval_seconds) + '초 · 보존 ' + str(self.server.config.retention_days) + '일</p>'
-                body += '<p>분석 CLI: Codex · 전송은 명시적 허용 필요 · 격리 계약 미검증 시 차단</p>'
-                for row in conn.execute('SELECT owner,name,tracked,analysis_policy FROM repositories ORDER BY owner,name'):
-                    body += '<article>' + esc(dict(row)) + '</article>'
-                body += '<h2>작업 큐</h2>' + ''.join('<article>' + esc(dict(row)) + '</article>' for row in jobs)
+            if url.path in ('/settings', '/repos'):
+                body = render(self.server, conn, csrf, url.path)
             else:
                 prs = load_prs(conn, self.server.config)
                 if url.path == '/':
@@ -303,7 +310,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.headers.get_content_type() != 'application/x-www-form-urlencoded':
             return self.reply(415, '폼 요청만 허용합니다')
         try:
-            data = parse_qs(self.rfile.read(int(lengths[0])).decode('utf-8'), strict_parsing=True)
+            data = parse_qs(self.rfile.read(int(lengths[0])).decode('utf-8'), strict_parsing=True, keep_blank_values=True)
         except (ValueError, UnicodeError):
             return self.reply(400, '잘못된 폼')
         if self.path == '/session':
@@ -315,14 +322,28 @@ class Handler(BaseHTTPRequestHandler):
             # HTTP 루프백에서 브라우저별 Secure 처리 차이를 피한다. 정확한 Origin 검사가 포트 경계를 지킨다.
             return self.reply(303, extra=[('Location', '/'), ('Set-Cookie', f'{self.server.auth.cookie}={session}; Path=/; HttpOnly; SameSite=Strict')])
         csrf = self.server.auth.csrf(self.headers.get('Cookie'))
-        submitted = data.get('csrf', [])
-        if not csrf or len(submitted) != 1 or not constant_equal(csrf, submitted[0]):
+        headers = self.headers.get_all('X-CSRF-Token') or []
+        submitted = data.pop('csrf', [])
+        if (not csrf or len(headers) > 1 or len(submitted) > 1
+                or not (headers or submitted)
+                or any(not constant_equal(csrf, value) for value in headers + submitted)):
             return self.reply(403, 'CSRF 거부')
-        if self.path != '/refresh' or set(data) != {'csrf'}:
-            return self.reply(400, '허용되지 않은 작업')
-        with closing(connect(self.server.config)) as conn:
-            CollectionScheduler(conn, self.server.config.poll_interval_seconds).request()
-        self.reply(303, extra=[('Location', '/settings')])
+        if self.path not in POST_PATHS:
+            return self.reply(405, '허용되지 않은 작업')
+        if not self.server.auth.allow_post(csrf):
+            return self.reply(429, '요청이 많습니다. 60초 후 다시 시도하세요', extra=[('Retry-After', '60')])
+        try:
+            location = mutate(self.server, self.path, data)
+        except (OSError, ValueError, sqlite3.Error):
+            return self.reply(400, '입력과 설정을 확인하세요. 허용하려면 모델 서비스 전송 확인 체크가 필요합니다.')
+        self.reply(303, extra=[('Location', location)])
+
+    def do_PUT(self):
+        if self.check(mutation=True):
+            self.reply(405, 'POST만 허용합니다', extra=[('Allow', 'GET, POST')])
+
+    do_DELETE = do_PATCH = do_OPTIONS = do_TRACE = do_PUT
+
 
 
 class Server(ThreadingHTTPServer):
@@ -333,6 +354,7 @@ class Server(ThreadingHTTPServer):
         super().__init__(('127.0.0.1', port), Handler)
         self.authority = f'127.0.0.1:{self.server_port}'
         self.origin = 'http://' + self.authority
+        self.repo_lookup = RepoLookup(config)
 
     def entry_url(self):
         return self.origin + '/entry#' + self.auth.issue()
@@ -347,15 +369,28 @@ def worker(config, stop):
         while not stop.is_set():
             try:
                 if scheduler.tick(collector):
-                    Analyzer(conn, config).run()
+                    from dataclasses import replace
+                    settings = json.loads((config.config_dir / 'config.json').read_text())
+                    from .config import Config
+                    Analyzer(conn, replace(config, codex_model=Config.parse_codex_model(settings))).run()
             except (OSError, ValueError, sqlite3.Error):
                 conn.rollback()
             stop.wait(1)
 
 
+def open_entry(url):
+    """브라우저 실행에 실패해도 출력한 진입 URL로 접속할 수 있다."""
+    import webbrowser
+    try:
+        opened = webbrowser.open(url)
+    except (OSError, webbrowser.Error):
+        opened = False
+    if not opened:
+        print('브라우저를 열지 못했습니다. 위 URL을 브라우저에서 여세요.', flush=True)
+
+
 def serve(config, port=0, open_browser=True, offline=False):
     """단일 서버 잠금과 0600 Unix 소켓으로 기존 서버의 새 URL을 발급한다."""
-    import webbrowser
     path = config.data_dir / 'web.sock'
     fd = os.open(config.data_dir / 'web.lock', os.O_CREAT | os.O_RDWR, 0o600)
     try:
@@ -368,7 +403,7 @@ def serve(config, port=0, open_browser=True, offline=False):
                 url = client.recv(4096).decode()
             print(url, flush=True)
             if open_browser:
-                webbrowser.open(url)
+                open_entry(url)
             return 0
         with closing(connect(config)):
             pass
@@ -407,13 +442,14 @@ def serve(config, port=0, open_browser=True, offline=False):
             url = server.entry_url()
             print(url, flush=True)
             if open_browser:
-                webbrowser.open(url)
+                open_entry(url)
             try:
                 server.serve_forever(poll_interval=0.5)
             except KeyboardInterrupt:
                 pass
             finally:
                 stop.set()
+                server.repo_lookup.close()
                 for thread in threads:
                     thread.join(timeout=2)
                 path.unlink(missing_ok=True)
