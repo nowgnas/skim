@@ -83,7 +83,7 @@ class RiskCandidatesTests(unittest.TestCase):
         for path, flag in (
             ('src/billing.py', 'payments'), ('payment.py', 'payments'),
             ('billingService.ts', 'payments'), ('config.py', 'config'),
-            ('config_prod.py', 'config'), ('settings/production.py', 'config'),
+            ('settings/production.py', 'config'),
             ('nginx.conf', 'config'), ('compose.yaml', 'config'),
             ('src/auth_service.py', 'auth'), ('oauth_client.py', 'auth'),
             ('src/authService.py', 'auth'), ('schema.prisma', 'db_schema_migration')):
@@ -106,7 +106,6 @@ class RiskCandidatesTests(unittest.TestCase):
             self.assertNotIn('auth', candidates('app.py', '+' + line, []))
 
     def test_changed_literal_assignments(self):
-        # 리터럴 후보 판정은 보수적인 전송 가림과 구분한다.
         for line in ('export API_TOKEN=abcd1234', 'DB_PASSWORD=hunter2',
                      'password = "fixture"', 'token = "fixture"'):
             for sign in ('+', '-'):
@@ -140,14 +139,44 @@ class RiskCandidatesTests(unittest.TestCase):
 """
         self.assertNotIn('secrets', candidates('app.py', text, []))
 
-    def test_assignment_expressions_are_not_secrets(self):
-        for line in ('max_tokens=100', 'csrf_token = generate_token()',
-                     'csrf_token = "fixture"', 'token = get_token()',
-                     'password = user.password', 'Authorization: Bearer ${TOKEN}',
-                     'headers["Authorization"] = token'):
+    def test_sanitized_changed_lines_are_secrets(self):
+        for path, line in (
+            ('deploy/secret.yaml', '  password: hunter2'),
+            ('app.py', 'DB_PASSWORD=changeme'),
+            ('app.py', 'SECRET_KEY=Pa$$w0rd!'),
+            ('app.py', 'Authorization: Bearer eyJabc.def.ghi'),
+            ('app.py', 'max_tokens=100'),
+            ('app.py', 'csrf_token = generate_token()'),
+            ('app.py', 'csrf_token = "fixture"'),
+            ('app.py', 'token = get_token()'),
+            ('app.py', 'password = user.password'),
+            ('app.py', 'Authorization: Bearer ${TOKEN}')):
             for sign in ('+', '-'):
-                with self.subTest(line=line, sign=sign):
-                    self.assertNotIn('secrets', candidates('app.py', sign + line, []))
+                with self.subTest(path=path, line=line, sign=sign):
+                    units, _ = parse_diff(f"""diff --git a/{path} b/{path}
+--- a/{path}
++++ b/{path}
+@@ -1 +1 @@
+{sign}{line}
+""")
+                    self.assertTrue(units[0]['redacted'])
+                    self.assertIn('secrets', units[0]['candidates'])
+                    self.assertIn('secrets', candidates(path, sign + line, []))
+
+    def test_config_stems_and_payment_directories(self):
+        for path in ('refund/handler.py', 'refunds/handler.py',
+                     'charge/handler.py', 'charges/handler.py'):
+            with self.subTest(path=path):
+                self.assertIn('payments', candidates(path, '', []))
+        for path in ('configs/app.json', 'configs.py', 'settings.py',
+                     'config/app.json', 'config.py', 'settings/app.json',
+                     'tsconfig.json', 'app/application.yml', 'application.properties'):
+            with self.subTest(path=path):
+                self.assertIn('config', candidates(path, '', []))
+        for path in ('configurable.ts', 'configurable/app.ts', 'config_prod.py',
+                     'settings_extra.py', 'configuration/app.json'):
+            with self.subTest(path=path):
+                self.assertNotIn('config', candidates(path, '', []))
 
     def test_review_path_boundaries_and_config(self):
         for path, flag in (

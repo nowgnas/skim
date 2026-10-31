@@ -51,23 +51,12 @@ def changed_secrets(text):
     if any(start < match.end() and match.start() < end
            for match in SECRET_VALUE.finditer(text) for start, end in spans):
         return True
-    # 전송 가림은 보수적으로 유지하고 후보는 리터럴 할당으로 좁힌다.
-    for match in SECRET_ASSIGNMENT.finditer(changed_lines(text)):
-        assignment = match.group()
-        key, value = re.split(r'[=:]', assignment, maxsplit=1)
-        if key.strip('"\' ').lower() == 'csrf_token':
-            continue
-        value = value.strip()
-        if re.fullmatch(r"(?:\"[^\"\n]+\"|'[^'\n]+')\s*[,;]?(?:\s*#.*)?", value):
-            return True
-        if re.fullmatch(r'[A-Za-z0-9_/-]+', value) and not value.lower() in ('true', 'false', 'none', 'null'):
-            if re.search(r'[0-9/-]', value) and not value.isdigit() and '=' in assignment:
-                return True
-    return False
+    changed = changed_lines(text)
+    return sanitize(changed) != changed
 
 
 def payment_candidate(parts, code):
-    return any(re.fullmatch(r'checkout|(?:payments?|billing|stripe)(?:_.+)?', part)
+    return any(re.fullmatch(r'checkout|(?:payments?|refunds?|charges?|billing|stripe)(?:_.+)?', part)
                for part in parts) or bool(re.search(
         r'\b(?:stripe|braintree|paypal|adyen|razorpay)(?:\.[a-z_]\w*)+\s*\(', code))
 
@@ -80,10 +69,11 @@ def schema_candidate(parts, path, name, code):
 
 
 def config_candidate(parts, path, name):
-    return (any(part.startswith(('config', 'settings')) for part in parts)
+    return (any(part in ('config', 'configs', 'settings') for part in parts)
             or name.endswith(('.toml', '.ini', '.conf', '.tf')) or name.startswith('.env')
             or name in ('compose.yaml', 'compose.yml', 'docker-compose.yaml', 'docker-compose.yml',
-                        'dockerfile', 'values.yaml', 'values.yml')
+                        'dockerfile', 'values.yaml', 'values.yml', 'tsconfig.json',
+                        'application.yml', 'application.properties')
             or name.startswith('dockerfile.')
             or path.lower() in ('.github/dependabot.yml', '.github/dependabot.yaml'))
 
