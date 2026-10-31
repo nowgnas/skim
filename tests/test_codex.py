@@ -325,7 +325,7 @@ class CodexTests(unittest.TestCase):
         self.adapter.check_probe()
 
     def test_model_banner_cached_without_extra_execution(self):
-        self.stderr = 'OpenAI Codex\nmodel: gpt-5.4\nprovider: openai\n'
+        self.stderr = (Path(__file__).parent / 'fixtures/codex-banner-0.165.0.stderr').read_text()
         self.adapter.probe()
         self.assertEqual(self.adapter.model, 'gpt-5.4')
         self.assertEqual(json.loads(self.adapter.probe_path.read_text())['model'], 'gpt-5.4')
@@ -348,6 +348,12 @@ class CodexTests(unittest.TestCase):
             ('OpenAI Codex\nmodel: unknown\n--------\nmodel: later\n', None),
             ('OpenAI Codex\nmodel: two words\n--------\n', None),
             ('  OpenAI Codex v0.165.0  \n  model: actual  \n--------\n', 'actual'),
+            ('OpenAI Codex v0.165.0\n--------\nmodel: actual\n--------\nmodel: later\n', 'actual'),
+            ('[2026-10-31T00:00:00Z] OpenAI Codex v0.165.0\n--------\nmodel: actual\n--------\n', 'actual'),
+            ('OpenAI Codex\n--------\nprovider: openai\n--------\nmodel: later\n', None),
+            ('OpenAI Codex\n--------\nmodel: actual\nresponse text\nmodel: later\n--------\n', None),
+            ('OpenAI Codex\nmodel: actual\n', None),
+            ('OpenAI Codex\n--------\n' + 'provider: openai\n' * 32 + 'model: later\n--------\n', None),
         )
         for stderr, expected in cases:
             with self.subTest(stderr=stderr):
@@ -368,6 +374,7 @@ class CodexTests(unittest.TestCase):
                 self.assertIn('실패: model', out.getvalue())
                 self.assertIn('실패: probe', out.getvalue())
                 self.assertNotIn('정상: probe', out.getvalue())
+                self.assertIn('probe를 실행하지 않음' if probe else '캐시된 probe를 검증하지 않음', out.getvalue())
                 check_probe.assert_not_called()
                 live_probe.assert_not_called()
 

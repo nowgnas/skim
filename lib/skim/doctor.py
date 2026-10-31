@@ -43,7 +43,9 @@ def run(config, runner=None, which=None, adapter=None, probe=False):
             ready = False
             continue
         if label == 'probe' and not model_ok:
-            report(False, label, '모델 설정을 수정한 뒤 skim doctor --probe를 실행하세요.')
+            detail = ('모델 설정 오류로 probe를 실행하지 않음.' if probe else
+                      '모델 설정 오류로 캐시된 probe를 검증하지 않음.')
+            report(False, label, detail + ' 모델 설정을 수정한 뒤 skim doctor --probe를 실행하세요.')
             ready = False
             continue
         try:
