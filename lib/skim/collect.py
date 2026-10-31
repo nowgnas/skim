@@ -33,6 +33,10 @@ class Inaccessible(CollectionError):
     """삭제되었거나 현재 인증으로 접근할 수 없는 PR."""
 
 
+class Oversized(CollectionError):
+    """GitHub가 전체 변경 내용을 제공할 수 없는 PR."""
+
+
 class Deferred(CollectionError):
     def __init__(self, retry_at):
         self.retry_at = retry_at
@@ -69,7 +73,11 @@ class GitHub:
             try:
                 delay = float(headers['retry-after'])
             except ValueError:
-                delay = parsedate_to_datetime(headers['retry-after']).timestamp() - self.clock()
+                try:
+                    date = parsedate_to_datetime(headers['retry-after'])
+                    delay = date.replace(tzinfo=date.tzinfo or timezone.utc).timestamp() - self.clock()
+                except (TypeError, ValueError, OverflowError):
+                    delay = 0
         if headers.get('x-ratelimit-remaining') == '0':
             delay = max(delay, float(headers.get('x-ratelimit-reset', self.clock() + 60)) - self.clock())
         if status == 429 or (status == 403 and delay):
@@ -79,6 +87,8 @@ class GitHub:
         if result.returncode or status >= 400:
             if self.not_before > self.clock():
                 raise Deferred(self.not_before)
+            if diff and status in (406, 413, 422):
+                raise Oversized('GitHub diff 크기 한도 초과: 미분석')
             if status == 404:
                 raise Inaccessible('GitHub 접근 불가: 저장소 삭제 또는 접근 권한을 확인하세요')
             if status in (401, 403):
@@ -97,7 +107,7 @@ class GitHub:
             else:
                 batch = payload
             items.extend(batch)
-            if len(batch) < 100:
+            if len(batch) < 100 or (endpoint.endswith('/files') and page == 30):
                 return items
         raise CollectionError('페이지 한도를 초과했습니다')
 
@@ -119,7 +129,7 @@ class Collector:
         self._lock_depth = 0
 
     @contextmanager
-    def lock(self):
+    def lock(self, name="collection.lock"):
         # 수집·추적 해제·캐시 정리는 같은 프로세스 간 잠금을 공유한다.
         with self._mutex:
             if self._lock_depth:
@@ -129,7 +139,7 @@ class Collector:
                 finally:
                     self._lock_depth -= 1
                 return
-            path = self.config.data_dir / 'collection.lock'
+            path = self.config.data_dir / name
             private_file(path)
             with path.open('r+') as handle:
                 fcntl.flock(handle, fcntl.LOCK_EX)
@@ -200,7 +210,7 @@ class Collector:
                     if state == 'open' and (full, number) in targets:
                         files = gh.pages(endpoint + '/files')
                         if len(files) != pr.get('changed_files', len(files)):
-                            raise CollectionError('GitHub 파일 목록이 불완전하여 기존 결과를 보존합니다')
+                            raise Oversized('GitHub 파일 목록 한도 초과: 미분석')
                         diff = gh.get(endpoint, diff=True)
                         after = gh.get(endpoint)
                         if (pr['head']['sha'], pr['base']['sha']) != (after['head']['sha'], after['base']['sha']) or after['state'] != 'open':
@@ -212,9 +222,11 @@ class Collector:
                     break
             except Exception as exc:
                 failures.append((full, number, exc))
+                if isinstance(exc, Oversized):
+                    collected.append((full, number, pr, state, ([], '')))
         now = datetime.now(timezone.utc).isoformat()
         cache = private_dir(self.config.data_dir / 'cache' / 'diffs')
-        # 성공한 PR만 교체하고 실패한 PR의 스냅샷과 출처는 보존한다.
+        # 크기 초과는 미분석 스냅샷으로 남기고 접근 불가는 출처를 제거한다.
         with conn:
             conn.execute("UPDATE repositories SET source='responsible' WHERE tracked=0 AND source IN ('owned','managed')")
             conn.executemany('INSERT INTO repositories(owner,name,source) VALUES(?,?,?) ON CONFLICT(owner,name) DO UPDATE SET source=excluded.source WHERE repositories.tracked=0', candidates)
@@ -257,16 +269,20 @@ class Collector:
                             coverage['status'] = 'collected'
                             conn.execute('UPDATE snapshots SET coverage=? WHERE id=?', (json.dumps(coverage, ensure_ascii=False), row['id']))
                     else:
-                        coverage = json.dumps(dict(files=files, status='collected', policy='raw-v1'), ensure_ascii=False)
+                        coverage = json.dumps(dict(files=[{k: v for k, v in f.items() if k in ('filename', 'status', 'previous_filename')} for f in files], total_files=pr.get('changed_files', len(files)), status='collected', policy='raw-v1'), ensure_ascii=False)
                         conn.execute('INSERT INTO snapshots(pr_id,base_sha,head_sha,diff_hash,input_hash,diff_path,coverage) VALUES(?,?,?,?,?,?,?)',
                                      (pr_id, pr['base']['sha'], pr['head']['sha'], diff_hash, input_hash, str(path), coverage))
             for full, number, exc in failures:
                 row = conn.execute('SELECT p.id FROM pull_requests p JOIN repositories r ON p.repo_id=r.id WHERE r.owner=? AND r.name=? AND p.number=?',
                                    (*repo_parts(full), number)).fetchone()
                 if row:
+                    if isinstance(exc, Inaccessible):
+                        conn.execute('DELETE FROM pr_sources WHERE pr_id=?', (row['id'],))
                     for snapshot in conn.execute('SELECT id,coverage FROM snapshots WHERE pr_id=?', (row['id'],)):
                         coverage = json.loads(snapshot['coverage'])
                         coverage.update(status='inaccessible' if isinstance(exc, Inaccessible) else 'incomplete', collection_error=error_message(exc))
+                        if isinstance(exc, Oversized):
+                            coverage.update(omitted=coverage.get('total_files', 0), omission_reason=error_message(exc))
                         conn.execute('UPDATE snapshots SET coverage=? WHERE id=?', (json.dumps(coverage, ensure_ascii=False), snapshot['id']))
             conn.execute("DELETE FROM pull_requests WHERE state='open' AND NOT EXISTS (SELECT 1 FROM pr_sources WHERE pr_id=pull_requests.id)")
             conn.execute('UPDATE repositories SET last_synced_at=? WHERE tracked=1 AND enabled=1', (now,))
@@ -274,11 +290,10 @@ class Collector:
         deferred = [exc.retry_at for exc in listing_failures + [f[2] for f in failures] if isinstance(exc, Deferred)]
         if deferred:
             raise Deferred(max(deferred))
-        if listing_failures:
+        if any(not isinstance(exc, Inaccessible) for exc in listing_failures):
             raise CollectionError('저장소 목록 수집 실패: ' + error_message(listing_failures[0]))
-        if failures:
-            raise CollectionError(f'PR {len(failures)}개 수집 실패: ' + error_message(failures[0][2]))
-        return len(targets)
+        return sum(snapshot is not None and not any(f == full and n == number for f, n, _ in failures)
+                   for full, number, pr, state, snapshot in collected)
 
     def clean_cache(self):
         with self.lock():
@@ -297,8 +312,11 @@ class CollectionScheduler:
         self.conn, self.interval, self.clock = conn, interval, clock
         self.next_poll = 0
 
-    def request(self):
+    def request(self, manual=True):
         with self.conn:
+            if manual:
+                self.conn.execute("UPDATE jobs SET next_run_at=NULL WHERE type='collect' AND status='pending'")
+                self.conn.execute("UPDATE jobs SET last_error='수동 갱신 대기' WHERE type='collect' AND status='running'")
             self.conn.execute("INSERT OR IGNORE INTO jobs(type,target_id) VALUES('collect',0)")
 
     def tick(self, collector):
@@ -312,21 +330,27 @@ class CollectionScheduler:
     def _tick(self, collector):
         now = self.clock()
         if now >= self.next_poll:
-            self.request()
+            self.request(manual=False)
             self.next_poll = now + self.interval
         stamp = datetime.fromtimestamp(now, timezone.utc).isoformat()
         with self.conn:
-            row = self.conn.execute("UPDATE jobs SET status='running',attempts=attempts+1 WHERE id=(SELECT id FROM jobs WHERE type='collect' AND status='pending' AND (next_run_at IS NULL OR next_run_at<=?) ORDER BY id LIMIT 1) RETURNING id,attempts", (stamp,)).fetchone()
+            self.conn.execute('BEGIN IMMEDIATE')
+            row = self.conn.execute("SELECT id,attempts FROM jobs WHERE type='collect' AND status='pending' AND (next_run_at IS NULL OR next_run_at<=?) ORDER BY id LIMIT 1", (stamp,)).fetchone()
+            if row is not None:
+                self.conn.execute("UPDATE jobs SET status='running',attempts=attempts+1 WHERE id=?", (row['id'],))
         if row is None:
             return False
         try:
             collector.collect()
         except Exception as exc:
-            retry = exc.retry_at if isinstance(exc, Deferred) else now + min(3600, 30 * 2 ** min(row['attempts'] - 1, 7))
+            retry = exc.retry_at if isinstance(exc, Deferred) else now + min(3600, 30 * 2 ** min(row['attempts'], 7))
             with self.conn:
                 self.conn.execute("UPDATE jobs SET status='pending',next_run_at=?,last_error=? WHERE id=?",
-                                  (datetime.fromtimestamp(retry, timezone.utc).isoformat(), error_message(exc), row['id']))
+                                  (None if self.conn.execute('SELECT last_error FROM jobs WHERE id=?', (row['id'],)).fetchone()[0] == '수동 갱신 대기' else datetime.fromtimestamp(retry, timezone.utc).isoformat(), error_message(exc), row['id']))
         else:
             with self.conn:
+                followup = self.conn.execute('SELECT last_error FROM jobs WHERE id=?', (row['id'],)).fetchone()[0] == '수동 갱신 대기'
                 self.conn.execute("UPDATE jobs SET status='completed',last_error=NULL WHERE id=?", (row['id'],))
+                if followup:
+                    self.request()
         return True

@@ -67,12 +67,11 @@ def main(argv=None):
                 if not results:
                     print('분석 가능한 허용 스냅샷이 없습니다.')
                 return int(any(r['status'] in ('failed', 'blocked', 'deferred') for r in results))
+            from .collect import Collector
             if args.command == 'collect':
-                from .collect import Collector
                 count = Collector(conn, config).collect()
                 print(f'PR {count}개를 수집했습니다.')
                 return 0
-            from .collect import Collector
             collector = Collector(conn, config)
             removing = args.command == 'repo' and args.action == 'remove'
             with collector.lock() if removing else nullcontext():

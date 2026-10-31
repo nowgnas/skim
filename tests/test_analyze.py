@@ -247,3 +247,77 @@ new mode 100755
         value = 'hi\n-----BEGIN RSA PRIVATE KEY-----\nSECRET\n-----END RSA PRIVATE KEY-----\nbye'
         self.assertNotIn('SECRET', sanitize(value))
         self.assertIn('bye', sanitize(value))
+
+    def test_sensitive_pattern_redacts_region_and_keeps_auth_hunk(self):
+        self.snapshot(DIFF + '\n+session_token = "private-value"\n+if password == hashed:\n+    reject_session()\n')
+        value = self.analyzer.run()[0]
+        self.assertEqual(value['status'], 'partial')
+        self.assertEqual(value['coverage']['excluded'], 0)
+        self.assertEqual(value['coverage']['redacted'], 1)
+        self.assertEqual(value['coverage']['analyzed'], 2)
+        self.assertNotIn('private-value', ''.join(self.fake.calls))
+        self.assertIn('reject_session()', ''.join(self.fake.calls))
+        self.assertTrue(value['units'][1]['redacted'])
+
+    def test_snapshot_preparation_failures_are_recorded_and_next_pr_runs(self):
+        import sqlite3
+        for path in (None, '/tmp/outside-diff', str(self.config.data_dir / 'cache/missing')):
+            with self.subTest(path=path):
+                with self.conn:
+                    self.conn.execute('UPDATE snapshots SET diff_path=? WHERE id=1', (path,))
+                result = self.analyzer.run()[0]
+                self.assertEqual(result['status'], 'failed')
+                self.assertEqual(self.conn.execute('SELECT status FROM analyses ORDER BY id DESC').fetchone()[0], 'failed')
+        with self.conn:
+            self.conn.execute("INSERT INTO pull_requests(repo_id,number,title,body,base_sha,head_sha) VALUES(1,2,'다음','설명','base','head')")
+            self.conn.execute("INSERT INTO snapshots(pr_id,base_sha,head_sha,diff_hash,input_hash,diff_path) SELECT 2,base_sha,head_sha,diff_hash,input_hash,? FROM snapshots WHERE id=1", (str(self.config.data_dir / 'cache/diff'),))
+        results = self.analyzer.run()
+        self.assertEqual([r['status'] for r in results], ['failed', 'completed'])
+        with self.conn:
+            self.conn.execute('UPDATE snapshots SET diff_path=?', (str(self.config.data_dir / 'cache/diff'),))
+            self.conn.execute('DELETE FROM analyses')
+        original = self.analyzer._reserve
+        calls = [0]
+        def reserve():
+            calls[0] += 1
+            if calls[0] == 1:
+                raise sqlite3.OperationalError('비밀 잠금 오류')
+            return original()
+        with patch.object(self.analyzer, '_reserve', side_effect=reserve):
+            results = self.analyzer.run()
+        self.assertEqual([r['status'] for r in results], ['failed', 'completed'])
+        self.assertNotIn('비밀', json.dumps(results))
+        self.assertEqual(self.conn.execute('SELECT COUNT(*) FROM analyses').fetchone()[0], 2)
+
+    def test_analysis_does_not_hold_collection_lock_during_model_call(self):
+        import fcntl
+        original = self.fake.generate
+        def generate(request, schema):
+            with (self.config.data_dir / 'collection.lock').open() as handle:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return original(request, schema)
+        self.fake.generate = generate
+        self.assertEqual(self.analyzer.run()[0]['status'], 'completed')
+
+    def test_rules_do_not_match_author_lock_statement_or_short_test_substring(self):
+        from skim.analyze.units import candidates
+        flags = candidates('a.py', '+author = value\n+with self.lock', ['test_database.py'])
+        self.assertNotIn('auth', flags)
+        self.assertNotIn('dependency', flags)
+        self.assertIn('logic_without_tests', flags)
+        self.assertNotIn('logic_without_tests', candidates('a.py', '', ['test_a.py']))
+
+    def test_normal_auth_output_does_not_retry(self):
+        original = self.fake.generate
+        def generate(request, schema):
+            value = original(request, schema)
+            return value.replace('변경된 인증 동작 검토', 'Authorization: 헤더 검토')
+        self.fake.generate = generate
+        self.assertEqual(self.analyzer.run()[0]['status'], 'completed')
+        self.assertEqual(len(self.fake.calls), 2)
+
+    def test_explicit_old_snapshot_reports_reason(self):
+        self.snapshot(DIFF)
+        result = self.analyzer.run(snapshot_id=1)[0]
+        self.assertEqual(result['status'], 'blocked')
+        self.assertIn('최신', result['error'])

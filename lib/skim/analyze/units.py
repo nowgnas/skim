@@ -13,8 +13,12 @@ SECRET = re.compile(
 EXCLUDED = ('.env', '.env.*', '*.pem', '*.key', '*credentials*', 'id_rsa*', 'id_ed25519*', '*.p12', '*.pfx')
 
 
-def sanitize(text):
-    return SECRET.sub('[민감 정보 제외]', text or '')
+# 모델 출력에서는 값 자체가 확인되는 토큰·개인 키만 가린다.
+SECRET_VALUE = re.compile(SECRET.pattern.split('|(?im:', 1)[0])
+
+
+def sanitize(text, assignments=True):
+    return (SECRET if assignments else SECRET_VALUE).sub('[민감 정보 제외]', text or '')
 
 
 def secret_path(path):
@@ -28,18 +32,19 @@ def is_test(path):
 def candidates(path, text, tests):
     value = (path + '\n' + text).lower()
     flags = []
-    rules = {'auth': r'auth|permission|oauth|session|acl', 'payments': r'payment|billing|checkout|refund|charge',
+    rules = {'auth': r'(?<![a-z])(?:auth|authentication|authorization|permission|oauth|session|acl)(?![a-z])', 'payments': r'payment|billing|checkout|refund|charge',
              'db_schema_migration': r'migration|schema|\b(?:drop|alter) table',
              'config': r'config|settings|\.toml$|\.ini$|\.env',
              'ci_workflow': r'\.github/workflows/',
              'dependency': r'(^|/)(package(-lock)?\.json|.*lock|requirements[^/]*|pyproject\.toml|go\.mod|cargo\.toml)(\n|$)',
              'secrets': r'secret|password|private.key|token|credentials'}
     for flag, pattern in rules.items():
-        if re.search(pattern, value, re.M):
+        target = path.lower() if flag == 'dependency' else value
+        if re.search(pattern, target, re.M):
             flags.append(flag)
     if not is_test(path) and PurePosixPath(path).suffix in ('.py', '.js', '.ts', '.tsx', '.go', '.rs', '.java', '.rb', '.c', '.cpp'):
         stem = PurePosixPath(path).stem
-        if not any(stem in PurePosixPath(t).stem for t in tests):
+        if not any(stem == re.sub(r'^(?:test_|spec_)|(?:[._](?:test|spec)|_test)$', '', PurePosixPath(t).stem) for t in tests):
             flags.append('logic_without_tests')
     return flags
 
@@ -87,13 +92,14 @@ def parse_diff(diff, files=()):
             old_path = rename_from.group(1).strip('\"')
         overhead = section_sizes.get(path, 0) - sum(len(p[0].encode()) for p in parts)
         for index, (text, old, new) in enumerate(parts):
-            excluded = secret_path(path) or bool(old_path and secret_path(old_path)) or sanitize(text) != text
+            excluded = secret_path(path) or bool(old_path and secret_path(old_path))
             flags = candidates(path, text, tests)
             if excluded and 'secrets' not in flags:
                 flags.append('secrets')
             units.append(dict(change_id=f'h{len(units)+1}', file_path=sanitize(path), kind='hunk' if old else 'synthetic',
                               old_range=old, new_range=new, binary='GIT binary patch' in body or 'Binary files ' in body,
                               diff='' if excluded else sanitize(text), raw_bytes=len(text.encode()) + max(0, overhead) * (index == 0), excluded=excluded,
-                              exclusion_reason='민감 경로 또는 민감 정보 패턴' if excluded else None,
+                              exclusion_reason='민감 경로' if excluded else None,
+                              redacted=sanitize(text) != text, redaction_reason='일부 민감 정보 가림' if sanitize(text) != text else None,
                               candidates=flags))
     return units, tests
