@@ -370,6 +370,77 @@ class CodexTests(unittest.TestCase):
             command = next(c for c, _ in reversed(self.calls) if '--output-last-message' in c)
             self.assertEqual(command[command.index('--model') + 1], 'override')
 
+    def test_loaded_config_is_stable_after_file_and_environment_changes(self):
+        from skim.analyze import Analyzer
+        config = Config.load()
+        path = config.config_dir / 'config.json'
+        path.write_text(json.dumps({'codex_model': 'original'}))
+        config = Config.load()
+        for contents in ('[]', '{', '{"codex_model": "replacement"}'):
+            path.write_text(contents)
+            with patch.dict(os.environ, SKIM_CODEX_MODEL=''):
+                analyzer = Analyzer(None, config)
+                self.assertEqual(analyzer.adapter.model, 'original')
+                self.assertEqual(config.resolved_codex_model(), 'original')
+        explicit = Config(config.config_dir, config.data_dir, codex_model='explicit')
+        self.assertEqual(Analyzer(None, explicit).adapter.model, 'explicit')
+
+    def test_invalid_model_identifiers(self):
+        config = Config.load()
+        path = config.config_dir / 'config.json'
+        for model in ('', 'unknown', '-model', 'two words', ' spaced ', 123):
+            with self.subTest(model=model):
+                path.write_text(json.dumps({'codex_model': model}))
+                with self.assertRaises(ValueError):
+                    Config.load()
+                with self.assertRaises(ValueError):
+                    CodexAdapter(self.runner, self.adapter.data_dir, model=model)
+        for model in ('-model', 'two words', 'unknown'):
+            self.assertIsNone(CodexAdapter._output_model(
+                json.dumps({'metadata': {'model': model}}), ''))
+        self.adapter.probe()
+        path = self.adapter.probe_path
+        value = json.loads(path.read_text())
+        value['model'] = '-invalid'
+        path.write_text(json.dumps(value))
+        with self.assertRaises(IsolationError):
+            self.adapter.check_probe()
+
+    def test_doctor_reports_invalid_settings_and_continues(self):
+        config = Config.load()
+        path = config.config_dir / 'config.json'
+        for contents, env in (('[]', {}), ('{', {}), ('{}', {'SKIM_CODEX_MODEL': ''})):
+            path.write_text(contents)
+            before = path.stat().st_mode
+            out = io.StringIO()
+            self.calls.clear()
+            with patch.dict(os.environ, env), contextlib.redirect_stdout(out):
+                self.assertEqual(run(config, self.runner, lambda _: '/fake', self.adapter), 1)
+            self.assertIn('실패: model', out.getvalue())
+            for label in ('codex-home', 'version', 'flags', 'probe', '로컬 권한'):
+                self.assertIn(label, out.getvalue())
+            self.assertNotIn('Traceback', out.getvalue())
+            self.assertFalse(any('--output-last-message' in c for c, _ in self.calls))
+            self.assertEqual(path.stat().st_mode, before)
+        path.write_text('{}')
+        path.chmod(0o644)
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(run(config, self.runner, lambda _: '/fake', self.adapter), 1)
+        self.assertIn('실패: model', out.getvalue())
+        self.assertEqual(path.stat().st_mode & 0o777, 0o644)
+
+    def test_generate_blocks_model_change_after_verification(self):
+        self.adapter.probe()
+        self.adapter.verify()
+        path = self.adapter.probe_path
+        value = json.loads(path.read_text())
+        value['model'] = 'changed-model'
+        path.write_text(json.dumps(value))
+        before = len(self.calls)
+        with self.assertRaises(IsolationError):
+            self.adapter.generate('자료', {})
+        self.assertFalse(any('--output-last-message' in c for c, _ in self.calls[before:]))
+
     def test_cli_init(self):
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(main(['codex-home', 'init']), 0)

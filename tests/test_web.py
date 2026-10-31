@@ -157,8 +157,10 @@ class WebTests(unittest.TestCase):
         self.assertNotIn('결제 인증 경계', body)
         self.assertNotIn('일반 API 응답 정리', self.request('/?review=1')[2])
         body = self.request('/pr/1')[2]
-        self.assertIn('모델 ', body)
-        self.assertIn('Codex CLI ', body)
+        with closing(connect(self.config)) as conn:
+            analysis = conn.execute('SELECT model, cli_version FROM analyses WHERE snapshot_id=1 ORDER BY id DESC LIMIT 1').fetchone()
+        self.assertIn('모델 ' + analysis['model'], body)
+        self.assertIn('Codex CLI ' + analysis['cli_version'], body)
         self.assertIn('<details open><summary>auth/session.py', body)
         self.assertIn('<details open><summary>.env', body)
         self.assertIn('<details><summary>README.md', body)

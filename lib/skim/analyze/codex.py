@@ -10,6 +10,7 @@ import tempfile
 import time
 from pathlib import Path
 from .protocol import encode
+from ..config import valid_model
 
 
 class IsolationError(ValueError):
@@ -55,7 +56,9 @@ class CodexAdapter:
             data_dir = paths().data_dir
         self.data_dir = Path(data_dir).absolute()
         self.home = self.data_dir / 'codex-home'
-        self.model = model or 'unknown'
+        if model is not None and not valid_model(model):
+            raise ValueError('Codex 모델 식별자 형식을 확인하세요.')
+        self.model = model if model is not None else 'unknown'
         self._detected_model = None
         self.disabled = []
         self.unknown_enabled = []
@@ -178,7 +181,7 @@ class CodexAdapter:
                 raise ValueError()
             if self.model == 'unknown' or self.model == self._detected_model:
                 model = value['model']
-                if not isinstance(model, str) or not model.strip():
+                if model != 'unknown' and not valid_model(model):
                     raise ValueError()
                 self.model = self._detected_model = model
         except (OSError, ValueError, KeyError, TypeError):
@@ -229,6 +232,7 @@ class CodexAdapter:
             command.append('--json')
             for name in self.disabled:
                 command.extend(['--disable', name])
+            # 기본 모델은 probe로 감지한 뒤 분석에서 명시해 같은 모델로 고정한다.
             if self.model != 'unknown':
                 command.extend(['--model', self.model])
             command.append('-')
@@ -260,8 +264,8 @@ class CodexAdapter:
         def metadata(value):
             if isinstance(value, dict):
                 model = value.get('model')
-                if isinstance(model, str) and model.strip():
-                    return model.strip()
+                if valid_model(model):
+                    return model
                 for key in ('session', 'thread', 'turn', 'response', 'metadata'):
                     found = metadata(value.get(key))
                     if found:
@@ -274,7 +278,7 @@ class CodexAdapter:
                 if found:
                     return found
         match = re.search(r'^\s*model:\s*(\S+)\s*$', stderr, re.MULTILINE)
-        return match.group(1) if match else None
+        return match.group(1) if match and valid_model(match.group(1)) else None
 
     @staticmethod
     def _check_events(stdout):
@@ -293,7 +297,10 @@ class CodexAdapter:
             raise ValueError('probe 이벤트 누락')
 
     def generate(self, prompt, schema):
+        identity = (self.model, self.cli_version)
         self.verify()
+        if identity[1] != 'unknown' and identity != (self.model, self.cli_version):
+            raise IsolationError('Codex 모델·버전이 분석 도중 변경되었습니다. 다시 분석하세요.')
         try:
             return self._execute(prompt, schema)
         finally:

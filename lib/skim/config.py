@@ -1,8 +1,15 @@
 """사용자 전용 경로와 JSON 설정."""
 import json
 import os
+import re
+import stat
 from dataclasses import dataclass
 from pathlib import Path
+
+
+def valid_model(value):
+    return (isinstance(value, str) and value != 'unknown'
+            and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:/-]*', value) is not None)
 
 
 def private_dir(path):
@@ -30,13 +37,29 @@ class Config:
     codex_model: str | None = None
 
     def resolved_codex_model(self):
-        # doctor도 파일 권한을 바꾸지 않고 같은 설정과 환경 우선순위를 사용한다.
+        # 실행 중에는 파일·환경을 다시 읽지 않고 시작 시 확정한 값을 사용한다.
+        return self.codex_model
+
+    @staticmethod
+    def parse_codex_model(settings, default=None):
+        value = os.environ.get('SKIM_CODEX_MODEL', settings.get('codex_model', default))
+        if value is not None and not valid_model(value):
+            raise ValueError('codex_model 설정 형식을 확인하세요 (unknown·선행 하이픈·공백은 허용하지 않습니다)')
+        return value
+
+    def doctor_codex_model(self):
+        # doctor는 권한을 고치거나 파일을 생성하지 않고 안전한 설정만 읽는다.
         path = self.config_dir / 'config.json'
-        settings = json.loads(path.read_text()) if path.exists() else {}
-        value = os.environ.get('SKIM_CODEX_MODEL', settings.get('codex_model', self.codex_model))
-        if value is not None and (not isinstance(value, str) or not value.strip()):
-            raise ValueError('codex_model 설정은 비어 있지 않은 문자열이어야 합니다')
-        return value.strip() if value else None
+        settings = {}
+        if path.exists() or path.is_symlink():
+            info = path.lstat()
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                    or stat.S_IMODE(info.st_mode) != 0o600):
+                raise ValueError('config.json 소유자·일반 파일·0600 권한을 확인하세요')
+            settings = json.loads(path.read_text())
+            if not isinstance(settings, dict):
+                raise ValueError('설정은 JSON 객체여야 합니다')
+        return self.parse_codex_model(settings, self.codex_model)
 
     @classmethod
     def load(cls):
@@ -76,8 +99,7 @@ class Config:
         if not valid_base_url(url):
             raise ValueError('sessio_web_url 설정은 로컬 Sessio HTTP 주소여야 합니다')
         values['sessio_web_url'] = url
-        config = cls(config_dir, data_dir, **values)
-        return cls(config_dir, data_dir, **values, codex_model=config.resolved_codex_model())
+        return cls(config_dir, data_dir, **values, codex_model=cls.parse_codex_model(settings))
 
     @property
     def db_path(self):

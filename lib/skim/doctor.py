@@ -27,13 +27,24 @@ def run(config, runner=None, which=None, adapter=None, probe=False):
             report(result.returncode == 0, 'gh', '인증 확인' if result.returncode == 0 else 'gh auth login으로 인증을 확인하세요.')
         except (OSError, subprocess.TimeoutExpired):
             report(False, 'gh', '실행 실패 또는 시간 초과')
-    adapter = adapter or CodexAdapter(runner=runner, data_dir=config.data_dir, model=config.resolved_codex_model())
+    model_ok = True
+    try:
+        model = config.doctor_codex_model()
+        report(True, 'model', model or 'probe에서 모델 감지')
+    except (OSError, ValueError):
+        model, model_ok = None, False
+        report(False, 'model', 'config.json 객체·JSON·권한과 codex_model / SKIM_CODEX_MODEL을 수정하세요.')
+    adapter = adapter or CodexAdapter(runner=runner, data_dir=config.data_dir, model=model)
     ready = True
     for label, method in (('codex-home', adapter.check_home), ('version', adapter.check_version),
                           ('flags', adapter.check_flags),
                           ('probe', adapter.probe if probe else adapter.check_probe)):
         if label != 'codex-home' and (not ready or not which('codex')):
             report(False, label, 'Codex 분석 차단: 선행 검사 실패 또는 CLI 없음')
+            ready = False
+            continue
+        if label == 'probe' and probe and not model_ok:
+            report(False, label, '모델 설정을 수정한 뒤 skim doctor --probe를 실행하세요.')
             ready = False
             continue
         try:
@@ -52,7 +63,10 @@ def run(config, runner=None, which=None, adapter=None, probe=False):
             report(False, label, 'Codex 분석 차단: ' + details[label])
     print('Codex 모델: ' + adapter.model)
     if adapter.model == 'unknown':
-        print('경고: Codex 모델을 감지하지 못했습니다. codex_model 설정 또는 SKIM_CODEX_MODEL을 지정하세요.')
+        if not ready:
+            print('경고: 선행 오류를 수정하고 skim doctor --probe로 모델 감지를 재검증하세요.')
+        else:
+            print('경고: Codex 모델을 감지하지 못했습니다. codex_model 설정 또는 SKIM_CODEX_MODEL을 지정하세요.')
     # Config.load 이전의 상태도 보존하도록 CLI는 경로만 전달한다.
     roots = [config.config_dir, config.data_dir]
     if os.environ.get('SKIM_HOME'):
