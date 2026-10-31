@@ -40,6 +40,8 @@ class WebTests(unittest.TestCase):
         env = patch.dict(os.environ, SKIM_HOME=self.temp.name)
         env.start()
         self.addCleanup(env.stop)
+        # 실행 환경의 모델 지정이 fixture 설정을 덮어쓰지 않게 격리한다.
+        os.environ.pop('SKIM_CODEX_MODEL', None)
         self.config = replace(Config.load(), sessio_index_path=Path(self.temp.name) / 'sessions.jsonl')
         self.now = 10
         self.auth = Auth(clock=lambda: self.now)
@@ -124,15 +126,12 @@ class WebTests(unittest.TestCase):
         # 전달 헤더를 신뢰하지 않는다.
         self.assertEqual(self.request(headers=[('!Host', 'evil.test'), ('X-Forwarded-Host', self.server.authority)])[0], 403)
 
-    def test_csrf_and_fixed_refresh_job(self):
-        for data in [{}, {'csrf': 'wrong'}, {'csrf': '한글'}, {'csrf': self.csrf, 'target_id': '99'}, {'csrf': [self.csrf, self.csrf]}]:
-            self.assertIn(self.request('/refresh', 'POST', data)[0], (400, 403))
-        self.assertEqual(self.request('/refresh')[0], 404)
-        self.assertEqual(self.request('/refresh', 'POST', {'csrf': self.csrf})[0], 303)
-        self.assertEqual(self.request('/refresh', 'POST', {'csrf': self.csrf})[0], 303)
-        with closing(connect(self.config)) as conn, conn:
-            rows = conn.execute('SELECT type,target_id,status FROM jobs').fetchall()
-            self.assertEqual([tuple(row) for row in rows], [('collect', 0, 'pending')])
+    def test_refresh_is_outside_pr_a(self):
+        self.assertEqual(self.request('/refresh')[0], 405)
+        self.assertEqual(self.request('/refresh', 'POST', {'csrf': self.csrf})[0], 405)
+        self.assertNotIn('action="/refresh"', self.request()[2])
+        with closing(connect(self.config)) as conn:
+            self.assertEqual(conn.execute('SELECT count(*) FROM jobs').fetchone()[0], 0)
 
     def test_security_headers_on_success_errors_static(self):
         for path, authenticated in [('/', True), ('/pr/1', True), ('/', False), ('/missing', True), ('/static/app.css', False), ('/static/entry.js', False), ('/static/../../config.json', True)]:

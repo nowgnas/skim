@@ -44,7 +44,7 @@ def seed(config):
         if conn.execute('SELECT 1 FROM repositories LIMIT 1').fetchone():
             raise ValueError('비어 있는 SKIM_HOME을 사용하세요')
         with conn:
-            repo = conn.execute("INSERT INTO repositories(owner,name,analysis_policy) VALUES('demo','checkout','allow')").lastrowid
+            repo = conn.execute("INSERT INTO repositories(owner,name,analysis_policy,tracked) VALUES('demo','checkout','allow',1)").lastrowid
             for number, title, paths in [
                 (1, '결제 인증 경계 보완', ['auth/session.py', 'service.py', 'README.md', '.env']),
                 (2, '일반 API 응답 정리', ['handler.py', 'tests/test_handler.py']),
@@ -67,6 +67,10 @@ def seed(config):
                     Analyzer(conn, config, adapter=DemoModel()).run(snapshot)
                 if number == 5:
                     conn.execute("UPDATE pull_requests SET head_sha='new-head' WHERE id=?", (pr,))
+        with conn:
+            conn.execute("INSERT INTO repositories(owner,name,tracked) VALUES('demo-org','library',1)")
+            conn.execute("INSERT INTO repositories(owner,name,tracked,analysis_policy) VALUES('demo-org','private',1,'deny')")
+            conn.execute("INSERT INTO organization_policies VALUES('demo-org','allow')")
         print('가짜 PR 5개 생성 완료. 같은 SKIM_HOME으로 bin/skim web --offline을 실행하세요.')
 
 
