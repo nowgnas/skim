@@ -1,5 +1,6 @@
 """실제 소켓·네트워크·모델 없이 HTTP와 데모 fixture를 검증한다."""
 import io
+from dataclasses import replace
 from contextlib import closing, redirect_stdout
 import json
 import os
@@ -39,7 +40,7 @@ class WebTests(unittest.TestCase):
         env = patch.dict(os.environ, SKIM_HOME=self.temp.name)
         env.start()
         self.addCleanup(env.stop)
-        self.config = Config.load()
+        self.config = replace(Config.load(), sessio_index_path=Path(self.temp.name) / 'sessions.jsonl')
         self.now = 10
         self.auth = Auth(clock=lambda: self.now)
         self.server = SimpleNamespace(config=self.config, auth=self.auth,
@@ -83,6 +84,22 @@ class WebTests(unittest.TestCase):
         self.assertIsNone(self.auth.redeem(token))
         self.assertIsNone(Auth().csrf(self.cookie))
         self.assertIsNone(self.auth.csrf(self.auth.cookie + '=한글'))
+
+    def test_sessio_detail_uses_fixture_and_current_user(self):
+        self.config.sessio_index_path.write_text((ROOT / 'tests/fixtures/sessio.jsonl').read_text())
+        with closing(connect(self.config)) as conn, conn:
+            conn.execute("UPDATE pull_requests SET author='Me',head_branch='feature/payment' WHERE id=1")
+        with patch('skim.sessio.GitHub.get', return_value={'login': 'me'}) as gh:
+            body = self.request('/pr/1')[2]
+            self.assertIn('Sessio · abc-123', body)
+            self.assertIn('http://127.0.0.1:8765/#/s/codex%3Aabc-123', body)
+            gh.assert_called_once_with('user')
+            self.assertNotIn('Sessio', self.request('/')[2])
+        with patch('skim.sessio.GitHub.get', return_value={'login': 'someone-else'}):
+            self.assertNotIn('Sessio', self.request('/pr/1')[2])
+        self.server.offline = True
+        with patch('skim.sessio.GitHub.get', side_effect=AssertionError('외부 실행 금지')):
+            self.assertNotIn('Sessio', self.request('/pr/1')[2])
 
     def test_entry_has_no_data_and_session_cookie(self):
         code, headers, body = self.request('/entry', authenticated=False)

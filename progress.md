@@ -65,3 +65,8 @@
 - Sessio와 어울리는 어두운 서버 렌더링 목록·필터·상세 화면, 규칙 후보·미분석·high 우선 펼침, mid/low 접힘, 이전 SHA·수집/분석 상태, 전체 diff·GitHub 링크와 수동 갱신 큐·내장 워커를 추가했다.
 - 외부 통신 없는 가짜 데이터 생성기 `scripts/demo_seed.py`, `web --offline`, 한국어 사용 문서를 추가했다. HTTP 루프백 쿠키는 Secure 없이 정확한 Origin 검사를 사용하며, 브라우저별 Secure 동작과 Sessio 인덱스 연동은 미검증·미구현으로 문서에 명시했다.
 - 메모리 HTTP 연결과 fake 모델·소켓으로 unittest 80개 및 `git diff --check`가 통과했다. 실제 LLM·외부 네트워크·GitHub 쓰기·커밋은 수행하지 않았다.
+
+## PR5 — 2026-10-31
+
+- Sessio 코드의 `index/sessions.jsonl`·저장소 이름·브랜치·웹 라우트 형식을 확인하고, 설정 가능한 인덱스 경로와 로컬 웹 주소로 PR 상세 연결을 추가했다. 단일 후보이며 현재 gh 사용자와 작성자가 일치할 때만 링크·세션 ID를 표시한다.
+- 인덱스 누락/손상·복수 후보·인증 실패·잘못된 링크는 숨기며 offline에서는 외부 조회를 하지 않는다. fixture 인덱스와 fake gh로 unittest 83개가 통과했다. 실제 LLM·네트워크 호출, GitHub 쓰기와 커밋은 하지 않았다.
