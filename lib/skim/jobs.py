@@ -16,7 +16,7 @@ from .db import analysis_allowed
 
 KINDS = {'collect': '수집', 'analyze': 'PR 분석', 'doctor': '상태 점검', 'repos': '저장소 조회'}
 STATUS = {'pending': '대기', 'running': '실행 중', 'completed': '완료', 'failed': '실패',
-          'deferred': '보류', 'cancelled': '취소'}
+          'deferred': '보류', 'blocked': '격리', 'cancelled': '취소'}
 ACTIVE = ('pending', 'running')
 # 종류별 하나이므로 전체 활성 작업은 최대 len(KINDS)개다.
 INTERRUPTED = '서버 재시작으로 중단되었습니다. 다시 요청하세요.'
@@ -166,8 +166,18 @@ class Runner:
             counts = {}
             for item in results:
                 counts[item['status']] = counts.get(item['status'], 0) + 1
-            summary = ', '.join(f'{key} {value}' for key, value in sorted(counts.items()))
-            return 'completed', f'분석 대상 {len(results)}개' + (f' ({summary})' if summary else ' — 허용된 미분석 스냅샷 없음'), None
+            # 일부만 성공해도 실패·격리·보류 결과를 완료로 숨기지 않는다.
+            status = next((key for key in ('blocked', 'failed', 'deferred') if counts.get(key)), 'completed')
+            error = None
+            if status == 'blocked':
+                error = '분석 격리 항목이 있습니다. 상태 점검 화면의 복구 안내를 확인하세요.'
+            elif status == 'deferred':
+                error = '분석 보류 항목이 있습니다. 예산은 수동 요청으로 우회하지 않습니다.'
+            elif status == 'failed':
+                error = '분석 실패 항목이 있습니다. PR별 결과와 상태 점검을 확인하세요.'
+            summary = ', '.join(f'{STATUS.get(key, "부분 완료" if key == "partial" else key)} {value}'
+                                for key, value in sorted(counts.items()))
+            return status, f'분석 대상 {len(results)}개' + (f' ({summary})' if summary else ' — 허용된 미분석 스냅샷 없음'), error
         params = json.loads(job['params'] or '{}')
         snapshot_id = params.get('snapshot_id')
         # 실행 직전에 대상·SHA·동의를 다시 확인한다.
@@ -189,7 +199,7 @@ class Runner:
         if status == 'deferred':
             return 'deferred', None, (result.get('error') or '분석 보류') + ' 예산은 수동 요청으로 우회하지 않습니다.'
         if status == 'blocked':
-            return 'failed', None, '분석 차단: ' + (result.get('error') or '격리 검증 실패') + ' 상태 점검 화면의 복구 안내를 확인하세요.'
+            return 'blocked', None, '분석 격리: ' + (result.get('error') or '격리 검증 실패') + ' 상태 점검 화면의 복구 안내를 확인하세요.'
         return 'failed', None, result.get('error') or '분석 실패'
 
     def run_doctor(self, job):
@@ -198,7 +208,7 @@ class Runner:
         # 웹에서는 --probe를 실행하지 않으며 실제 모델을 호출하지 않는다.
         code = (self.doctor or doctor.run)(self.config, probe=False, out=lines.append)
         summary = '점검 실패 항목이 있습니다. 아래 안내를 따르세요.' if code else '모든 점검 항목 정상'
-        return 'completed', summary + '\n' + '\n'.join(lines), None
+        return 'failed' if code else 'completed', summary + '\n' + '\n'.join(lines), None
 
     def run_repos(self, job):
         if self.lookup is None:
