@@ -1,4 +1,4 @@
-"""네트워크를 사용하지 않는 초기 CLI."""
+"""로컬 설정과 읽기 전용 PR 수집 CLI."""
 import argparse
 import re
 import sqlite3
@@ -27,7 +27,8 @@ def parser():
     add = actions.add_parser('add')
     add.add_argument('repository', type=repository)
     add.add_argument('--source', choices=('owned', 'managed', 'responsible'), default='responsible')
-    actions.add_parser('list')
+    listing = actions.add_parser('list')
+    listing.add_argument('--candidates', action='store_true', help='소유·관리 권한으로 발견한 미등록 후보')
     remove = actions.add_parser('remove')
     remove.add_argument('repository', type=repository)
     analysis = commands.add_parser('analysis', help='모델 서비스 코드 전송 허용 관리')
@@ -37,27 +38,34 @@ def parser():
         group = p.add_mutually_exclusive_group(required=True)
         group.add_argument('repository', type=repository, nargs='?')
         group.add_argument('--org')
-    for command in ('collect', 'analyze', 'web', 'doctor'):
+    commands.add_parser('collect', help='gh 로그인으로 PR 읽기 전용 수집')
+    for command in ('analyze', 'web', 'doctor'):
         commands.add_parser(command, help='후속 PR에서 구현 예정')
     return root
 
 
 def main(argv=None):
     args = parser().parse_args(argv)
-    if args.command in ('collect', 'analyze', 'web', 'doctor'):
+    if args.command in ('analyze', 'web', 'doctor'):
         print(f'{args.command}: 아직 구현되지 않았습니다.', file=sys.stderr)
         return 2
     try:
         config = Config.load()
         conn = connect(config)
         try:
+            if args.command == 'collect':
+                from .collect import Collector
+                count = Collector(conn, config).collect()
+                print(f'PR {count}개를 수집했습니다.')
+                return 0
             with conn:
                 if args.command == 'analysis' and args.action == 'allow':
                     print('허용된 코드가 선택한 LLM CLI의 모델 서비스로 전송될 수 있습니다.', flush=True)
                 if args.command == 'repo':
                     if args.action == 'list':
                         print('저장소\t출처\t활성\t분석 정책\t분석 허용')
-                        for row in conn.execute('SELECT * FROM repositories WHERE tracked=1 ORDER BY owner,name'):
+                        condition = "tracked=0 AND source IN ('owned','managed')" if args.candidates else 'tracked=1'
+                        for row in conn.execute('SELECT * FROM repositories WHERE ' + condition + ' ORDER BY owner,name'):
                             print(f"{row['owner']}/{row['name']}\t{row['source']}\t{row['enabled']}\t"
                                   f"{row['analysis_policy']}\t{int(analysis_allowed(conn, row['id']))}")
                     elif args.action == 'add':
@@ -95,6 +103,9 @@ def main(argv=None):
                     if not result.rowcount:
                         raise ValueError('등록되지 않은 저장소입니다')
                     print('저장소 분석 정책을 변경했습니다.')
+            if args.command == 'repo' and args.action == 'remove':
+                from .collect import Collector
+                Collector(conn, config).clean_cache()
         finally:
             conn.close()
     except (OSError, ValueError, sqlite3.Error) as exc:
