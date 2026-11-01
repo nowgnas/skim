@@ -4,6 +4,7 @@ import re
 from . import jobs
 from .db import analysis_allowed
 from .repos import web_repository
+from .hosts import registered
 
 JOB_PATHS = {'/jobs/collect', '/jobs/analyze', '/jobs/doctor'}
 RECOVERY = [
@@ -93,7 +94,7 @@ def analysis_panel(conn, pr, csrf, offline):
         body += '<p><strong>' + WARNING + '</strong></p>'
         body += '<p class="muted">하루 20회 모델 호출 예산과 격리 검사는 수동 요청에도 적용됩니다.' + (' draft PR도 같은 동의, 예산을 따릅니다.' if pr['draft'] else '') + '</p>'
         body += form('/jobs/analyze', csrf,
-                     f'<input type="hidden" name="repository" value="{esc(pr["owner"] + "/" + pr["name"])}">'
+                     f'<input type="hidden" name="host" value="{esc(pr.get("host", "github.com"))}"><input type="hidden" name="repository" value="{esc(pr["owner"] + "/" + pr["name"])}">'
                      f'<input type="hidden" name="number" value="{int(pr["number"])}"><button>이 PR 분석</button>')
     running = jobs.active(conn, 'analyze')
     if running is not None and running['target_id'] != pr['id']:
@@ -137,13 +138,14 @@ def mutate(server, conn, path, data):
         fields(data, ())
         jobs.enqueue(conn, 'doctor', 0, '로컬 환경')
         return '/status'
-    d = fields(data, ('repository', 'number'))
+    d = fields(data, ('repository', 'number'), ('host',))
+    host = registered(conn, d.get('host', 'github.com'))
     owner, name = web_repository(d['repository'])
     if not re.fullmatch(r'[1-9][0-9]{0,9}', d['number']):
         raise Rejected('PR 번호 형식을 확인하세요')
     pr = conn.execute('SELECT p.id,p.repo_id,p.state,p.number,p.head_sha,p.base_sha,r.owner,r.name FROM pull_requests p '
-                      'JOIN repositories r ON r.id=p.repo_id WHERE r.owner=? AND r.name=? AND p.number=?',
-                      (owner, name, int(d['number']))).fetchone()
+                      'JOIN repositories r ON r.id=p.repo_id WHERE r.host=? AND r.owner=? AND r.name=? AND p.number=?',
+                      (host, owner, name, int(d['number']))).fetchone()
     if pr is None or pr['state'] != 'open':
         raise Rejected('수집된 열린 PR이 아닙니다', 404)
     location = f'/pr/{pr["id"]}'
