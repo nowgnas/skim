@@ -39,7 +39,7 @@ def esc(value):
 
 
 def meta(*values):
-    return '<p class="meta">' + ''.join(f'<span>{esc(value)}</span>' for value in values) + '</p>'
+    return '<p class="meta">' + ''.join(f'<span>{esc(value)}</span>' for value in values if value not in (None, '')) + '</p>'
 
 
 def page(title, content):
