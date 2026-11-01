@@ -259,12 +259,12 @@ def host_field(conn):
 
 def host_settings(server, conn, csrf):
     from .web import esc
-    body = '<h2>GitHub 호스트</h2><p>호스트 삭제 시 기록은 보존하고 대시보드에서 숨깁니다. 저장소 추적·수집과 분석 허용을 끄고 조직 정책을 삭제합니다.</p>'
+    body = '<h2>GitHub 호스트</h2><p>호스트 삭제 시 기록은 보존하고 대시보드에서 숨깁니다. 저장소 추적과 수집과 분석 허용을 끄고 조직 정책을 삭제합니다.</p>'
     for row in conn.execute('SELECT host FROM github_hosts ORDER BY host'):
         host = row[0]
         cached = getattr(server, 'host_auth', {}).get(host)
         status = ('로그인됨' if cached[0] else '로그인 안 됨') if cached else '미확인'
-        status += ' · 마지막 확인: ' + (cached[1] if cached else '없음')
+        status += ' 마지막 확인: ' + (cached[1] if cached else '없음')
         body += '<article>' + esc(host) + ': ' + status
         body += form('/hosts/check', csrf, f'<input type="hidden" name="host" value="{esc(host)}"><button>인증 다시 확인</button>')
         if host != 'github.com':
