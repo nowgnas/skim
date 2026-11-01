@@ -170,7 +170,7 @@ class JobTests(unittest.TestCase):
         with closing(connect(self.config)) as conn, conn:
             row, _ = jobs.enqueue(conn, 'doctor')
         body = self.request('/status')[2]
-        self.assertIn('<p class="meta" data-job-field="summary"><span>', body)
+        self.assertIn('<p class="meta" aria-live="polite" data-job-field="summary"><span>', body)
         payload = json.loads(self.request('/jobs/' + str(row['id']))[2])
         self.assertEqual(payload['summary'], ', '.join(payload['summary_parts']))
         self.assertNotIn('·', payload['summary'])

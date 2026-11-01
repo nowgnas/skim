@@ -90,6 +90,9 @@ class WebTests(unittest.TestCase):
             with self.subTest(path=path):
                 body = self.request(path)[2]
                 self.assertIn('<title>' + title + ' | skim</title>', body)
+                active = '/' if path.startswith('/pr/') else path
+                self.assertIn(f'href="{active}" aria-current="page"', body)
+                self.assertIn('<main id="main">', body)
                 self.assertNotIn('·', body)
                 self.assertNotIn('—', body)
                 if path != '/status':
@@ -102,7 +105,7 @@ class WebTests(unittest.TestCase):
         with closing(connect(self.config)) as conn, conn:
             conn.execute("UPDATE analyses SET created_at='same-analysis'")
         body = self.request()[2]
-        cards = body.split('<article>')[2:]
+        cards = body.split('<article class="issue-row">')[1:]
         if '<span>분석 same-analysis</span>' in body.split('<h2><a href="/pr/')[0]:
             self.assertEqual(body.count('<span>분석 same-analysis</span>'), 1)
             for card in cards:
@@ -111,8 +114,8 @@ class WebTests(unittest.TestCase):
             self.assertTrue(any('<span>분석 대기</span>' in card for card in cards))
 
     def test_card_heading_precedes_meta(self):
-        card = self.request()[2].split('<article>')[2]
-        self.assertTrue(card.startswith('<h2>'))
+        card = self.request()[2].split('<article class="issue-row">')[1]
+        self.assertLess(card.index('<h2>'), card.index('class="meta"'))
 
     def test_collection_time_shared_only_for_visible_matching_cards(self):
         with closing(connect(self.config)) as conn, conn:
@@ -120,7 +123,7 @@ class WebTests(unittest.TestCase):
         body = self.request()[2]
         self.assertEqual(body.count('<span>수집 shared-time</span>'), 1)
         self.assertLess(body.index('<span>수집 shared-time</span>'), body.index('<h2><a href="/pr/'))
-        for card in body.split('<article>')[2:]:
+        for card in body.split('<article class="issue-row">')[1:]:
             self.assertNotIn('<span>수집 ', card)
         self.assertIn('<span>분석 ', body)
         with closing(connect(self.config)) as conn, conn:
