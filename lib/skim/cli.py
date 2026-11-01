@@ -6,6 +6,7 @@ import sqlite3
 import sys
 from .config import Config
 from .db import analysis_allowed, connect
+from .hosts import hostname, registered
 
 
 OWNER_PATTERN = r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?"
@@ -27,15 +28,18 @@ def parser():
     actions = repo.add_subparsers(dest='action', required=True)
     add = actions.add_parser('add')
     add.add_argument('repository', type=repository)
+    add.add_argument('--host', type=hostname, default='github.com')
     add.add_argument('--source', choices=('owned', 'managed', 'responsible'), default='responsible')
     listing = actions.add_parser('list')
     listing.add_argument('--candidates', action='store_true', help='소유·관리 권한으로 발견한 미등록 후보')
     remove = actions.add_parser('remove')
     remove.add_argument('repository', type=repository)
+    remove.add_argument('--host', type=hostname, default='github.com')
     analysis = commands.add_parser('analysis', help='모델 서비스 코드 전송 허용 관리')
     policies = analysis.add_subparsers(dest='action', required=True)
     for action in ('allow', 'deny', 'reset'):
         p = policies.add_parser(action)
+        p.add_argument('--host', type=hostname, default='github.com')
         group = p.add_mutually_exclusive_group(required=True)
         group.add_argument('repository', type=repository, nargs='?')
         group.add_argument('--org')
@@ -94,27 +98,33 @@ def main(argv=None):
             removing = args.command == 'repo' and args.action == 'remove'
             with collector.lock() if removing else nullcontext():
                 with conn:
+                    if hasattr(args, 'host'):
+                        args.host = registered(conn, args.host)
                     if args.command == 'analysis' and args.action == 'allow':
                         print('허용된 코드가 선택한 LLM CLI의 모델 서비스로 전송될 수 있습니다.', flush=True)
                     if args.command == 'repo':
                         if args.action == 'list':
-                            print('저장소\t출처\t활성\t분석 정책\t분석 허용')
+                            print('호스트\t저장소\t출처\t활성\t분석 정책\t분석 허용')
                             condition = "tracked=0 AND source IN ('owned','managed')" if args.candidates else 'tracked=1'
                             for row in conn.execute('SELECT * FROM repositories WHERE ' + condition + ' ORDER BY owner,name'):
-                                print(f"{row['owner']}/{row['name']}\t{row['source']}\t{row['enabled']}\t"
+                                print(f"{row['host']}\t{row['owner']}/{row['name']}\t{row['source']}\t{row['enabled']}\t"
                                       f"{row['analysis_policy']}\t{int(analysis_allowed(conn, row['id']))}")
                         elif args.action == 'add':
                             from .repos import add_repository
-                            add_repository(conn, args.repository, args.source)
+                            add_repository(conn, args.repository, args.source, args.host)
                             print('저장소를 등록했습니다. 분석은 별도 허용이 필요합니다.')
                         else:
                             from .repos import remove_repository
-                            remove_repository(conn, args.repository)
+                            remove_repository(conn, args.repository, args.host)
                             print('저장소 추적을 해제했습니다.')
                     elif args.org is not None:
                         if not re.fullmatch(OWNER_PATTERN, args.org):
                             raise ValueError('잘못된 조직 이름입니다')
-                        if args.action == 'reset':
+                        if args.host != 'github.com':
+                            conn.execute('DELETE FROM host_organization_policies WHERE host=? AND owner=?', (args.host, args.org))
+                            if args.action != 'reset':
+                                conn.execute('INSERT INTO host_organization_policies VALUES(?,?,?)', (args.host, args.org, args.action))
+                        elif args.action == 'reset':
                             conn.execute('DELETE FROM organization_policies WHERE owner=?', (args.org,))
                         else:
                             conn.execute('INSERT INTO organization_policies VALUES(?,?) '
@@ -122,8 +132,8 @@ def main(argv=None):
                         print('조직 분석 정책을 변경했습니다.')
                     else:
                         policy = 'inherit' if args.action == 'reset' else args.action
-                        result = conn.execute("UPDATE repositories SET analysis_policy=? WHERE host='github.com' AND owner=? AND name=?",
-                                              (policy, *args.repository))
+                        result = conn.execute("UPDATE repositories SET analysis_policy=? WHERE host=? AND owner=? AND name=?",
+                                              (policy, args.host, *args.repository))
                         if not result.rowcount:
                             raise ValueError('등록되지 않은 저장소입니다')
                         print('저장소 분석 정책을 변경했습니다.')

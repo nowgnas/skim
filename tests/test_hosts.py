@@ -128,6 +128,38 @@ class HostTests(unittest.TestCase):
             self.assertIn(HOST, calls)
             self.assertGreater(conn.execute("SELECT count(*) FROM pull_requests p JOIN repositories r ON r.id=p.repo_id WHERE r.host='github.com'").fetchone()[0], 0)
 
+    def test_cli_host_scopes_repository_and_organization_policy(self):
+        from contextlib import redirect_stdout, redirect_stderr
+        from io import StringIO
+        from skim.cli import main
+        with closing(db.connect(self.config)) as conn, conn:
+            conn.execute('INSERT INTO github_hosts VALUES(?)', (HOST,))
+        output = StringIO()
+        with redirect_stdout(output), redirect_stderr(StringIO()):
+            self.assertEqual(main(['repo', 'add', 'org/repo']), 0)
+            self.assertEqual(main(['repo', 'add', 'org/repo', '--host', HOST.upper()]), 0)
+            self.assertEqual(main(['analysis', 'allow', '--org', 'org', '--host', HOST]), 0)
+            with closing(db.connect(self.config)) as conn:
+                rows = conn.execute('SELECT id,host FROM repositories ORDER BY host').fetchall()
+                for row in rows:
+                    self.assertEqual(db.analysis_allowed(conn, row['id']), row['host'] == HOST)
+            self.assertEqual(main(['analysis', 'deny', 'org/repo', '--host', HOST]), 0)
+            self.assertEqual(main(['repo', 'list']), 0)
+            self.assertIn('호스트\t저장소', output.getvalue())
+            self.assertIn(HOST + '\torg/repo', output.getvalue())
+            self.assertEqual(main(['repo', 'remove', 'org/repo', '--host', HOST]), 0)
+            self.assertEqual(main(['analysis', 'reset', '--org', 'org', '--host', HOST]), 0)
+            self.assertEqual(main(['analysis', 'reset', 'org/repo', '--host', HOST]), 0)
+            for command in [['repo', 'add', 'org/other'], ['repo', 'remove', 'org/repo'], ['analysis', 'allow', 'org/repo']]:
+                self.assertEqual(main(command + ['--host', 'unregistered.example']), 1)
+            for host in ['bad:443', 'K.com', 'bad\x00.com']:
+                with self.assertRaises(SystemExit):
+                    main(['repo', 'add', 'org/repo', '--host', host])
+        with closing(db.connect(self.config)) as conn:
+            self.assertEqual([tuple(r) for r in conn.execute('SELECT host,tracked,analysis_policy FROM repositories ORDER BY host')],
+                             [('github.com', 1, 'inherit'), (HOST, 0, 'inherit')])
+            self.assertEqual(conn.execute('SELECT count(*) FROM host_organization_policies').fetchone()[0], 0)
+
     def test_doctor_checks_all_hosts_and_hides_raw_output(self):
         with closing(db.connect(self.config)) as conn, conn:
             conn.execute('INSERT INTO github_hosts VALUES(?)', (HOST,))
