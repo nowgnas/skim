@@ -6,6 +6,10 @@ GitHub PR을 모아 변경 목적과 중요도를 보여주는 로컬 검토 도
 
 ![데모 데이터로 본 skim 대시보드](docs/images/dashboard.png)
 
+![데모 PR 상세 화면](docs/images/detail.png)
+
+<img src="docs/images/dashboard-phone.png" alt="휴대폰 폭(390px)에서 본 대시보드" width="240">
+
 ## 설치와 시작
 
 Python 3.11 이상, Git, GitHub CLI(`gh`)가 필요합니다. 별도 Python 패키지는 필요하지 않습니다.
