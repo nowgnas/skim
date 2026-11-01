@@ -76,6 +76,67 @@ class WebTests(unittest.TestCase):
         lines = head.decode().split('\r\n')
         return int(lines[0].split()[1]), dict(line.split(': ', 1) for line in lines[1:]), content.decode()
 
+    def test_page_titles_and_separator_free_markup(self):
+        # PR 원문은 보존하고, 화면에서 추가하는 구분 문자를 검사한다.
+        with closing(connect(self.config)) as conn, conn:
+            conn.execute("UPDATE pull_requests SET title='수집 완료, 분석 대기' WHERE id=4")
+        self.server.offline = True
+        for path, title in [('/', '대시보드'), ('/repos', '저장소'),
+                            ('/settings', '설정'), ('/status', '상태'),
+                            ('/pr/1', '결제 인증 경계 보완')]:
+            with self.subTest(path=path):
+                body = self.request(path)[2]
+                self.assertIn('<title>' + title + ' | skim</title>', body)
+                self.assertNotIn('·', body)
+                self.assertNotIn('—', body)
+                if path != '/status':
+                    self.assertIn('class="meta"', body)
+        with closing(connect(self.config)) as conn, conn:
+            conn.execute('UPDATE pull_requests SET title=? WHERE id=1', ('<PR & 제목>',))
+        self.assertIn('<title>&lt;PR &amp; 제목&gt; | skim</title>', self.request('/pr/1')[2])
+
+    def test_analysis_time_shared_once_when_identical(self):
+        with closing(connect(self.config)) as conn, conn:
+            conn.execute("UPDATE analyses SET created_at='same-analysis'")
+        body = self.request()[2]
+        cards = body.split('<article>')[2:]
+        if '<span>분석 same-analysis</span>' in body.split('<h2><a href="/pr/')[0]:
+            self.assertEqual(body.count('<span>분석 same-analysis</span>'), 1)
+            for card in cards:
+                self.assertNotIn('<span>분석 ', card)
+        else:
+            self.assertTrue(any('<span>분석 대기</span>' in card for card in cards))
+
+    def test_card_heading_precedes_meta(self):
+        card = self.request()[2].split('<article>')[2]
+        self.assertTrue(card.startswith('<h2>'))
+
+    def test_collection_time_shared_only_for_visible_matching_cards(self):
+        with closing(connect(self.config)) as conn, conn:
+            conn.execute("UPDATE snapshots SET collected_at='shared-time'")
+        body = self.request()[2]
+        self.assertEqual(body.count('<span>수집 shared-time</span>'), 1)
+        self.assertLess(body.index('<span>수집 shared-time</span>'), body.index('<h2><a href="/pr/'))
+        for card in body.split('<article>')[2:]:
+            self.assertNotIn('<span>수집 ', card)
+        self.assertIn('<span>분석 ', body)
+        with closing(connect(self.config)) as conn, conn:
+            conn.execute("UPDATE snapshots SET collected_at='other-time' WHERE pr_id=1")
+        body = self.request()[2]
+        self.assertIn('<span>수집 other-time</span>', body)
+        self.assertGreater(body.count('<span>수집 shared-time</span>'), 1)
+        filtered = self.request('/?importance=low')[2]
+        self.assertEqual(filtered.count('<span>수집 shared-time</span>'), 1)
+        self.assertNotIn('other-time', filtered)
+        empty = self.request('/?repo=missing')[2]
+        self.assertNotIn('<span>수집 ', empty)
+        with closing(connect(self.config)) as conn, conn:
+            conn.execute('DELETE FROM analyses')
+            conn.execute('DELETE FROM snapshots WHERE pr_id=1')
+        body = self.request()[2]
+        self.assertIn('<span>수집 대기</span>', body)
+        self.assertIn('<span>수집 shared-time</span>', body)
+
     def test_token_ttl_one_use_and_restart(self):
         token = self.auth.issue()
         self.assertIsNone(self.auth.redeem(token + 'bad'))
@@ -93,7 +154,7 @@ class WebTests(unittest.TestCase):
             conn.execute("UPDATE pull_requests SET author='Me',head_branch='feature/payment' WHERE id=1")
         with patch('skim.sessio.GitHub.get', return_value={'login': 'me'}) as gh:
             body = self.request('/pr/1')[2]
-            self.assertIn('Sessio · abc-123', body)
+            self.assertIn('Sessio: abc-123', body)
             self.assertIn('http://127.0.0.1:8765/#/s/codex%3Aabc-123', body)
             gh.assert_called_once_with('user')
             self.assertNotIn('Sessio', self.request('/')[2])
@@ -160,9 +221,9 @@ class WebTests(unittest.TestCase):
             analysis = conn.execute('SELECT model, cli_version FROM analyses WHERE snapshot_id=1 ORDER BY id DESC LIMIT 1').fetchone()
         self.assertIn('모델 ' + analysis['model'], body)
         self.assertIn('Codex CLI ' + analysis['cli_version'], body)
-        self.assertIn('<details open><summary>auth/session.py', body)
-        self.assertIn('<details open><summary>.env', body)
-        self.assertIn('<details><summary>README.md', body)
+        self.assertIn('<details open><summary><span class="meta"><span>auth/session.py', body)
+        self.assertIn('<details open><summary><span class="meta"><span>.env', body)
+        self.assertIn('<details><summary><span class="meta"><span>README.md', body)
         self.assertIn('규칙 기반 후보', body)
         self.assertIn('미분석', body)
         self.assertIn('https://github.com/demo/checkout/pull/1', body)
@@ -185,8 +246,8 @@ class WebTests(unittest.TestCase):
             conn.execute('UPDATE analyses SET output_json=? WHERE id=?', (json.dumps(result), row['id']))
         body = self.request('/pr/1')[2]
         hunk = next(part.split('</details>')[0] for part in body.split('<details')
-                    if ' · ' + unit['change_id'] + ' · ' in part)
-        self.assertIn('<p>규칙 후보: logic_without_tests · 설치 스크립트</p>', hunk)
+                    if '<span>' + unit['change_id'] + '</span>' in part)
+        self.assertIn('<p>규칙 후보: logic_without_tests, 설치 스크립트</p>', hunk)
         self.assertIn('<p>모델 판단: config</p>', hunk)
         for page in (body.split('<details')[0], self.request()[2]):
             self.assertIn('설치 스크립트', page)
@@ -225,8 +286,8 @@ class WebTests(unittest.TestCase):
             conn.execute("INSERT INTO snapshots(pr_id,base_sha,head_sha,diff_hash,input_hash,diff_path,coverage) VALUES(1,'base','new','d','i',?,?)", (row['diff_path'], row['coverage']))
         body = self.request('/pr/1')[2]
         self.assertIn('이전 SHA 결과', body)
-        self.assertIn('README.md · h', body)
-        self.assertNotIn('<details><summary>README.md', body)
+        self.assertIn('README.md</span><span>h', body)
+        self.assertNotIn('<details><summary><span class="meta"><span>README.md', body)
 
     def test_single_instance_reissues_url_and_private_socket_cleanup(self):
         url = self.server.origin + '/entry#fixture-token'

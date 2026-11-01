@@ -38,12 +38,16 @@ def esc(value):
     return escape(str(value if value is not None else ''), quote=True)
 
 
+def meta(*values):
+    return '<p class="meta">' + ''.join(f'<span>{esc(value)}</span>' for value in values if value not in (None, '')) + '</p>'
+
+
 def page(title, content):
     return ('<!doctype html><html lang="ko"><meta charset="utf-8">'
             '<meta name="viewport" content="width=device-width,initial-scale=1">'
-            f'<title>{esc(title)} · skim</title><link rel="stylesheet" href="/static/app.css">'
+            f'<title>{esc(title)} | skim</title><link rel="stylesheet" href="/static/app.css">'
             '<header><a class="brand" href="/">skim</a><span>PR 검토 대시보드</span>'
-            '<a href="/repos">저장소</a><a href="/status">상태 · 작업</a><a href="/settings">분석 허용 · 모델 설정</a></header><main>' + content + '</main></html>')
+            '<a href="/repos">저장소</a><a href="/status">상태</a><a href="/settings">설정</a></header><main>' + content + '</main></html>')
 
 
 class Auth:
@@ -139,14 +143,14 @@ def load_prs(conn, config):
 def badges(pr):
     labels = []
     if pr['rule_flags']:
-        labels.append('규칙 후보: ' + ' · '.join(RULE_LABELS.get(flag, flag) for flag in pr['rule_flags']))
+        labels.append('규칙 후보: ' + ', '.join(RULE_LABELS.get(flag, flag) for flag in pr['rule_flags']))
     if pr['model_flags']:
-        labels.append('모델 판단: ' + ' · '.join(pr['model_flags']))
+        labels.append('모델 판단: ' + ', '.join(pr['model_flags']))
     if pr['unanalysed']:
         labels.append('모델 판단: 미분석' if not pr['items'] else '모델 판단: 일부 미분석')
     return (f'<span class="badge {esc(pr["importance"])}">{esc(pr["importance"])}</span> '
-            + esc(' / '.join(labels))
-            + (' · 이전 SHA 결과' if pr['stale'] else '') + (' · draft' if pr['draft'] else ''))
+            + ''.join(f'<span>{esc(label)}</span>' for label in labels)
+            + ('<span>이전 SHA 결과</span>' if pr['stale'] else '') + ('<span>draft</span>' if pr['draft'] else ''))
 
 
 def listing(prs, query, csrf):
@@ -162,17 +166,29 @@ def listing(prs, query, csrf):
             content += f'<option value="{esc(value)}"{selected}>{esc(value)}</option>'
         content += '</select></label>'
     content += '<button>필터 적용</button></form>'
+    has_prs = bool(prs)
+    prs = [pr for pr in prs if all(
+        not query.get(key, [''])[0] or query[key][0] == value
+        or (key == 'status' and query[key][0] == 'stale' and pr['stale'])
+        for key, value in dict(repo=pr['owner'] + '/' + pr['name'], importance=pr['importance'],
+                               status=pr['status'], review=str(pr['review'])).items())]
+    collected = {pr['snapshot']['collected_at'] if pr['snapshot'] else '대기' for pr in prs}
+    shared_collection = len(collected) == 1
+    analyzed = {pr['analysis']['created_at'] if pr['analysis'] else '대기' for pr in prs}
+    shared_analysis = len(analyzed) == 1
+    if shared_collection or shared_analysis:
+        content += meta(*(['수집 ' + next(iter(collected))] if shared_collection else []),
+                        *(['분석 ' + next(iter(analyzed))] if shared_analysis else []))
     for pr in prs:
         values = dict(repo=pr['owner'] + '/' + pr['name'], importance=pr['importance'], status=pr['status'], review=str(pr['review']))
-        if any(query.get(key, [''])[0] and query[key][0] != value and not (key == 'status' and query[key][0] == 'stale' and pr['stale']) for key, value in values.items()):
-            continue
         a, s = pr['analysis'], pr['snapshot']
-        content += (f'<article><div class="muted">{esc(values["repo"])} #{pr["number"]} · {esc(pr["author"])}'
-                    + (' · 리뷰 요청' if pr['review'] else '') + '</div>'
-                    f'<h2><a href="/pr/{pr["id"]}">{esc(pr["title"])}</a></h2>'
-                    f'<p>{esc(a["intent"] if a and a["intent"] else "의도 미분석")}</p><p>{badges(pr)}</p>'
-                    f'<div class="muted">{esc(pr["status"])} · 수집 {esc(s["collected_at"] if s else "대기")} · 분석 {esc(a["created_at"] if a else "대기")}</div></article>')
-    return content + ('<p class="muted">열린 PR이 없습니다. <a href="/repos">저장소 연결</a>과 <a href="/status">상태 점검</a>, <a href="/settings">설정</a>을 확인하세요.</p>' if not prs else '')
+        content += ('<article>' + f'<h2><a href="/pr/{pr["id"]}">{esc(pr["title"])}</a></h2>'
+                    + meta(values['repo'] + ' #' + str(pr['number']), pr['author'],
+                           *(['리뷰 요청'] if pr['review'] else []))
+                    + f'<p>{esc(a["intent"] if a and a["intent"] else "의도 미분석")}</p><p class="meta">{badges(pr)}</p>'
+                    + meta(pr['status'], *([] if shared_collection else ['수집 ' + (s['collected_at'] if s else '대기')]),
+                           *([] if shared_analysis else ['분석 ' + (a['created_at'] if a else '대기')])) + '</article>')
+    return content + ('<p class="muted">열린 PR이 없습니다. <a href="/repos">저장소 연결</a>과 <a href="/status">상태 점검</a>, <a href="/settings">설정</a>을 확인하세요.</p>' if not has_prs else '')
 
 
 def github(pr):
@@ -191,17 +207,17 @@ def detail(pr, query, config, offline=False):
     session = None if offline else session_link(config, pr)
     if session:
         sid, url = session
-        content += f'<p><a href="{esc(url)}" rel="noreferrer">Sessio · {esc(sid)} ↗</a></p>'
-    content += f'<article><h2>의도</h2><p>{esc(a["intent"] if a and a["intent"] else "미분석 — 분석 결과가 없습니다.")}</p><h2>위험 요약</h2><p>{badges(pr)}</p><p>{esc(pr["status"])} {esc(a["error"] if a else "")}</p>'
+        content += f'<p><a href="{esc(url)}" rel="noreferrer">Sessio: {esc(sid)} ↗</a></p>'
+    content += f'<article><h2>의도</h2><p>{esc(a["intent"] if a and a["intent"] else "미분석: 분석 결과가 없습니다.")}</p><h2>위험 요약</h2><p class="meta">{badges(pr)}</p><p>{esc(pr["status"])} {esc(a["error"] if a else "")}</p>'
     if a:
-        content += f'<p class="muted">모델 {esc(a["model"])} · Codex CLI {esc(a["cli_version"])}</p>'
+        content += meta('모델 ' + a['model'], 'Codex CLI ' + a['cli_version'])
     if s:
         coverage = json.loads(s['coverage'])
         stats = coverage.get('analysis', {})
-        content += '<p>수집 상태: ' + esc(coverage.get('status', '대기')) + ' · ' + esc(coverage.get('collection_error', '')) + '</p>'
-        content += '<p>분석 ' + esc(stats.get('analyzed', 0)) + ' · 제외 ' + esc(stats.get('excluded', 0)) + ' · 누락 ' + esc(stats.get('omitted', 0)) + '</p>'
-        content += f'<p class="muted">수집 {esc(s["collected_at"])} · 분석 {esc(a["created_at"] if a else "대기")}</p>'
-    content += '</article><p><a href="?order=original">원래 파일 순서</a> · <a href="?order=priority">검토 우선순위</a> · <a href="?diff=1">전체 diff 보기</a></p>'
+        content += meta('수집 상태: ' + coverage.get('status', '대기'), coverage.get('collection_error', ''))
+        content += meta('분석 ' + str(stats.get('analyzed', 0)), '제외 ' + str(stats.get('excluded', 0)), '누락 ' + str(stats.get('omitted', 0)))
+        content += meta('수집 ' + s['collected_at'], '분석 ' + (a['created_at'] if a else '대기'))
+    content += '</article><p class="meta"><a href="?order=original">원래 파일 순서</a> <a href="?order=priority">검토 우선순위</a> <a href="?diff=1">전체 diff 보기</a></p>'
     units = list(pr['units'])
     def priority(unit):
         item = pr['items'].get(unit['change_id'])
@@ -217,11 +233,11 @@ def detail(pr, query, config, offline=False):
         flags = unit.get('candidates', [])
         opened = bool(flags) or not item or item['importance'] == 'high'
         importance = item['importance'] if item else '미분석'
-        content += (f'<details{" open" if opened else ""}><summary>{esc(unit["file_path"])} · {esc(unit["change_id"])} · {esc(importance)}'
-                    + (' · 규칙 기반 후보' if flags else '') + '</summary>'
+        content += (f'<details{" open" if opened else ""}><summary><span class="meta"><span>{esc(unit["file_path"])}</span><span>{esc(unit["change_id"])}</span><span>{esc(importance)}</span>'
+                    + ('<span>규칙 기반 후보</span>' if flags else '') + '</span></summary>'
                     f'<p>{esc(item["reason"] if item else unit.get("exclusion_reason") or unit.get("omission_reason") or "분석되지 않은 변경입니다")}</p>'
-                    f'<p>규칙 후보: {esc(" · ".join(RULE_LABELS.get(flag, flag) for flag in flags) or "없음")}</p>'
-                    f'<p>모델 판단: {esc((" · ".join(item.get("risk_flags", [])) or "없음") if item else "미분석")}</p>'
+                    f'<p>규칙 후보: {esc(", ".join(RULE_LABELS.get(flag, flag) for flag in flags) or "없음")}</p>'
+                    f'<p>모델 판단: {esc((", ".join(item.get("risk_flags", [])) or "없음") if item else "미분석")}</p>'
                     f'<p class="muted">이전 {esc(unit.get("old_range"))} → 새 줄 {esc(unit.get("new_range"))}</p>')
         if 'logic_without_tests' in flags:
             content += '<p>제공된 diff에서 관련 테스트 변경을 확인하지 못함</p>'
@@ -230,7 +246,7 @@ def detail(pr, query, config, offline=False):
             content += f'<a href="{esc(link)}/files#diff-{anchor}" rel="noreferrer">GitHub 변경</a>'
         content += f'<pre>{esc(unit.get("diff", ""))}</pre></details>'
     if not units:
-        content += '<article>미분석 — 수집된 변경 단위가 없습니다.</article>'
+        content += '<article>미분석: 수집된 변경 단위가 없습니다.</article>'
     if query.get('diff') == ['1']:
         content += '<h2>전체 원본 diff</h2><pre>' + esc(read_diff(config, s) or 'diff 캐시가 없습니다.') + '</pre>'
     return content
@@ -296,6 +312,7 @@ class Handler(BaseHTTPRequestHandler):
                 if row is None:
                     return self.reply(404, '{}', 'application/json')
                 return self.reply(200, json.dumps(web_jobs.describe(row), ensure_ascii=False), 'application/json; charset=utf-8')
+            title = {'/settings': '설정', '/repos': '저장소', '/status': '상태'}.get(url.path, '대시보드')
             if url.path in ('/settings', '/repos'):
                 body = render(self.server, conn, csrf, url.path)
             elif url.path == '/status':
@@ -309,9 +326,10 @@ class Handler(BaseHTTPRequestHandler):
                     pr = next((p for p in prs if match and p['id'] == int(match[1])), None)
                     if pr is None:
                         return self.reply(404, 'PR이 없습니다')
+                    title = pr['title']
                     body = (detail(pr, parse_qs(url.query), self.server.config, offline)
                             + web_jobs.analysis_panel(conn, pr, csrf, offline) + web_jobs.script())
-        self.reply(200, page('대시보드', body))
+        self.reply(200, page(title, body))
 
     def do_POST(self):
         if not self.check(mutation=True):
@@ -351,7 +369,7 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 location = mutate(self.server, self.path, data)
         except web_jobs.Rejected as exc:
-            return self.reply(exc.status, page('요청 거부', f'<p>{esc(exc)}</p><p><a href="/status">상태 · 작업</a> · <a href="/">PR 목록</a></p>'))
+            return self.reply(exc.status, page('요청 거부', f'<p>{esc(exc)}</p><p><a href="/status">상태</a> <a href="/">PR 목록</a></p>'))
         except (OSError, ValueError, sqlite3.Error):
             return self.reply(400, '입력과 설정을 확인하세요. 허용하려면 모델 서비스 전송 확인 체크가 필요합니다.')
         self.reply(303, extra=[('Location', location)])

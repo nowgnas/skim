@@ -166,6 +166,19 @@ class JobTests(unittest.TestCase):
         self.assertIn('<script src="/static/jobs.js" defer></script>', body)
         self.assertNotIn('<script>', body)
 
+    def test_job_metadata_survives_polling(self):
+        with closing(connect(self.config)) as conn, conn:
+            row, _ = jobs.enqueue(conn, 'doctor')
+        body = self.request('/status')[2]
+        self.assertIn('<p class="meta" data-job-field="summary"><span>', body)
+        payload = json.loads(self.request('/jobs/' + str(row['id']))[2])
+        self.assertEqual(payload['summary'], ', '.join(payload['summary_parts']))
+        self.assertNotIn('·', payload['summary'])
+        script = self.request('/static/jobs.js', authenticated=False)[2]
+        self.assertIn('field.replaceChildren', script)
+        self.assertIn("document.createElement('span')", script)
+        self.assertNotIn('·', script)
+
     def test_poll_script_retries_with_bounded_backoff(self):
         # 표준 라이브러리만으로 제공 스크립트의 재시도·종료 경로를 검사한다.
         script = self.request('/static/jobs.js', authenticated=False)[2]

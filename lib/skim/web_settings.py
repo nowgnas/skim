@@ -15,8 +15,8 @@ from .web_jobs import JOB_PATHS, job_box, script
 from .repos import web_repository, add_repository, remove_repository
 
 POST_PATHS = {'/repos/add', '/repos/remove', '/repos/load', '/settings/analysis', '/settings/model'} | JOB_PATHS
-WARNING = ('허용하면 PR 코드·diff와 제목·설명이 Codex CLI를 통해 모델 서비스로 전송됩니다. '
-           '민감 정보 제외는 완전하지 않으며 서비스의 전송·보존 정책이 적용됩니다.')
+WARNING = ('허용하면 PR 코드, diff와 제목, 설명이 Codex CLI를 통해 모델 서비스로 전송됩니다. '
+           '민감 정보 제외는 완전하지 않으며 서비스의 전송, 보존 정책이 적용됩니다.')
 
 
 class RepoLookup:
@@ -90,13 +90,13 @@ def policy_form(csrf, scope, target):
 
 
 def render(server, conn, csrf, path):
-    from .web import esc
+    from .web import esc, meta
     if path == '/repos':
         body = '<h1>저장소</h1><p>조직 저장소를 포함하여 GitHub에는 항상 읽기 전용으로 접근합니다.</p>'
         body += '<p>연결 해제는 로컬 추적만 해제합니다. 리뷰 요청 결과와 분석 정책은 보존되며 분석 동의 철회가 아닙니다. 분석 허용 화면에서 별도로 끄세요.</p>'
         for row in conn.execute('SELECT * FROM repositories WHERE tracked=1 ORDER BY owner,name'):
             name = row['owner'] + '/' + row['name']
-            body += '<article>' + esc(name) + ' · ' + esc(row['source'])
+            body += '<article>' + meta(name, row['source'])
             body += form('/repos/remove', csrf, f'<input type="hidden" name="repository" value="{esc(name)}"><button>연결 해제</button>') + '</article>'
         body += '<h2>직접 연결</h2>' + form('/repos/add', csrf, '<label>owner/repo<input name="repository" required maxlength="140"></label>' + source_field() + '<button>저장소 연결</button>')
         body += form('/repos/load', csrf, '<button>접근 가능한 저장소 불러오기</button>')
@@ -113,17 +113,17 @@ def render(server, conn, csrf, path):
         return body
     settings = json.loads((server.config.config_dir / 'config.json').read_text())
     model = settings.get('codex_model', '')
-    body = '<h1>설정 · 분석 허용</h1><p>' + WARNING + '</p><p>기본 꺼짐. 저장소의 명시적 허용·거부는 조직 정책보다 우선합니다. 조직 허용은 해당 조직의 모든 저장소에 적용됩니다.</p>'
+    body = '<h1>설정과 분석 허용</h1><p>' + WARNING + '</p><p>기본 꺼짐. 저장소의 명시적 허용, 거부는 조직 정책보다 우선합니다. 조직 허용은 해당 조직의 모든 저장소에 적용됩니다.</p>'
     for row in conn.execute('SELECT * FROM repositories ORDER BY owner,name'):
         name = row['owner'] + '/' + row['name']
-        body += '<article><h2>' + esc(name) + '</h2><p>정책: ' + esc(row['analysis_policy']) + ' · 실제 적용: ' + ('허용' if analysis_allowed(conn, row['id']) else '거부') + '</p>'
+        body += '<article><h2>' + esc(name) + '</h2>' + meta('정책: ' + row['analysis_policy'], '실제 적용: ' + ('허용' if analysis_allowed(conn, row['id']) else '거부'))
         body += policy_form(csrf, 'repo', name) + '</article>'
     body += '<h2>조직 정책</h2>'
     for row in conn.execute('SELECT owner,policy FROM organization_policies ORDER BY owner'):
         body += '<article><p>' + esc(row['owner']) + ': ' + esc(row['policy']) + '</p>'
         body += policy_form(csrf, 'org', row['owner']) + '</article>'
     body += policy_form(csrf, 'org', '')
-    body += '<h2>모델 설정</h2><p>파일 값: ' + esc(model or '미설정') + ' · 실제 적용: ' + esc(Config.parse_codex_model(settings) or '자동 감지') + '</p>'
+    body += '<h2>모델 설정</h2>' + meta('파일 값: ' + (model or '미설정'), '실제 적용: ' + (Config.parse_codex_model(settings) or '자동 감지'))
     if 'SKIM_CODEX_MODEL' in os.environ:
         body += '<p>SKIM_CODEX_MODEL 환경변수가 파일 설정보다 우선합니다.</p>'
     body += '<p>다음 분석부터 적용됩니다. 모델 변경 후 격리 검증이 일치하지 않으면 분석이 차단됩니다. skim doctor --probe로 재검증하세요.</p>'
