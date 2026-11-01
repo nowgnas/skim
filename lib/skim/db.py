@@ -169,14 +169,28 @@ def connect(config):
         raise
 
 
+def _org_policy(conn, row):
+    if row['host'] == 'github.com':
+        policy = conn.execute('SELECT policy FROM organization_policies WHERE owner=?', (row['owner'],)).fetchone()
+    else:
+        policy = conn.execute('SELECT policy FROM host_organization_policies WHERE host=? AND owner=?', (row['host'], row['owner'])).fetchone()
+    return policy and policy['policy']
+
+
 def analysis_allowed(conn, repo):
     row = conn.execute('SELECT host, owner, analysis_policy FROM repositories WHERE id=?', (repo,)).fetchone()
     if row is None:
         return False
     if row['analysis_policy'] != 'inherit':
         return row['analysis_policy'] == 'allow'
-    if row['host'] == 'github.com':
-        policy = conn.execute('SELECT policy FROM organization_policies WHERE owner=?', (row['owner'],)).fetchone()
-    else:
-        policy = conn.execute('SELECT policy FROM host_organization_policies WHERE host=? AND owner=?', (row['host'], row['owner'])).fetchone()
-    return policy is not None and policy['policy'] == 'allow'
+    return _org_policy(conn, row) == 'allow'
+
+
+def analysis_denied(conn, repo):
+    """저장소나 상속한 조직 정책이 명시적으로 거부인지. 미설정(기본 꺼짐)과 구분한다."""
+    row = conn.execute('SELECT host, owner, analysis_policy FROM repositories WHERE id=?', (repo,)).fetchone()
+    if row is None:
+        return True
+    if row['analysis_policy'] != 'inherit':
+        return row['analysis_policy'] == 'deny'
+    return _org_policy(conn, row) == 'deny'

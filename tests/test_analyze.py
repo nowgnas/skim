@@ -92,6 +92,22 @@ class AnalysisTests(unittest.TestCase):
         self.analyzer.run()
         self.assertEqual(self.conn.execute('SELECT cli_version FROM analyses ORDER BY id DESC').fetchone()[0], 'verified-2')
 
+    def test_skipped_counts_policy_and_draft(self):
+        with self.conn:
+            self.conn.execute("UPDATE repositories SET analysis_policy='inherit'")
+        self.assertEqual(self.analyzer.run(), [])
+        self.assertEqual(self.analyzer.skipped, {'not_allowed': 1})
+        with self.conn:
+            self.conn.execute("UPDATE repositories SET analysis_policy='allow'")
+            self.conn.execute('UPDATE pull_requests SET draft=1')
+        self.assertEqual(self.analyzer.run(), [])
+        self.assertEqual(self.analyzer.skipped, {'draft': 1})
+        with self.conn:
+            self.conn.execute("UPDATE pull_requests SET draft=0, head_sha='newer'")
+        self.assertEqual(self.analyzer.run(), [])
+        self.assertEqual(self.analyzer.skipped, {'stale': 1})
+        self.assertEqual(self.fake.calls, [])
+
     def snapshot(self, diff, files=()):
         path = self.config.data_dir / 'cache' / 'diff'
         path.write_text(diff)

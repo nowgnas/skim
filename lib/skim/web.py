@@ -20,6 +20,7 @@ from urllib.parse import parse_qs, urlsplit
 from .db import connect
 from .web_settings import POST_PATHS, RepoLookup, render, mutate
 from . import web_jobs
+from .paging import paginate
 from .jobs import worker, get as get_job
 from .analyze.units import parse_diff
 from .sessio import session_link
@@ -177,6 +178,7 @@ def listing(prs, query, csrf):
         or (key == 'status' and query[key][0] == 'stale' and pr['stale'])
         for key, value in dict(repo=repository_label(pr), importance=pr['importance'],
                                status=pr['status'], review=str(pr['review'])).items())]
+    prs, pager = paginate(prs, query, '/')
     collected = {pr['snapshot']['collected_at'] if pr['snapshot'] else '대기' for pr in prs}
     shared_collection = len(collected) == 1
     analyzed = {pr['analysis']['created_at'] if pr['analysis'] else '대기' for pr in prs}
@@ -193,7 +195,7 @@ def listing(prs, query, csrf):
                     + f'<p>{esc(a["intent"] if a and a["intent"] else "의도 미분석")}</p><p class="meta">{badges(pr)}</p>'
                     + meta(pr['status'], *([] if shared_collection else ['수집 ' + (s['collected_at'] if s else '대기')]),
                            *([] if shared_analysis else ['분석 ' + (a['created_at'] if a else '대기')])) + '</article>')
-    return content + ('<p class="muted">열린 PR이 없습니다. <a href="/repos">저장소 연결</a>과 <a href="/status">상태 점검</a>, <a href="/settings">설정</a>을 확인하세요.</p>' if not has_prs else '')
+    return content + pager + ('<p class="muted">열린 PR이 없습니다. <a href="/repos">저장소 연결</a>과 <a href="/status">상태 점검</a>, <a href="/settings">설정</a>을 확인하세요.</p>' if not has_prs else '')
 
 
 def github(pr):
@@ -324,7 +326,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(200, json.dumps(web_jobs.describe(row), ensure_ascii=False), 'application/json; charset=utf-8')
             title = {'/settings': '설정', '/repos': '저장소', '/status': '상태'}.get(url.path, '대시보드')
             if url.path in ('/settings', '/repos'):
-                body = render(self.server, conn, csrf, url.path)
+                body = render(self.server, conn, csrf, url.path, parse_qs(url.query))
             elif url.path == '/status':
                 body = web_jobs.status_page(conn, csrf, offline)
             else:

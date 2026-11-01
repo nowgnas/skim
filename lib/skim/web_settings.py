@@ -15,6 +15,7 @@ from . import jobs
 from .hosts import hostname, registered, authenticated
 from .web_jobs import JOB_PATHS, job_box, script
 from .repos import web_repository, add_repository, remove_repository
+from .paging import paginate
 
 POST_PATHS = {'/hosts/check', '/hosts/add', '/hosts/remove', '/repos/add', '/repos/remove', '/repos/load', '/settings/analysis', '/settings/model'} | JOB_PATHS
 WARNING = ('허용하면 PR 코드, diff와 제목, 설명이 Codex CLI를 통해 모델 서비스로 전송됩니다. '
@@ -106,17 +107,35 @@ def policy_form(csrf, scope, target, host="github.com"):
                 '<label><input type="checkbox" name="confirm" value="yes">코드가 Codex(모델 서비스)로 전송됨을 이해하고 허용합니다</label><button>분석 정책 저장</button>')
 
 
-def render(server, conn, csrf, path):
+def consent_form(csrf, host, repository, next_path):
+    """PR 상세에서 해당 저장소만 허용한다. 조직 허용은 설정 화면에서만 받는다."""
+    from .web import esc
+    return form('/settings/analysis', csrf,
+                f'<input type="hidden" name="host" value="{esc(host)}"><input type="hidden" name="scope" value="repo">'
+                f'<input type="hidden" name="target" value="{esc(repository)}"><input type="hidden" name="policy" value="allow">'
+                f'<input type="hidden" name="next" value="{esc(next_path)}">'
+                '<label><input type="checkbox" name="confirm" value="yes" required>코드가 Codex(모델 서비스)로 전송됨을 허용합니다</label>'
+                '<button>이 저장소 분석 허용</button>')
+
+
+def safe_next(value):
+    # 열린 리다이렉트를 막기 위해 PR 상세 경로만 돌아갈 곳으로 인정한다.
+    return value if value and re.fullmatch(r'/pr/[1-9][0-9]{0,17}', value) else '/settings'
+
+
+def render(server, conn, csrf, path, query=None):
     from .web import esc, meta
+    query = query or {}
     if path == '/repos':
         body = '<h1>저장소</h1><p>조직 저장소를 포함하여 GitHub에는 항상 읽기 전용으로 접근합니다.</p>'
         body += '<p>연결 해제는 로컬 추적만 해제합니다. 리뷰 요청 결과와 분석 정책은 보존되며 분석 동의 철회가 아닙니다. 분석 허용 화면에서 별도로 끄세요.</p>'
         body += host_settings(server, conn, csrf)
-        for row in conn.execute('SELECT * FROM repositories WHERE tracked=1 ORDER BY owner,name'):
+        tracked, pager = paginate(conn.execute('SELECT * FROM repositories WHERE tracked=1 ORDER BY owner,name').fetchall(), query, '/repos')
+        for row in tracked:
             name = row['owner'] + '/' + row['name']
             body += '<article>' + meta(row['host'], name, row['source'])
             body += form('/repos/remove', csrf, f'<input type="hidden" name="host" value="{esc(row["host"])}"><input type="hidden" name="repository" value="{esc(name)}"><button>연결 해제</button>') + '</article>'
-        body += '<h2>직접 연결</h2>' + form('/repos/add', csrf, host_field(conn) + '<label>owner/repo<input name="repository" required maxlength="140"></label>' + source_field() + '<button>저장소 연결</button>')
+        body += pager + '<h2>직접 연결</h2>' + form('/repos/add', csrf, host_field(conn) + '<label>owner/repo<input name="repository" required maxlength="140"></label>' + source_field() + '<button>저장소 연결</button>')
         body += form('/repos/load', csrf, host_field(conn) + '<button>접근 가능한 저장소 불러오기</button>')
         lookup = getattr(server, 'repo_lookup', None)
         lookup_host, items = lookup.snapshot(with_host=True) if lookup else ('github.com', [])
@@ -126,17 +145,28 @@ def render(server, conn, csrf, path):
         if running is not None:
             body += '<p>이미 저장소 조회 작업이 진행 중입니다. 완료 후 다시 요청하세요. 진행 중 요청은 새 작업을 만들지 않습니다.</p>'
         body += job_box(jobs.latest(conn, 'repos')) + script()
+        items, found_pager = paginate(items, query, '/repos', key='found')
         for name in items:
             body += '<article>' + esc(lookup_host + '/' + name) + form('/repos/add', csrf, f'<input type="hidden" name="host" value="{esc(lookup_host)}"><input type="hidden" name="repository" value="{esc(name)}">' + source_field() + '<button>선택하여 연결</button>') + '</article>'
-        return body
+        return body + found_pager
     settings = json.loads((server.config.config_dir / 'config.json').read_text())
     model = settings.get('codex_model', '')
     body = '<h1>설정과 분석 허용</h1><p>' + WARNING + '</p><p>기본 꺼짐. 저장소의 명시적 허용, 거부는 조직 정책보다 우선합니다. 조직 허용은 해당 조직의 모든 저장소에 적용됩니다.</p>'
-    for row in conn.execute('SELECT * FROM repositories ORDER BY owner,name'):
+    search = query.get('q', [''])[0].strip()[:140]
+    body += ('<form class="filters" method="get" action="/settings">' + f'<input type="hidden" name="csrf" value="{esc(csrf)}">'
+             + f'<label>저장소 검색<input name="q" value="{esc(search)}" maxlength="140"></label><button>검색</button></form>')
+    # 추적·정책 지정·열린 PR이 있는 저장소를 앞에 둬서 동의할 대상을 먼저 보이게 한다.
+    rows = conn.execute("SELECT r.*, EXISTS(SELECT 1 FROM pull_requests p WHERE p.repo_id=r.id AND p.state='open') AS has_open "
+                        "FROM repositories r ORDER BY r.tracked DESC, r.analysis_policy!='inherit' DESC, has_open DESC, "
+                        "r.host, r.owner, r.name").fetchall()
+    if search:
+        rows = [row for row in rows if search.lower() in (row['host'] + '/' + row['owner'] + '/' + row['name']).lower()]
+    rows, pager = paginate(rows, query, '/settings')
+    for row in rows:
         name = row['owner'] + '/' + row['name']
         body += '<article><h2>' + esc(row['host'] + '/' + name) + '</h2>' + meta('정책: ' + row['analysis_policy'], '실제 적용: ' + ('허용' if analysis_allowed(conn, row['id']) else '거부'))
         body += policy_form(csrf, 'repo', name, row['host']) + '</article>'
-    body += '<h2>조직 정책</h2>'
+    body += pager + ('<p class="muted">검색 결과가 없습니다.</p>' if search and not rows else '') + '<h2>조직 정책</h2>'
     for row in conn.execute('SELECT owner,policy FROM organization_policies ORDER BY owner'):
         body += '<article><p>' + esc(row['owner']) + ': ' + esc(row['policy']) + '</p>'
         body += policy_form(csrf, 'org', row['owner']) + '</article>'
@@ -224,7 +254,7 @@ def mutate(server, path, data):
                 d = fields(data, ('repository',), ('host',))
                 remove_repository(conn, web_repository(d['repository']), registered(conn, d.get('host', 'github.com')))
             else:
-                d = fields(data, ('scope', 'target', 'policy'), ('confirm', 'host'))
+                d = fields(data, ('scope', 'target', 'policy'), ('confirm', 'host', 'next'))
                 host = registered(conn, d.get('host', 'github.com'))
                 if d['policy'] not in ('allow', 'deny', 'reset') or d['scope'] not in ('repo', 'org'):
                     raise ValueError('분석 정책 형식이 잘못되었습니다')
@@ -248,6 +278,8 @@ def mutate(server, path, data):
                         conn.execute('INSERT INTO organization_policies VALUES(?,?) ON CONFLICT(owner) DO UPDATE SET policy=excluded.policy', (d['target'], d['policy']))
         if path == '/repos/remove':
             collector.clean_cache()
+    if path == '/settings/analysis':
+        return safe_next(d.get('next'))
     return '/repos' if path.startswith('/repos/') else '/settings'
 
 

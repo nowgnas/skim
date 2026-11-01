@@ -2,7 +2,7 @@
 import re
 
 from . import jobs
-from .db import analysis_allowed
+from .db import analysis_allowed, analysis_denied
 from .repos import web_repository
 from .hosts import registered
 
@@ -80,14 +80,19 @@ def collect_panel(conn, csrf, offline):
 
 def analysis_panel(conn, pr, csrf, offline):
     from .web import esc
-    from .web_settings import form, WARNING
+    from .web_settings import form, consent_form, WARNING
     body = '<article><h2>PR 분석 요청</h2>'
     snapshot = pr['snapshot']
     if offline:
         body += '<p>오프라인 모드에서는 모델 분석을 실행하지 않습니다.</p>'
+    elif analysis_denied(conn, pr['repo_id']):
+        # 사용자가 명시적으로 거부한 저장소·조직에는 상세 화면에서 다시 허용을 권하지 않는다.
+        body += '<p>이 저장소는 분석이 거부되어 있습니다. 바꾸려면 <a href="/settings">분석 허용</a>에서 정책을 변경하세요.</p>'
     elif not analysis_allowed(conn, pr['repo_id']):
-        body += ('<p>이 저장소는 LLM 분석이 허용되지 않았습니다. <a href="/settings">분석 허용</a>에서 켠 뒤 요청하세요. '
-                 '분석 버튼은 동의를 켜지 않습니다.</p>')
+        body += ('<p>이 저장소는 LLM 분석이 허용되지 않았습니다. 아래에서 이 저장소만 허용하거나 '
+                 '<a href="/settings">분석 허용</a>에서 조직 단위로 켜세요. 허용해도 분석은 자동으로 시작하지 않습니다.</p>'
+                 '<p><strong>' + WARNING + '</strong></p>'
+                 + consent_form(csrf, pr.get('host', 'github.com'), pr['owner'] + '/' + pr['name'], f'/pr/{int(pr["id"])}'))
     elif not snapshot or snapshot['head_sha'] != pr['head_sha'] or snapshot['base_sha'] != pr['base_sha']:
         body += '<p>최신 SHA의 스냅샷이 없습니다. <a href="/status">먼저 수집</a>한 뒤 분석을 요청하세요.</p>'
     else:

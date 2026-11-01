@@ -114,6 +114,20 @@ def current_model(config):
     return Config.parse_codex_model(settings)
 
 
+SKIP_LABELS = {'not_allowed': '분석 허용 안 됨', 'draft': 'draft', 'stale': '최신 수집 전'}
+
+
+def skip_note(analyzer):
+    """건너뛴 사유를 붙인다. 허용 안 됨이 있으면 동의 위치를 안내한다."""
+    skipped = getattr(analyzer, 'skipped', None)
+    if not isinstance(skipped, dict) or not skipped:
+        return ''
+    note = ' 건너뜀: ' + ', '.join(f'{SKIP_LABELS.get(key, key)} {value}' for key, value in sorted(skipped.items()))
+    if skipped.get('not_allowed'):
+        note += ' (PR 상세 또는 설정에서 저장소 분석을 허용하세요)'
+    return note
+
+
 class Runner:
     """단일 워커의 한 단계. 수집 tick 뒤 다른 종류의 대기 작업 하나를 실행한다."""
 
@@ -177,7 +191,8 @@ class Runner:
                 error = '분석 실패 항목이 있습니다. PR별 결과와 상태 점검을 확인하세요.'
             summary = ', '.join(f'{STATUS.get(key, "부분 완료" if key == "partial" else key)} {value}'
                                 for key, value in sorted(counts.items()))
-            return status, f'분석 대상 {len(results)}개' + (f' ({summary})' if summary else ' — 허용된 미분석 스냅샷 없음'), error
+            note = skip_note(analyzer) or ('' if results else ' 허용된 미분석 스냅샷 없음')
+            return status, f'분석 대상 {len(results)}개' + (f' ({summary})' if summary else '') + note, error
         params = json.loads(job['params'] or '{}')
         snapshot_id = params.get('snapshot_id')
         # 실행 직전에 대상·SHA·동의를 다시 확인한다.

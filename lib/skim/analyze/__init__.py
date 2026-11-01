@@ -78,6 +78,8 @@ class Analyzer:
 
     def run(self, snapshot_id=None, include_drafts=False):
         results = []
+        # 0건일 때 사유를 보여줄 수 있도록 건너뛴 스냅샷을 사유별로 센다. 반환 형식은 바꾸지 않는다.
+        self.skipped = {}
         # 별도 분석 잠금으로 계정 동시 호출 1개를 보장한다.
         with Collector(self.conn, self.config).lock("analysis.lock"):
             rows = self.conn.execute('SELECT s.*,p.repo_id,p.title,p.body,p.draft,p.state,p.base_sha AS current_base,'
@@ -86,9 +88,13 @@ class Analyzer:
                                      'AND (? IS NULL OR s.id=?) ORDER BY s.id', (snapshot_id, snapshot_id, snapshot_id)).fetchall()
             for row in rows:
                 row = dict(row)
-                if row['state'] != 'open' or (row['draft'] and not include_drafts):
+                if row['state'] != 'open':
+                    continue
+                if row['draft'] and not include_drafts:
+                    self.skipped['draft'] = self.skipped.get('draft', 0) + 1
                     continue
                 if not analysis_allowed(self.conn, row['repo_id']):
+                    self.skipped['not_allowed'] = self.skipped.get('not_allowed', 0) + 1
                     continue
                 latest_id = self.conn.execute(
                     'SELECT MAX(id) FROM snapshots WHERE pr_id=?', (row['pr_id'],)).fetchone()[0]
@@ -96,6 +102,8 @@ class Analyzer:
                         row['head_sha'] != row['current_head'] or row['id'] != latest_id):
                     if snapshot_id is not None:
                         results.append(self._failure(row, '최신 SHA의 최신 스냅샷이 아닙니다', 'blocked', persist=False))
+                    else:
+                        self.skipped['stale'] = self.skipped.get('stale', 0) + 1
                     continue
                 try:
                     results.append(self._analyze(row))

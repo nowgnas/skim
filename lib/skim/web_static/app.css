@@ -23,6 +23,7 @@ details[open]{border-color:var(--color-rule-2)}
 details[open]>summary{color:var(--color-accent)}
 summary{cursor:pointer;font-weight:500;overflow-wrap:anywhere;padding:var(--space-xs) 0}
 .filters{display:flex;flex-wrap:wrap;align-items:end;gap:var(--space-md)}
+.pager{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-md);margin:var(--space-md) 0;font-size:var(--text-sm)}
 label{display:flex;flex-direction:column;gap:var(--space-xs);color:var(--color-muted);font-size:var(--text-sm)}
 input,select,button{font:inherit;min-height:36px;color:var(--color-ink);border:var(--rule-hair) solid var(--color-field-edge);border-radius:var(--radius-pill);padding:var(--space-xs) var(--space-md)}
 input,select{background:var(--color-paper-3)}
