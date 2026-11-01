@@ -35,7 +35,11 @@ PR·스냅샷·분석은 보존하며, 출처가 없어진 PR만 삭제합니다
 `$SKIM_HOME/config/config.json`, `$SKIM_HOME/data/skim.db`를 사용합니다.
 설정 기본값은 수집 간격 300초, 보존 기간 30일입니다. 보존 기간에 따른 정리는 후속 구현입니다. 전용 config/data 디렉터리는 0700이며 SKIM_HOME 자체의 기존 권한은 바꾸지 않습니다. 설정·DB·백업 파일은 0600입니다.
 DB 버전은 `PRAGMA user_version`으로 관리하고 기존 DB 변경 전에 백업합니다.
-`SKIM_PYTHON`으로 래퍼가 사용할 Python 실행 파일을 지정할 수 있습니다.
+`SKIM_PYTHON`으로 래퍼가 사용할 Python 실행 파일을 지정할 수 있습니다. 지정하지 않으면
+`python3`, `python3.20`부터 `python3.11`까지 순서로 최소 버전을 만족하는 첫 실행 파일을 씁니다.
+최소 버전은 `lib/python.sh`의 `SKIM_MIN_PYTHON`과 `lib/skim/__init__.py`의 `MIN_PYTHON` 두 곳에 있으며
+`tests/test_python_runtime.py`가 둘의 일치를 검사합니다. CI(`.github/workflows/test.yml`)는
+Ubuntu에서 3.11~3.14, macOS에서 3.11로 unittest를 실행합니다.
 
 `collect`는 기존 `gh` 로그인으로 GitHub.com REST API의 GET만 호출합니다.
 등록 저장소의 열린 PR과 개인·팀 리뷰 요청을 중복 없이 수집합니다. 소유·관리

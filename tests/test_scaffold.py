@@ -105,7 +105,8 @@ class ScaffoldTests(unittest.TestCase):
     def test_wrapper_symlink_and_stubs(self):
         link = Path(self.temp.name) / 'skim'
         link.symlink_to(ROOT / 'bin/skim')
-        result = subprocess.run([str(link), 'repo', 'add', 'a/b'], capture_output=True, text=True, cwd='/tmp')
+        result = subprocess.run([str(link), 'repo', 'add', 'a/b'], capture_output=True, text=True, cwd='/tmp',
+                                env=dict(os.environ, SKIM_PYTHON=sys.executable))
         self.assertEqual(result.returncode, 0, result.stderr)
         with patch('skim.doctor.run', return_value=1):
             self.assertEqual(self.cli('doctor')[0], 1)

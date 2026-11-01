@@ -5,7 +5,9 @@ import shutil
 import stat
 import subprocess
 import sqlite3
+import sys
 from contextlib import closing
+from . import MIN_PYTHON
 from .hosts import authenticated
 
 from .analyze.codex import CodexAdapter, IsolationError
@@ -22,6 +24,9 @@ def run(config, runner=None, which=None, adapter=None, probe=False, out=print):
         failed |= not ok
         out(f'{"정상" if ok else "실패"}: {name} — {detail}')
 
+    version = '.'.join(map(str, sys.version_info[:3]))
+    report(sys.version_info >= MIN_PYTHON, 'python',
+           f'{version} ({sys.executable}), 최소 {".".join(map(str, MIN_PYTHON))}')
     if not which('gh'):
         report(False, 'gh', 'PATH에서 실행 파일을 찾지 못했습니다.')
     else:

@@ -50,7 +50,7 @@ class SetupDoctorTests(unittest.TestCase):
             return main(['--root', str(ROOT)])
 
     def test_wrapper_and_conflict(self):
-        result = subprocess.run([str(ROOT / 'setup.sh')], env=dict(os.environ, HOME=str(self.home)), capture_output=True, text=True)
+        result = subprocess.run([str(ROOT / 'setup.sh')], env=dict(os.environ, HOME=str(self.home), SKIM_PYTHON=sys.executable), capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         link = self.home / '.local/bin/skim'
         self.assertEqual(link.resolve(), ROOT / 'bin/skim')
