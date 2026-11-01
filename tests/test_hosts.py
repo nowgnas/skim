@@ -188,8 +188,10 @@ class HostWebTests(unittest.TestCase):
             self.assertEqual(self.post('/hosts/check', host='github.com')[0], 303)
             status.reset_mock()
             body = self.request('/repos')[2]
-            self.assertIn('git.enterprise.example: 로그인됨', body)
-            self.assertIn('github.com: 로그인 안 됨', body)
+            host_row = body.split('<h3>git.enterprise.example</h3>', 1)[1].split('</article>', 1)[0]
+            self.assertIn('<span class="badge">로그인됨</span>', host_row)
+            github_row = body.split('<h3>github.com</h3>', 1)[1].split('</article>', 1)[0]
+            self.assertIn('<span class="badge">로그인 안 됨</span>', github_row)
             self.request('/repos')
             status.assert_not_called()
             self.assertIn('마지막 확인:', body)
