@@ -165,11 +165,11 @@ class Collector:
                 try:
                     total += self._collect()
                 except Exception as exc:
-                    errors.append(exc)
+                    errors.append(row['host'] + ': ' + error_message(exc))
                 finally:
                     self._host_limits[row['host']] = self.gh.not_before
             if errors:
-                raise errors[0]
+                raise CollectionError('; '.join(errors))
             return total
 
     def _collect(self):

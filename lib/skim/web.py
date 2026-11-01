@@ -115,7 +115,7 @@ def read_diff(config, snapshot):
 
 def load_prs(conn, config):
     rows = []
-    for raw in conn.execute("SELECT p.*,r.host,r.owner,r.name,EXISTS(SELECT 1 FROM pr_sources WHERE pr_id=p.id AND source='review_request') AS review FROM pull_requests p JOIN repositories r ON r.id=p.repo_id WHERE p.state='open'"):
+    for raw in conn.execute("SELECT p.*,r.host,r.owner,r.name,EXISTS(SELECT 1 FROM pr_sources WHERE pr_id=p.id AND source='review_request') AS review FROM pull_requests p JOIN repositories r ON r.id=p.repo_id WHERE p.state='open' AND r.host IN (SELECT host FROM github_hosts)"):
         pr = dict(raw)
         snapshot = conn.execute('SELECT * FROM snapshots WHERE pr_id=? ORDER BY id DESC LIMIT 1', (pr['id'],)).fetchone()
         analysis = conn.execute('SELECT a.*,s.head_sha,s.base_sha FROM analyses a JOIN snapshots s ON s.id=a.snapshot_id WHERE s.pr_id=? ORDER BY s.id DESC,a.id DESC LIMIT 1', (pr['id'],)).fetchone()

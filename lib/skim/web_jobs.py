@@ -8,7 +8,7 @@ from .hosts import registered
 
 JOB_PATHS = {'/jobs/collect', '/jobs/analyze', '/jobs/doctor'}
 RECOVERY = [
-    ('gh', 'gh auth login으로 다시 인증하고, 조직 저장소는 gh 자격 증명의 SSO 승인을 확인하세요.'),
+    ('gh', 'gh auth login --hostname <host>로 다시 인증하고, 조직 저장소는 gh 자격 증명의 SSO 승인을 확인하세요.'),
     ('codex-home', 'skim codex-home init으로 분석 전용 인증 링크를 만드세요. 본인 소유 경로 복구는 --reset을 사용합니다.'),
     ('version, flags', 'Codex 안정 버전 0.165.0 이상을 설치하고 PATH를 확인하세요.'),
     ('probe, 모델', '모델 변경 후나 probe 만료 시 터미널에서 skim doctor --probe를 실행하세요. 실제 모델을 호출하므로 웹에서는 자동 실행하지 않습니다.'),

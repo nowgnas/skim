@@ -110,6 +110,24 @@ class HostTests(unittest.TestCase):
             conn.execute("INSERT INTO host_organization_policies VALUES(?,'org','allow')", (HOST,))
             self.assertTrue(all(db.analysis_allowed(conn, row['id']) for row in rows))
 
+    def test_failed_host_does_not_stop_other_host_collection(self):
+        from skim.collect import CollectionError
+        fake = test_collect.FakeGH()
+        calls = []
+        def runner(cmd, **kwargs):
+            calls.append(cmd[3])
+            if cmd[3] == HOST:
+                raise OSError('mock failure')
+            return fake(cmd, **kwargs)
+        with closing(db.connect(self.config)) as conn, conn:
+            conn.execute('INSERT INTO github_hosts VALUES(?)', (HOST,))
+            conn.execute("INSERT INTO repositories(owner,name,tracked) VALUES('org','repo',1)")
+            with self.assertRaisesRegex(CollectionError, HOST):
+                Collector(conn, self.config, runner).collect()
+            self.assertIn('github.com', calls)
+            self.assertIn(HOST, calls)
+            self.assertGreater(conn.execute("SELECT count(*) FROM pull_requests p JOIN repositories r ON r.id=p.repo_id WHERE r.host='github.com'").fetchone()[0], 0)
+
     def test_doctor_checks_all_hosts_and_hides_raw_output(self):
         with closing(db.connect(self.config)) as conn, conn:
             conn.execute('INSERT INTO github_hosts VALUES(?)', (HOST,))
@@ -133,12 +151,18 @@ class HostWebTests(unittest.TestCase):
     wait_lookup = test_web_settings.SettingsTests.wait_lookup
 
     def test_host_lifecycle_and_auth_status(self):
-        self.assertEqual(self.post('/hosts/add', host='GIT.ENTERPRISE.EXAMPLE')[0], 303)
         with patch('skim.web_settings.authenticated', side_effect=lambda h: h == 'git.enterprise.example') as status:
+            self.assertEqual(self.post('/hosts/add', host='GIT.ENTERPRISE.EXAMPLE')[0], 303)
+            self.assertEqual(self.post('/hosts/check', host='github.com')[0], 303)
+            status.reset_mock()
             body = self.request('/repos')[2]
             self.assertIn('git.enterprise.example: 로그인됨', body)
             self.assertIn('github.com: 로그인 안 됨', body)
-            self.assertIn(unittest.mock.call('git.enterprise.example'), status.call_args_list)
+            self.request('/repos')
+            status.assert_not_called()
+            self.assertIn('마지막 확인:', body)
+            self.assertEqual(self.post('/hosts/check', host='git.enterprise.example')[0], 303)
+            status.assert_called_once_with('git.enterprise.example')
         self.assertEqual(self.post('/hosts/remove', host='github.com')[0], 400)
         self.assertEqual(self.request('/hosts/remove', 'POST', {'host': 'git.enterprise.example'})[0], 403)
         self.assertEqual(self.post('/hosts/remove', host='git.enterprise.example')[0], 303)
@@ -186,3 +210,32 @@ class HostWebTests(unittest.TestCase):
         self.assertEqual(self.post('/hosts/remove', host=HOST)[0], 303)
         with closing(db.connect(self.config)) as conn:
             self.assertEqual(conn.execute('SELECT enabled FROM repositories WHERE id=?', (repo_id,)).fetchone()[0], 0)
+
+    def test_host_add_security_and_unknown_host_rejected(self):
+        for data, headers in [({'host': 'new.example'}, None),
+                              ({'csrf': self.csrf, 'host': 'new.example'}, [('!Origin', 'http://evil.example')])]:
+            self.assertEqual(self.request('/hosts/add', 'POST', data, headers)[0], 403)
+        with closing(db.connect(self.config)) as conn:
+            self.assertIsNone(conn.execute("SELECT 1 FROM github_hosts WHERE host='new.example'").fetchone())
+        self.assertEqual(self.post('/repos/load', host='unknown.example')[0], 400)
+        self.assertEqual(self.post('/jobs/analyze', host='unknown.example', repository='demo/checkout', number='1')[0], 400)
+        with closing(db.connect(self.config)) as conn:
+            self.assertEqual(conn.execute('SELECT count(*) FROM jobs').fetchone()[0], 0)
+
+    def test_deleted_host_pr_hidden_and_policies_disabled(self):
+        from skim.web import load_prs
+        with closing(db.connect(self.config)) as conn, conn:
+            repo = conn.execute("INSERT INTO repositories(host,owner,name,tracked,analysis_policy) VALUES(?,'org','private',1,'allow')", (HOST,)).lastrowid
+            pr = conn.execute("INSERT INTO pull_requests(repo_id,number,title) VALUES(?,42,'deleted host PR')", (repo,)).lastrowid
+            conn.execute("INSERT INTO pr_sources VALUES(?,'review_request')", (pr,))
+            conn.execute("INSERT INTO host_organization_policies VALUES(?,'org','allow')", (HOST,))
+            self.assertIn(pr, [p['id'] for p in load_prs(conn, self.config)])
+        self.assertEqual(self.post('/hosts/remove', host=HOST)[0], 303)
+        with closing(db.connect(self.config)) as conn:
+            self.assertNotIn(pr, [p['id'] for p in load_prs(conn, self.config)])
+            self.assertEqual(tuple(conn.execute('SELECT tracked,enabled,analysis_policy FROM repositories WHERE id=?', (repo,)).fetchone()), (0, 0, 'deny'))
+            self.assertFalse(db.analysis_allowed(conn, repo))
+            self.assertEqual(conn.execute('SELECT count(*) FROM host_organization_policies WHERE host=?', (HOST,)).fetchone()[0], 0)
+            self.assertIsNotNone(conn.execute('SELECT 1 FROM pull_requests WHERE id=?', (pr,)).fetchone())
+        self.assertNotIn('deleted host PR', self.request('/')[2])
+        self.assertIn('gh auth login --hostname &lt;host&gt;', self.request('/status')[2])

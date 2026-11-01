@@ -1,5 +1,6 @@
 """한국어 설정 화면과 읽기 전용 저장소 조회 워커."""
 from contextlib import closing
+from datetime import datetime, timezone
 import json
 import os
 import re
@@ -15,7 +16,7 @@ from .hosts import hostname, registered, authenticated
 from .web_jobs import JOB_PATHS, job_box, script
 from .repos import web_repository, add_repository, remove_repository
 
-POST_PATHS = {'/hosts/add', '/hosts/remove', '/repos/add', '/repos/remove', '/repos/load', '/settings/analysis', '/settings/model'} | JOB_PATHS
+POST_PATHS = {'/hosts/check', '/hosts/add', '/hosts/remove', '/repos/add', '/repos/remove', '/repos/load', '/settings/analysis', '/settings/model'} | JOB_PATHS
 WARNING = ('허용하면 PR 코드, diff와 제목, 설명이 Codex CLI를 통해 모델 서비스로 전송됩니다. '
            '민감 정보 제외는 완전하지 않으며 서비스의 전송, 보존 정책이 적용됩니다.')
 
@@ -155,6 +156,12 @@ def fields(data, required, optional=()):
 
 
 def mutate(server, path, data):
+    if path == '/hosts/check':
+        d = fields(data, ('host',))
+        with closing(connect(server.config)) as conn:
+            host = registered(conn, d['host'])
+        check_auth(server, host)
+        return '/repos'
     if path in ('/hosts/add', '/hosts/remove'):
         d = fields(data, ('host',))
         host = hostname(d['host'])
@@ -164,9 +171,13 @@ def mutate(server, path, data):
             else:
                 if host == 'github.com':
                     raise ValueError('기본 호스트는 삭제할 수 없습니다')
-                conn.execute('UPDATE repositories SET tracked=0,enabled=0 WHERE host=?', (host,))
+                conn.execute("UPDATE repositories SET tracked=0,enabled=0,analysis_policy='deny' WHERE host=?", (host,))
                 conn.execute('DELETE FROM host_organization_policies WHERE host=?', (host,))
                 conn.execute('DELETE FROM github_hosts WHERE host=?', (host,))
+        if path == '/hosts/add':
+            check_auth(server, host)
+        else:
+            getattr(server, 'host_auth', {}).pop(host, None)
         return '/repos'
     if path in ('/repos/load', '/repos/add'):
         d = fields(data, () if path.endswith('load') else ('repository', 'source'), ('host',))
@@ -248,11 +259,14 @@ def host_field(conn):
 
 def host_settings(server, conn, csrf):
     from .web import esc
-    body = '<h2>GitHub 호스트</h2><p>호스트 삭제 시 저장된 기록은 보존하며 해당 호스트의 추적과 수집을 중지합니다.</p>'
+    body = '<h2>GitHub 호스트</h2><p>호스트 삭제 시 기록은 보존하고 대시보드에서 숨깁니다. 저장소 추적·수집과 분석 허용을 끄고 조직 정책을 삭제합니다.</p>'
     for row in conn.execute('SELECT host FROM github_hosts ORDER BY host'):
         host = row[0]
-        status = '미확인 (오프라인)' if getattr(server, 'offline', False) else ('로그인됨' if authenticated(host) else '로그인 안 됨')
+        cached = getattr(server, 'host_auth', {}).get(host)
+        status = ('로그인됨' if cached[0] else '로그인 안 됨') if cached else '미확인'
+        status += ' · 마지막 확인: ' + (cached[1] if cached else '없음')
         body += '<article>' + esc(host) + ': ' + status
+        body += form('/hosts/check', csrf, f'<input type="hidden" name="host" value="{esc(host)}"><button>인증 다시 확인</button>')
         if host != 'github.com':
             body += form('/hosts/remove', csrf, f'<input type="hidden" name="host" value="{esc(host)}"><button>호스트 삭제</button>')
         body += '</article>'
@@ -267,3 +281,11 @@ def host_field_note(conn, csrf):
     for row in conn.execute('SELECT * FROM host_organization_policies ORDER BY host,owner'):
         body += esc(row['host'] + '/' + row['owner'] + ': ' + row['policy']) + policy_form(csrf, 'org', row['owner'], row['host'])
     return body
+
+
+def check_auth(server, host):
+    if getattr(server, 'offline', False):
+        return
+    if not hasattr(server, 'host_auth'):
+        server.host_auth = {}
+    server.host_auth[host] = (authenticated(host), datetime.now(timezone.utc).isoformat(timespec='seconds'))
