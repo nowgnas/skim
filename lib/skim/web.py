@@ -263,7 +263,7 @@ class Handler(BaseHTTPRequestHandler):
         body = body.encode() if isinstance(body, str) else body
         self.send_response(status)
         for name, value in [('Content-Type', content_type), ('Content-Length', str(len(body))),
-                            ('Content-Security-Policy', CSP), ('Referrer-Policy', 'no-referrer'),
+                            ('Content-Security-Policy', CSP), ('Referrer-Policy', 'same-origin'),
                             ('X-Content-Type-Options', 'nosniff'), ('Cache-Control', 'no-store'),
                             ('X-Frame-Options', 'DENY'), *extra]:
             self.send_header(name, value)

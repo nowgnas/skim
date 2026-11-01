@@ -200,7 +200,7 @@ class WebTests(unittest.TestCase):
             self.assertEqual(headers['Content-Security-Policy'], CSP)
             self.assertNotIn('unsafe-inline', CSP)
             self.assertEqual(headers['Cache-Control'], 'no-store')
-            self.assertEqual(headers['Referrer-Policy'], 'no-referrer')
+            self.assertEqual(headers['Referrer-Policy'], 'same-origin')
             self.assertEqual(headers['X-Content-Type-Options'], 'nosniff')
             self.assertNotIn('Access-Control-Allow-Origin', headers)
         self.assertEqual(self.request('/refresh', 'POST', {'csrf': self.csrf}, [('Content-Length', '0')])[0], 400)
