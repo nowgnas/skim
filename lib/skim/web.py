@@ -201,7 +201,7 @@ def listing(prs, query, csrf, heading_toolbar=""):
                     + meta(values['repo'] + ' #' + str(pr['number']), pr['author'])
                     + f'<p class="issue-intent">{esc(a["intent"] if a and a["intent"] else "의도 미분석")}</p><p class="meta">{badges(pr)}</p>'
                     + '<p class="meta"><span class="badge">' + esc(pr['status']) + '</span></p>' + meta(*([] if shared_collection else ['수집 ' + (s['collected_at'] if s else '대기')]),
-                           *([] if shared_analysis else ['분석 ' + (a['created_at'] if a else '대기')])) + f'</div><a class="btn ghost sm row-actions" href="/pr/{pr["id"]}" aria-label="검토: {esc(pr["title"])}">검토 <span aria-hidden="true">→</span></a></article>')
+                           *([] if shared_analysis else ['분석 ' + (a['created_at'] if a else '대기')])) + f'</div><a class="btn ghost sm row-actions" href="/pr/{pr["id"]}" aria-label="검토하기: {esc(pr["title"])}">검토하기</a></article>')
     return content + '</div>' + ('<p class="muted">열린 PR이 없습니다. <a href="/repos">저장소 연결</a>과 <a href="/status">상태 점검</a>, <a href="/settings">설정</a>을 확인하세요.</p>' if not has_prs else '')
 
 

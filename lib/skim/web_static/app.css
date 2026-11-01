@@ -25,3 +25,4 @@ input::placeholder{color:var(--muted);opacity:1}
 @media(max-width:640px){.connect-toolbar>.action-form:first-child{display:flex}.connect-toolbar>.action-form:first-child>label{flex:1 1 140px}.heading{flex-wrap:wrap}.heading-collect{max-width:100%;width:100%}.heading-collect>.action-form{width:auto;justify-content:flex-start}.policy-row .action-form{width:100%;max-width:none}.policy-row .row-content{flex-basis:100%}.filters select{max-width:100%}.filters label{flex:0 1 auto}.policy-add .consent{flex-basis:100%}}
 
 @media(min-width:900px){.issue-row .meta:last-child{grid-column:1 / -1;grid-row:4;justify-content:flex-start}}
+html,body{overflow-x:clip}
