@@ -88,22 +88,44 @@ class RepoLookup:
                 '접근 가능한 저장소 조회 완료. 선택한 저장소만 등록합니다.')
 
 
-def form(action, csrf, content):
+def form(action, csrf, content, variant='secondary'):
     from .web import esc
-    return (f'<form method="post" action="{action}"><input type="hidden" name="csrf" value="{esc(csrf)}">'
+    icon = ''
+    if action in ('/jobs/collect', '/hosts/check'):
+        icon = ('<svg viewBox="0 0 16 16" fill="none" aria-hidden="true">'
+                '<path d="M13 7a5 5 0 1 0-1 4M13 3v4H9" stroke="currentColor" '
+                'stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>')
+    size = ' sm' if action in ('/repos/remove', '/hosts/remove', '/hosts/check') else ''
+    content = re.sub(r'<button([^>]*)>', lambda match: f'<button class="btn {variant}{size}"' + match[1] + '>' + icon, content)
+    return (f'<form class="action-form" method="post" action="{action}"><input type="hidden" name="csrf" value="{esc(csrf)}">'
             + content + '</form>')
 
 
-def source_field():
-    return '<label>출처<select name="source"><option value="responsible">담당 (responsible)</option><option value="owned">소유 (owned)</option><option value="managed">관리 (managed)</option></select></label>'
-
-
-def policy_form(csrf, scope, target, host="github.com"):
+def source_field(target="저장소 연결"):
     from .web import esc
+    return '<label>출처<select name="source" aria-label="' + esc(target) + ' 출처"><option value="responsible">담당 (responsible)</option><option value="owned">소유 (owned)</option><option value="managed">관리 (managed)</option></select></label>'
+
+
+def policy_form(csrf, scope, target, host="github.com", policy="deny"):
+    from .web import esc
+    current = 'reset' if policy == 'inherit' else policy
+    identity = host + '/' + (target or '새 조직')
+    target_field = (f'<input type="hidden" name="target" value="{esc(target)}">' if target else
+                    f'<label>조직 이름<input name="target" aria-label="{esc(identity)} 이름" required></label>')
+    options = ''.join(f'<option value="{value}"' + (' selected' if current == value else '') + f'>{label}</option>'
+                      for value, label in [('deny', '거부'), ('reset', '초기화 / 조직 설정 상속'), ('allow', '허용')])
     return form('/settings/analysis', csrf,
-                f'<input type="hidden" name="host" value="{esc(host)}"><input type="hidden" name="scope" value="{scope}"><label>대상<input name="target" value="{esc(target)}" required></label>'
-                '<select name="policy"><option value="deny">거부</option><option value="reset">초기화 / 조직 설정 상속</option><option value="allow">허용</option></select>'
-                '<label><input type="checkbox" name="confirm" value="yes">코드가 Codex(모델 서비스)로 전송됨을 이해하고 허용합니다</label><button>분석 정책 저장</button>')
+                f'<input type="hidden" name="host" value="{esc(host)}"><input type="hidden" name="scope" value="{scope}">' + target_field
+                + f'<label class="policy-select"><span class="sr-only">{esc(identity)} 분석 정책</span><select name="policy" aria-label="{esc(identity)} 분석 정책">{options}</select></label>'
+                + f'<button aria-label="{esc(identity)} 분석 정책 저장">저장</button><label class="consent"><input type="checkbox" name="confirm" value="yes" aria-label="{esc(identity)} 모델 서비스 전송 동의">코드가 Codex(모델 서비스)로 전송됨을 이해하고 허용합니다</label>')
+
+
+def policy_row(csrf, scope, target, host, policy, effective=None):
+    from .web import esc
+    applied = effective if effective is not None else policy == 'allow'
+    return ('<article class="list-row policy-row"><div class="row-content"><h3>' + esc(host + '/' + target)
+            + '</h3><span class="badge">실제 적용: ' + ('허용' if applied else '거부') + '</span></div>'
+            + policy_form(csrf, scope, target, host, policy) + '</article>')
 
 
 def render(server, conn, csrf, path):
@@ -112,12 +134,13 @@ def render(server, conn, csrf, path):
         body = '<h1>저장소</h1><p>조직 저장소를 포함하여 GitHub에는 항상 읽기 전용으로 접근합니다.</p>'
         body += '<p>연결 해제는 로컬 추적만 해제합니다. 리뷰 요청 결과와 분석 정책은 보존되며 분석 동의 철회가 아닙니다. 분석 허용 화면에서 별도로 끄세요.</p>'
         body += host_settings(server, conn, csrf)
+        body += '<h2>연결된 저장소</h2><div class="list">'
         for row in conn.execute('SELECT * FROM repositories WHERE tracked=1 ORDER BY owner,name'):
             name = row['owner'] + '/' + row['name']
-            body += '<article>' + meta(row['host'], name, row['source'])
-            body += form('/repos/remove', csrf, f'<input type="hidden" name="host" value="{esc(row["host"])}"><input type="hidden" name="repository" value="{esc(name)}"><button>연결 해제</button>') + '</article>'
-        body += '<h2>직접 연결</h2>' + form('/repos/add', csrf, host_field(conn) + '<label>owner/repo<input name="repository" required maxlength="140"></label>' + source_field() + '<button>저장소 연결</button>')
-        body += form('/repos/load', csrf, host_field(conn) + '<button>접근 가능한 저장소 불러오기</button>')
+            body += '<article class="list-row"><div class="row-content"><h3>' + esc(name) + '</h3>' + meta(row['host'], row['source'], '추적 중') + '</div><div class="toolbar row-actions">'
+            body += form('/repos/remove', csrf, f'<input type="hidden" name="host" value="{esc(row["host"])}"><input type="hidden" name="repository" value="{esc(name)}"><button aria-label="{esc(row["host"] + "/" + name)} 연결 해제">연결 해제</button>', variant='danger') + '</div></article>'
+        body += '</div><h2>저장소 연결</h2><div class="connect-toolbar">' + form('/repos/add', csrf, host_field(conn) + '<label>owner/repo<input name="repository" required maxlength="140"></label>' + source_field() + '<button>저장소 연결</button>', variant='primary')
+        body += form('/repos/load', csrf, host_field(conn, '저장소 불러오기') + '<button>접근 가능한 저장소 불러오기</button>') + '</div>'
         lookup = getattr(server, 'repo_lookup', None)
         lookup_host, items = lookup.snapshot(with_host=True) if lookup else ('github.com', [])
         if getattr(server, 'offline', False):
@@ -126,26 +149,26 @@ def render(server, conn, csrf, path):
         if running is not None:
             body += '<p>이미 저장소 조회 작업이 진행 중입니다. 완료 후 다시 요청하세요. 진행 중 요청은 새 작업을 만들지 않습니다.</p>'
         body += job_box(jobs.latest(conn, 'repos')) + script()
+        body += '<div class="list">'
         for name in items:
-            body += '<article>' + esc(lookup_host + '/' + name) + form('/repos/add', csrf, f'<input type="hidden" name="host" value="{esc(lookup_host)}"><input type="hidden" name="repository" value="{esc(name)}">' + source_field() + '<button>선택하여 연결</button>') + '</article>'
-        return body
+            body += '<article class="list-row"><span class="row-content">' + esc(lookup_host + '/' + name) + '</span>' + form('/repos/add', csrf, f'<input type="hidden" name="host" value="{esc(lookup_host)}"><input type="hidden" name="repository" value="{esc(name)}">' + source_field(lookup_host + '/' + name) + f'<button aria-label="{esc(lookup_host + "/" + name)} 선택하여 연결">선택하여 연결</button>') + '</article>'
+        return body + '</div>'
     settings = json.loads((server.config.config_dir / 'config.json').read_text())
     model = settings.get('codex_model', '')
     body = '<h1>설정과 분석 허용</h1><p>' + WARNING + '</p><p>기본 꺼짐. 저장소의 명시적 허용, 거부는 조직 정책보다 우선합니다. 조직 허용은 해당 조직의 모든 저장소에 적용됩니다.</p>'
+    body += '<div class="list">'
     for row in conn.execute('SELECT * FROM repositories ORDER BY owner,name'):
         name = row['owner'] + '/' + row['name']
-        body += '<article><h2>' + esc(row['host'] + '/' + name) + '</h2>' + meta('정책: ' + row['analysis_policy'], '실제 적용: ' + ('허용' if analysis_allowed(conn, row['id']) else '거부'))
-        body += policy_form(csrf, 'repo', name, row['host']) + '</article>'
-    body += '<h2>조직 정책</h2>'
+        body += policy_row(csrf, 'repo', name, row['host'], row['analysis_policy'], analysis_allowed(conn, row['id']))
+    body += '</div><h2>조직 정책</h2><div class="list">'
     for row in conn.execute('SELECT owner,policy FROM organization_policies ORDER BY owner'):
-        body += '<article><p>' + esc(row['owner']) + ': ' + esc(row['policy']) + '</p>'
-        body += policy_form(csrf, 'org', row['owner']) + '</article>'
-    body += policy_form(csrf, 'org', '') + host_field_note(conn, csrf)
+        body += policy_row(csrf, 'org', row['owner'], 'github.com', row['policy'])
+    body += '</div><section class="policy-add"><h3>github.com 조직 추가</h3>' + policy_form(csrf, 'org', '') + '</section>' + host_field_note(conn, csrf)
     body += '<h2>모델 설정</h2>' + meta('파일 값: ' + (model or '미설정'), '실제 적용: ' + (Config.parse_codex_model(settings) or '자동 감지'))
     if 'SKIM_CODEX_MODEL' in os.environ:
         body += '<p>SKIM_CODEX_MODEL 환경변수가 파일 설정보다 우선합니다.</p>'
     body += '<p>다음 분석부터 적용됩니다. 모델 변경 후 격리 검증이 일치하지 않으면 분석이 차단됩니다. skim doctor --probe로 재검증하세요.</p>'
-    body += form('/settings/model', csrf, '<label>codex_model<input name="model" maxlength="64" value="' + esc(model) + '" required></label><button>모델 저장</button>')
+    body += form('/settings/model', csrf, '<label>codex_model<input name="model" maxlength="64" value="' + esc(model) + '" required></label><button>모델 저장</button>', variant='primary')
     return body
 
 
@@ -251,35 +274,35 @@ def mutate(server, path, data):
     return '/repos' if path.startswith('/repos/') else '/settings'
 
 
-def host_field(conn):
+def host_field(conn, purpose="저장소 연결"):
     from .web import esc
-    return '<label>호스트<select name="host">' + ''.join(
+    return '<label>호스트<select name="host" aria-label="' + esc(purpose) + ' 호스트">' + ''.join(
         f'<option{" selected" if r[0] == "github.com" else ""}>{esc(r[0])}</option>' for r in conn.execute('SELECT host FROM github_hosts ORDER BY host')) + '</select></label>'
 
 
 def host_settings(server, conn, csrf):
     from .web import esc
     body = '<h2>GitHub 호스트</h2><p>호스트 삭제 시 기록은 보존하고 대시보드에서 숨깁니다. 저장소 추적과 수집과 분석 허용을 끄고 조직 정책을 삭제합니다.</p>'
+    body += '<div class="list">'
     for row in conn.execute('SELECT host FROM github_hosts ORDER BY host'):
         host = row[0]
         cached = getattr(server, 'host_auth', {}).get(host)
         status = ('로그인됨' if cached[0] else '로그인 안 됨') if cached else '미확인'
-        status += ' 마지막 확인: ' + (cached[1] if cached else '없음')
-        body += '<article>' + esc(host) + ': ' + status
-        body += form('/hosts/check', csrf, f'<input type="hidden" name="host" value="{esc(host)}"><button>인증 다시 확인</button>')
+        body += '<article class="list-row"><div class="row-content"><h3>' + esc(host) + '</h3><p class="meta"><span class="badge">' + esc(status) + '</span><span>마지막 확인: ' + esc(cached[1] if cached else '없음') + '</span></p></div><div class="toolbar row-actions">'
+        body += form('/hosts/check', csrf, f'<input type="hidden" name="host" value="{esc(host)}"><button aria-label="{esc(host)} 인증 다시 확인">인증 다시 확인</button>')
         if host != 'github.com':
-            body += form('/hosts/remove', csrf, f'<input type="hidden" name="host" value="{esc(host)}"><button>호스트 삭제</button>')
-        body += '</article>'
-    return body + form('/hosts/add', csrf, '<label>호스트<input name="host" required maxlength="253" placeholder="github.corp.example"></label><button>호스트 추가</button>')
+            body += form('/hosts/remove', csrf, f'<input type="hidden" name="host" value="{esc(host)}"><button aria-label="{esc(host)} 호스트 삭제">호스트 삭제</button>', variant='danger')
+        body += '</div></article>'
+    return body + '</div>' + form('/hosts/add', csrf, '<label>호스트<input name="host" aria-label="새 호스트 추가" required maxlength="253" placeholder="github.corp.example"></label><button>호스트 추가</button>')
 
 
 def host_field_note(conn, csrf):
     from .web import esc
     body = ''
     for row in conn.execute("SELECT host FROM github_hosts WHERE host!='github.com'"):
-        body += '<h3>' + esc(row[0]) + ' 조직 정책</h3>' + policy_form(csrf, 'org', '', row[0])
+        body += '<h3>' + esc(row[0]) + ' 조직 추가</h3><section class="policy-add">' + policy_form(csrf, 'org', '', row[0]) + '</section>'
     for row in conn.execute('SELECT * FROM host_organization_policies ORDER BY host,owner'):
-        body += esc(row['host'] + '/' + row['owner'] + ': ' + row['policy']) + policy_form(csrf, 'org', row['owner'], row['host'])
+        body += '<div class="list">' + policy_row(csrf, 'org', row['owner'], row['host'], row['policy']) + '</div>'
     return body
 
 
