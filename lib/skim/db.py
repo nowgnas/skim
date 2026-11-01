@@ -102,6 +102,24 @@ CREATE UNIQUE INDEX jobs_active_kind ON jobs(type) WHERE status IN ('pending','r
 """,)
 
 
+# 부모 테이블 이름을 변경하지 않고 교체해 자식 참조와 ID를 보존한다.
+_REPOS_V6 = SCHEMA.split('CREATE TABLE organization_policies', 1)[0].replace(
+    'CREATE TABLE repositories', 'CREATE TABLE repositories_v6').replace(
+    "id INTEGER PRIMARY KEY, owner", "id INTEGER PRIMARY KEY, host TEXT NOT NULL DEFAULT 'github.com', owner").replace(
+    'UNIQUE(owner,name)', 'UNIQUE(host,owner,name)')
+MIGRATIONS += (_REPOS_V6 + """
+INSERT INTO repositories_v6(id,owner,name,source,tracked,enabled,analysis_policy,last_synced_at)
+ SELECT id,owner,name,source,tracked,enabled,analysis_policy,last_synced_at FROM repositories;
+DROP TABLE repositories;
+ALTER TABLE repositories_v6 RENAME TO repositories;
+CREATE TABLE github_hosts (host TEXT PRIMARY KEY);
+INSERT INTO github_hosts VALUES('github.com');
+CREATE TABLE host_organization_policies (
+ host TEXT NOT NULL REFERENCES github_hosts(host), owner TEXT NOT NULL COLLATE NOCASE,
+ policy TEXT NOT NULL CHECK(policy IN ('allow','deny')), PRIMARY KEY(host,owner));
+""",)
+
+
 def migrate(conn, path):
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     if version > len(MIGRATIONS):
@@ -116,13 +134,20 @@ def migrate(conn, path):
         with closing(sqlite3.connect(backup_path)) as backup:
             conn.backup(backup)
     for index in range(version, len(MIGRATIONS)):
+        # 부모 테이블 교체 전에 트랜잭션 밖에서 FK 연쇄 삭제를 끈다.
+        conn.execute('PRAGMA foreign_keys = OFF')
         try:
             conn.executescript('BEGIN IMMEDIATE;\n' + MIGRATIONS[index] +
-                               f'\nPRAGMA user_version = {index + 1};\nCOMMIT;')
+                               f'\nPRAGMA user_version = {index + 1};')
+            if conn.execute('PRAGMA foreign_key_check').fetchone():
+                raise ValueError('DB 외래 키 무결성 오류')
+            conn.commit()
         except BaseException:
             if conn.in_transaction:
                 conn.rollback()
             raise
+        finally:
+            conn.execute('PRAGMA foreign_keys = ON')
 
 
 def connect(config):
@@ -145,10 +170,13 @@ def connect(config):
 
 
 def analysis_allowed(conn, repo):
-    row = conn.execute('SELECT owner, analysis_policy FROM repositories WHERE id=?', (repo,)).fetchone()
+    row = conn.execute('SELECT host, owner, analysis_policy FROM repositories WHERE id=?', (repo,)).fetchone()
     if row is None:
         return False
     if row['analysis_policy'] != 'inherit':
         return row['analysis_policy'] == 'allow'
-    policy = conn.execute('SELECT policy FROM organization_policies WHERE owner=?', (row['owner'],)).fetchone()
+    if row['host'] == 'github.com':
+        policy = conn.execute('SELECT policy FROM organization_policies WHERE owner=?', (row['owner'],)).fetchone()
+    else:
+        policy = conn.execute('SELECT policy FROM host_organization_policies WHERE host=? AND owner=?', (row['host'], row['owner'])).fetchone()
     return policy is not None and policy['policy'] == 'allow'

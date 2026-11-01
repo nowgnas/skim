@@ -122,7 +122,7 @@ def main(argv=None):
                         print('조직 분석 정책을 변경했습니다.')
                     else:
                         policy = 'inherit' if args.action == 'reset' else args.action
-                        result = conn.execute('UPDATE repositories SET analysis_policy=? WHERE owner=? AND name=?',
+                        result = conn.execute("UPDATE repositories SET analysis_policy=? WHERE host='github.com' AND owner=? AND name=?",
                                               (policy, *args.repository))
                         if not result.rowcount:
                             raise ValueError('등록되지 않은 저장소입니다')

@@ -11,20 +11,20 @@ def web_repository(value):
     return owner, name
 
 
-def add_repository(conn, parts, source):
-    conn.execute('INSERT INTO repositories(owner,name,source,tracked) VALUES(?,?,?,1) '
-                 'ON CONFLICT(owner,name) DO UPDATE SET source=excluded.source,enabled=1,tracked=1',
-                 (*parts, source))
+def add_repository(conn, parts, source, host="github.com"):
+    conn.execute('INSERT INTO repositories(owner,name,source,host,tracked) VALUES(?,?,?,?,1) '
+                 'ON CONFLICT(host,owner,name) DO UPDATE SET source=excluded.source,enabled=1,tracked=1',
+                 (*parts, source, host))
 
 
-def remove_repository(conn, parts):
-    result = conn.execute('UPDATE repositories SET tracked=0 WHERE owner=? AND name=? AND tracked=1', parts)
+def remove_repository(conn, parts, host="github.com"):
+    result = conn.execute('UPDATE repositories SET tracked=0 WHERE host=? AND owner=? AND name=? AND tracked=1', (host, *parts))
     if not result.rowcount:
         raise ValueError('등록되지 않은 저장소입니다')
     # 리뷰 요청 출처·스냅샷·분석·분석 정책은 보존한다.
     conn.execute("DELETE FROM pr_sources WHERE source='repository' AND pr_id IN "
                  '(SELECT p.id FROM pull_requests p JOIN repositories r ON r.id=p.repo_id '
-                 'WHERE r.owner=? AND r.name=?)', parts)
+                 'WHERE r.host=? AND r.owner=? AND r.name=?)', (host, *parts))
     conn.execute('DELETE FROM pull_requests WHERE repo_id IN '
-                 '(SELECT id FROM repositories WHERE owner=? AND name=?) '
-                 'AND NOT EXISTS (SELECT 1 FROM pr_sources WHERE pr_id=pull_requests.id)', parts)
+                 '(SELECT id FROM repositories WHERE host=? AND owner=? AND name=?) '
+                 'AND NOT EXISTS (SELECT 1 FROM pr_sources WHERE pr_id=pull_requests.id)', (host, *parts))
