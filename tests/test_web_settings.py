@@ -224,7 +224,7 @@ class SettingsTests(unittest.TestCase):
         self.post('/settings/analysis', scope='org', target='neworg', policy='deny')
         self.assertTrue(allowed())
         body = self.request('/settings')[2]
-        for text in ['PR 코드·diff', '모델 서비스로 전송', 'Codex(모델 서비스)', '저장소의 명시적', '실제 적용: 허용']:
+        for text in ['PR 코드, diff', '모델 서비스로 전송', 'Codex(모델 서비스)', '저장소의 명시적', '실제 적용: 허용']:
             self.assertIn(text, body)
 
     def test_invalid_policy_targets_and_extra_fields(self):

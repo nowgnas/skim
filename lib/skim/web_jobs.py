@@ -1,4 +1,4 @@
-"""웹 작업 등록·상태 화면. HTTP에서는 검증과 등록만 하고 실행은 워커가 맡는다."""
+"""웹 작업 등록, 상태 화면. HTTP에서는 검증과 등록만 하고 실행은 워커가 맡는다."""
 import re
 
 from . import jobs
@@ -9,9 +9,9 @@ JOB_PATHS = {'/jobs/collect', '/jobs/analyze', '/jobs/doctor'}
 RECOVERY = [
     ('gh', 'gh auth login으로 다시 인증하고, 조직 저장소는 gh 자격 증명의 SSO 승인을 확인하세요.'),
     ('codex-home', 'skim codex-home init으로 분석 전용 인증 링크를 만드세요. 본인 소유 경로 복구는 --reset을 사용합니다.'),
-    ('version·flags', 'Codex 안정 버전 0.165.0 이상을 설치하고 PATH를 확인하세요.'),
-    ('probe·모델', '모델 변경 후나 probe 만료 시 터미널에서 skim doctor --probe를 실행하세요. 실제 모델을 호출하므로 웹에서는 자동 실행하지 않습니다.'),
-    ('로컬 권한', 'SKIM_HOME 아래 디렉터리 0700·파일 0600, 본인 소유, 심볼릭 링크 없음을 확인하세요.'),
+    ('version, flags', 'Codex 안정 버전 0.165.0 이상을 설치하고 PATH를 확인하세요.'),
+    ('probe, 모델', '모델 변경 후나 probe 만료 시 터미널에서 skim doctor --probe를 실행하세요. 실제 모델을 호출하므로 웹에서는 자동 실행하지 않습니다.'),
+    ('로컬 권한', 'SKIM_HOME 아래 디렉터리 0700, 파일 0600, 본인 소유, 심볼릭 링크 없음을 확인하세요.'),
 ]
 
 
@@ -22,30 +22,28 @@ class Rejected(ValueError):
         self.status = status
 
 
-def summary(row):
+def summary_parts(row):
     d = jobs.describe(row)
-    text = f'{d["kind_label"]} #{d["id"]} · {d["status_label"]}'
+    parts = [f'{d["kind_label"]} #{d["id"]}', d['status_label']]
     if d['stage'] and d['stage'] != d['status_label']:
-        text += ' · ' + d['stage']
+        parts.append(d['stage'])
     if d['total'] is not None and d['processed'] is not None:
-        text += f' {d["processed"]}/{d["total"]}'
-    if d['target']:
-        text += ' · 대상 ' + d['target']
-    if d['model']:
-        text += ' · 모델 ' + d['model']
-    if d['started_at']:
-        text += ' · 시작 ' + d['started_at']
-    if d['finished_at'] and not d['active']:
-        text += ' · 종료 ' + d['finished_at']
-    if d['retry_at']:
-        text += ' · 재시도 가능 ' + d['retry_at']
+        parts.append(f'{d["processed"]}/{d["total"]}')
+    for key, label in [('target', '대상'), ('model', '모델'), ('started_at', '시작'),
+                       ('finished_at', '종료'), ('retry_at', '재시도 가능')]:
+        if d[key] and (key != 'finished_at' or not d['active']):
+            parts.append(label + ' ' + d[key])
     if d['followup']:
-        text += ' · 완료 후 1회 다시 수집 예정'
-    return text
+        parts.append('완료 후 1회 다시 수집 예정')
+    return parts
+
+
+def summary(row):
+    return ', '.join(summary_parts(row))
 
 
 def describe(row):
-    return dict(jobs.describe(row), summary=summary(row))
+    return dict(jobs.describe(row), summary=summary(row), summary_parts=summary_parts(row))
 
 
 def job_box(row, poll=True):
@@ -54,7 +52,8 @@ def job_box(row, poll=True):
         return '<p class="muted">최근 작업 없음</p>'
     d = jobs.describe(row)
     body = (f'<div class="job" data-job-id="{d["id"]}" data-job-active="{int(poll and d["active"])}">'
-            f'<p data-job-field="summary">{esc(summary(row))}</p>')
+            '<p class="meta" data-job-field="summary">'
+            + ''.join(f'<span>{esc(part)}</span>' for part in summary_parts(row)) + '</p>')
     if d['error']:
         body += f'<p class="error">{esc(d["error"])}</p>'
     if d['result']:
@@ -68,12 +67,12 @@ def script():
 
 def collect_panel(conn, csrf, offline):
     from .web_settings import form
-    body = '<article><h2>수집 · 새로고침</h2>'
+    body = '<article><h2>수집과 새로고침</h2>'
     if offline:
         body += '<p>오프라인 모드에서는 GitHub 수집을 실행하지 않습니다.</p>'
     else:
         body += ('<p class="muted">정기 수집과 같은 큐를 씁니다. 수집은 모델 전송 동의를 만들지 않으며 '
-                 '수집 후 자동 분석도 저장소별 허용·하루 예산·격리 검사를 따릅니다.</p>')
+                 '수집 후 자동 분석도 저장소별 허용, 하루 예산, 격리 검사를 따릅니다.</p>')
         body += form('/jobs/collect', csrf, '<button>지금 수집</button>')
     return body + job_box(jobs.latest(conn, 'collect')) + '</article>'
 
@@ -92,7 +91,7 @@ def analysis_panel(conn, pr, csrf, offline):
         body += '<p>최신 SHA의 스냅샷이 없습니다. <a href="/status">먼저 수집</a>한 뒤 분석을 요청하세요.</p>'
     else:
         body += '<p><strong>' + WARNING + '</strong></p>'
-        body += '<p class="muted">하루 20회 모델 호출 예산과 격리 검사는 수동 요청에도 적용됩니다.' + (' draft PR도 같은 동의·예산을 따릅니다.' if pr['draft'] else '') + '</p>'
+        body += '<p class="muted">하루 20회 모델 호출 예산과 격리 검사는 수동 요청에도 적용됩니다.' + (' draft PR도 같은 동의, 예산을 따릅니다.' if pr['draft'] else '') + '</p>'
         body += form('/jobs/analyze', csrf,
                      f'<input type="hidden" name="repository" value="{esc(pr["owner"] + "/" + pr["name"])}">'
                      f'<input type="hidden" name="number" value="{int(pr["number"])}"><button>이 PR 분석</button>')
@@ -108,14 +107,14 @@ def analysis_panel(conn, pr, csrf, offline):
 def status_page(conn, csrf, offline):
     from .web import esc
     from .web_settings import form
-    body = '<h1>상태 · 작업</h1><article><h2>상태 점검 (doctor)</h2>'
-    body += '<p class="muted">gh 인증, Codex 설치·전용 홈·캐시된 격리 probe, 모델, 로컬 권한을 점검합니다. 실제 모델 호출(--probe)과 인증·권한 수정은 하지 않습니다.</p>'
+    body = '<h1>상태와 작업</h1><article><h2>상태 점검 (doctor)</h2>'
+    body += '<p class="muted">gh 인증, Codex 설치, 전용 홈, 캐시된 격리 probe, 모델, 로컬 권한을 점검합니다. 실제 모델 호출(--probe)과 인증, 권한 수정은 하지 않습니다.</p>'
     if offline:
-        body += '<p>오프라인 모드에서는 gh·Codex를 실행하는 상태 점검을 하지 않습니다.</p>'
+        body += '<p>오프라인 모드에서는 gh, Codex를 실행하는 상태 점검을 하지 않습니다.</p>'
     else:
         body += form('/jobs/doctor', csrf, '<button>상태 점검 실행</button>')
     body += job_box(jobs.latest(conn, 'doctor'))
-    body += '<h2>복구 안내</h2><ul>' + ''.join(f'<li><strong>{esc(name)}</strong> — {esc(text)}</li>' for name, text in RECOVERY) + '</ul></article>'
+    body += '<h2>복구 안내</h2><ul>' + ''.join(f'<li><strong>{esc(name)}</strong>: {esc(text)}</li>' for name, text in RECOVERY) + '</ul></article>'
     body += collect_panel(conn, csrf, offline)
     body += '<h2>활성 작업</h2>'
     active_rows = conn.execute("SELECT * FROM jobs WHERE status IN ('pending','running') ORDER BY id").fetchall()
@@ -129,7 +128,7 @@ def status_page(conn, csrf, offline):
 def mutate(server, conn, path, data):
     from .web_settings import fields
     if getattr(server, 'offline', False):
-        raise Rejected('오프라인 모드에서는 수집·분석·상태 점검을 실행하지 않습니다. 저장된 결과만 볼 수 있습니다.', 409)
+        raise Rejected('오프라인 모드에서는 수집, 분석, 상태 점검을 실행하지 않습니다. 저장된 결과만 볼 수 있습니다.', 409)
     if path == '/jobs/collect':
         fields(data, ())
         jobs.request_collect(conn)
