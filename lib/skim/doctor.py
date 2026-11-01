@@ -4,6 +4,9 @@ from pathlib import Path
 import shutil
 import stat
 import subprocess
+import sqlite3
+from contextlib import closing
+from .hosts import authenticated
 
 from .analyze.codex import CodexAdapter, IsolationError
 
@@ -22,12 +25,14 @@ def run(config, runner=None, which=None, adapter=None, probe=False, out=print):
     if not which('gh'):
         report(False, 'gh', 'PATH에서 실행 파일을 찾지 못했습니다.')
     else:
-        try:
-            result = runner(['gh', 'auth', 'status', '--hostname', 'github.com'],
-                            capture_output=True, text=True, timeout=15)
-            report(result.returncode == 0, 'gh', '인증 확인' if result.returncode == 0 else 'gh auth login으로 인증을 확인하세요.')
-        except (OSError, subprocess.TimeoutExpired):
-            report(False, 'gh', '실행 실패 또는 시간 초과')
+        hosts = ['github.com']
+        if config.db_path.exists():
+            with closing(sqlite3.connect(config.db_path.as_uri() + '?mode=ro', uri=True)) as conn:
+                if conn.execute("SELECT 1 FROM sqlite_master WHERE name='github_hosts'").fetchone():
+                    hosts = [r[0] for r in conn.execute('SELECT host FROM github_hosts ORDER BY host')]
+        for host in hosts:
+            ok = authenticated(host, runner)
+            report(ok, 'gh ' + host, '인증 확인' if ok else f'gh auth login --hostname {host}으로 인증을 확인하세요.')
     model_ok = True
     try:
         model = config.doctor_codex_model()

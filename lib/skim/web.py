@@ -115,7 +115,7 @@ def read_diff(config, snapshot):
 
 def load_prs(conn, config):
     rows = []
-    for raw in conn.execute("SELECT p.*,r.owner,r.name,EXISTS(SELECT 1 FROM pr_sources WHERE pr_id=p.id AND source='review_request') AS review FROM pull_requests p JOIN repositories r ON r.id=p.repo_id WHERE p.state='open'"):
+    for raw in conn.execute("SELECT p.*,r.host,r.owner,r.name,EXISTS(SELECT 1 FROM pr_sources WHERE pr_id=p.id AND source='review_request') AS review FROM pull_requests p JOIN repositories r ON r.id=p.repo_id WHERE p.state='open'"):
         pr = dict(raw)
         snapshot = conn.execute('SELECT * FROM snapshots WHERE pr_id=? ORDER BY id DESC LIMIT 1', (pr['id'],)).fetchone()
         analysis = conn.execute('SELECT a.*,s.head_sha,s.base_sha FROM analyses a JOIN snapshots s ON s.id=a.snapshot_id WHERE s.pr_id=? ORDER BY s.id DESC,a.id DESC LIMIT 1', (pr['id'],)).fetchone()
@@ -153,8 +153,13 @@ def badges(pr):
             + ('<span>이전 SHA 결과</span>' if pr['stale'] else '') + ('<span>draft</span>' if pr['draft'] else ''))
 
 
+def repository_label(pr):
+    prefix = '' if pr.get('host', 'github.com') == 'github.com' else pr['host'] + '/'
+    return prefix + pr['owner'] + '/' + pr['name']
+
+
 def listing(prs, query, csrf):
-    fields = [('repo', '저장소', sorted({p['owner'] + '/' + p['name'] for p in prs})),
+    fields = [('repo', '저장소', sorted({repository_label(p) for p in prs})),
               ('importance', '중요도', ['high', 'mid', 'low', 'unanalyzed']),
               ('status', '상태', ['completed', 'partial', 'failed', 'blocked', 'deferred', 'unanalyzed', 'stale']),
               ('review', '리뷰 요청', ['1'])]
@@ -170,7 +175,7 @@ def listing(prs, query, csrf):
     prs = [pr for pr in prs if all(
         not query.get(key, [''])[0] or query[key][0] == value
         or (key == 'status' and query[key][0] == 'stale' and pr['stale'])
-        for key, value in dict(repo=pr['owner'] + '/' + pr['name'], importance=pr['importance'],
+        for key, value in dict(repo=repository_label(pr), importance=pr['importance'],
                                status=pr['status'], review=str(pr['review'])).items())]
     collected = {pr['snapshot']['collected_at'] if pr['snapshot'] else '대기' for pr in prs}
     shared_collection = len(collected) == 1
@@ -180,7 +185,7 @@ def listing(prs, query, csrf):
         content += meta(*(['수집 ' + next(iter(collected))] if shared_collection else []),
                         *(['분석 ' + next(iter(analyzed))] if shared_analysis else []))
     for pr in prs:
-        values = dict(repo=pr['owner'] + '/' + pr['name'], importance=pr['importance'], status=pr['status'], review=str(pr['review']))
+        values = dict(repo=repository_label(pr), importance=pr['importance'], status=pr['status'], review=str(pr['review']))
         a, s = pr['analysis'], pr['snapshot']
         content += ('<article>' + f'<h2><a href="/pr/{pr["id"]}">{esc(pr["title"])}</a></h2>'
                     + meta(values['repo'] + ' #' + str(pr['number']), pr['author'],
@@ -192,9 +197,14 @@ def listing(prs, query, csrf):
 
 
 def github(pr):
+    from .hosts import hostname
+    try:
+        host = hostname(pr.get('host', 'github.com'))
+    except ValueError:
+        return None
     # 저장된 URL을 신뢰하지 않고 검증된 좌표만 사용한다.
     if re.fullmatch(r'[A-Za-z0-9-]+', pr['owner']) and re.fullmatch(r'[A-Za-z0-9_.-]+', pr['name']) and pr['name'] not in ('.', '..'):
-        return f'https://github.com/{pr["owner"]}/{pr["name"]}/pull/{int(pr["number"])}'
+        return f'https://{host}/{pr["owner"]}/{pr["name"]}/pull/{int(pr["number"])}'
     return None
 
 
