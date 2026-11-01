@@ -95,6 +95,22 @@ class WebTests(unittest.TestCase):
             conn.execute('UPDATE pull_requests SET title=? WHERE id=1', ('<PR & 제목>',))
         self.assertIn('<title>&lt;PR &amp; 제목&gt; | skim</title>', self.request('/pr/1')[2])
 
+    def test_analysis_time_shared_once_when_identical(self):
+        with closing(connect(self.config)) as conn, conn:
+            conn.execute("UPDATE analyses SET created_at='same-analysis'")
+        body = self.request()[2]
+        cards = body.split('<article>')[2:]
+        if '<span>분석 same-analysis</span>' in body.split('<h2><a href="/pr/')[0]:
+            self.assertEqual(body.count('<span>분석 same-analysis</span>'), 1)
+            for card in cards:
+                self.assertNotIn('<span>분석 ', card)
+        else:
+            self.assertTrue(any('<span>분석 대기</span>' in card for card in cards))
+
+    def test_card_heading_precedes_meta(self):
+        card = self.request()[2].split('<article>')[2]
+        self.assertTrue(card.startswith('<h2>'))
+
     def test_collection_time_shared_only_for_visible_matching_cards(self):
         with closing(connect(self.config)) as conn, conn:
             conn.execute("UPDATE snapshots SET collected_at='shared-time'")

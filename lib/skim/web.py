@@ -174,17 +174,20 @@ def listing(prs, query, csrf):
                                status=pr['status'], review=str(pr['review'])).items())]
     collected = {pr['snapshot']['collected_at'] if pr['snapshot'] else '대기' for pr in prs}
     shared_collection = len(collected) == 1
-    if shared_collection:
-        content += meta('수집 ' + next(iter(collected)))
+    analyzed = {pr['analysis']['created_at'] if pr['analysis'] else '대기' for pr in prs}
+    shared_analysis = len(analyzed) == 1
+    if shared_collection or shared_analysis:
+        content += meta(*(['수집 ' + next(iter(collected))] if shared_collection else []),
+                        *(['분석 ' + next(iter(analyzed))] if shared_analysis else []))
     for pr in prs:
         values = dict(repo=pr['owner'] + '/' + pr['name'], importance=pr['importance'], status=pr['status'], review=str(pr['review']))
         a, s = pr['analysis'], pr['snapshot']
-        content += ('<article>' + meta(values['repo'] + ' #' + str(pr['number']), pr['author'],
-                                      *(['리뷰 요청'] if pr['review'] else []))
-                    + f'<h2><a href="/pr/{pr["id"]}">{esc(pr["title"])}</a></h2>'
+        content += ('<article>' + f'<h2><a href="/pr/{pr["id"]}">{esc(pr["title"])}</a></h2>'
+                    + meta(values['repo'] + ' #' + str(pr['number']), pr['author'],
+                           *(['리뷰 요청'] if pr['review'] else []))
                     + f'<p>{esc(a["intent"] if a and a["intent"] else "의도 미분석")}</p><p class="meta">{badges(pr)}</p>'
                     + meta(pr['status'], *([] if shared_collection else ['수집 ' + (s['collected_at'] if s else '대기')]),
-                           '분석 ' + (a['created_at'] if a else '대기')) + '</article>')
+                           *([] if shared_analysis else ['분석 ' + (a['created_at'] if a else '대기')])) + '</article>')
     return content + ('<p class="muted">열린 PR이 없습니다. <a href="/repos">저장소 연결</a>과 <a href="/status">상태 점검</a>, <a href="/settings">설정</a>을 확인하세요.</p>' if not has_prs else '')
 
 
