@@ -42,12 +42,19 @@ def meta(*values):
     return '<p class="meta">' + ''.join(f'<span>{esc(value)}</span>' for value in values if value not in (None, '')) + '</p>'
 
 
-def page(title, content):
-    return ('<!doctype html><html lang="ko"><meta charset="utf-8">'
+def page(title, content, active=None):
+    links = [('/', '변경'), ('/repos', '저장소'), ('/status', '상태'), ('/settings', '설정')]
+    nav = ''.join(f'<a href="{href}"' + (' aria-current="page"' if active == href else '')
+                  + f'>{label}</a>' for href, label in links)
+    return ('<!doctype html><html lang="ko"><head><meta charset="utf-8">'
             '<meta name="viewport" content="width=device-width,initial-scale=1">'
-            f'<title>{esc(title)} | skim</title><link rel="stylesheet" href="/static/app.css">'
-            '<header><a class="brand" href="/">skim</a><span>PR 검토 대시보드</span>'
-            '<a href="/repos">저장소</a><a href="/status">상태</a><a href="/settings">설정</a></header><main>' + content + '</main></html>')
+            f'<title>{esc(title)} | skim</title><link rel="stylesheet" href="/static/app.css"></head><body>'
+            '<a class="skip-link" href="#main">본문으로 건너뛰기</a>'
+            '<header class="app-header"><a class="brand" href="/" aria-label="skim 홈">'
+            '<svg viewBox="0 0 20 20" width="20" height="20" fill="none" aria-hidden="true">'
+            '<path d="M4 5h12M4 10h8M4 15h4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>'
+            'skim</a><span class="workspace-label">PR 검토</span><nav aria-label="주 메뉴">'
+            + nav + '</nav></header><main id="main">' + content + '</main></body></html>')
 
 
 class Auth:
@@ -170,7 +177,7 @@ def listing(prs, query, csrf):
             selected = ' selected' if query.get(name, [''])[0] == value else ''
             content += f'<option value="{esc(value)}"{selected}>{esc(value)}</option>'
         content += '</select></label>'
-    content += '<button>필터 적용</button></form>'
+    content += '<button class="btn secondary">필터 적용</button></form>'
     has_prs = bool(prs)
     prs = [pr for pr in prs if all(
         not query.get(key, [''])[0] or query[key][0] == value
@@ -187,12 +194,12 @@ def listing(prs, query, csrf):
     for pr in prs:
         values = dict(repo=repository_label(pr), importance=pr['importance'], status=pr['status'], review=str(pr['review']))
         a, s = pr['analysis'], pr['snapshot']
-        content += ('<article>' + f'<h2><a href="/pr/{pr["id"]}">{esc(pr["title"])}</a></h2>'
+        content += ('<article class="issue-row"><div class="row-content">' + f'<h2><a href="/pr/{pr["id"]}">{esc(pr["title"])}</a></h2>'
                     + meta(values['repo'] + ' #' + str(pr['number']), pr['author'],
                            *(['리뷰 요청'] if pr['review'] else []))
-                    + f'<p>{esc(a["intent"] if a and a["intent"] else "의도 미분석")}</p><p class="meta">{badges(pr)}</p>'
+                    + f'<p class="issue-intent">{esc(a["intent"] if a and a["intent"] else "의도 미분석")}</p><p class="meta">{badges(pr)}</p>'
                     + meta(pr['status'], *([] if shared_collection else ['수집 ' + (s['collected_at'] if s else '대기')]),
-                           *([] if shared_analysis else ['분석 ' + (a['created_at'] if a else '대기')])) + '</article>')
+                           *([] if shared_analysis else ['분석 ' + (a['created_at'] if a else '대기')])) + f'</div><a class="btn ghost sm row-actions" href="/pr/{pr["id"]}">검토 <span aria-hidden="true">→</span></a></article>')
     return content + ('<p class="muted">열린 PR이 없습니다. <a href="/repos">저장소 연결</a>과 <a href="/status">상태 점검</a>, <a href="/settings">설정</a>을 확인하세요.</p>' if not has_prs else '')
 
 
@@ -227,7 +234,12 @@ def detail(pr, query, config, offline=False):
         content += meta('수집 상태: ' + coverage.get('status', '대기'), coverage.get('collection_error', ''))
         content += meta('분석 ' + str(stats.get('analyzed', 0)), '제외 ' + str(stats.get('excluded', 0)), '누락 ' + str(stats.get('omitted', 0)))
         content += meta('수집 ' + s['collected_at'], '분석 ' + (a['created_at'] if a else '대기'))
-    content += '</article><p class="meta"><a href="?order=original">원래 파일 순서</a> <a href="?order=priority">검토 우선순위</a> <a href="?diff=1">전체 diff 보기</a></p>'
+    content += '</article><nav class="toolbar segments" aria-label="변경 보기">'
+    for href, label, selected in [('?order=original', '원래 파일 순서', query.get('order', [''])[0] == 'original'),
+                                  ('?order=priority', '검토 우선순위', query.get('order', [''])[0] != 'original'),
+                                  ('?diff=1', '전체 diff 보기', query.get('diff', [''])[0] == '1')]:
+        content += f'<a class="btn ghost sm" href="{href}"' + (' aria-current="true"' if selected else '') + f'>{label}</a>'
+    content += '</nav>'
     units = list(pr['units'])
     def priority(unit):
         item = pr['items'].get(unit['change_id'])
@@ -339,7 +351,7 @@ class Handler(BaseHTTPRequestHandler):
                     title = pr['title']
                     body = (detail(pr, parse_qs(url.query), self.server.config, offline)
                             + web_jobs.analysis_panel(conn, pr, csrf, offline) + web_jobs.script())
-        self.reply(200, page(title, body))
+        self.reply(200, page(title, body, '/' if url.path.startswith('/pr/') else url.path))
 
     def do_POST(self):
         if not self.check(mutation=True):
