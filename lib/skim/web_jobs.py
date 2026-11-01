@@ -66,8 +66,11 @@ def script():
     return '<script src="/static/jobs.js" defer></script>'
 
 
-def collect_panel(conn, csrf, offline):
+def collect_panel(conn, csrf, offline, compact=False):
     from .web_settings import form
+    if compact:
+        action = '<p class="muted">오프라인 모드</p>' if offline else form('/jobs/collect', csrf, '<button>지금 수집</button>', variant='primary')
+        return '<div class="heading-collect">' + action + job_box(jobs.latest(conn, 'collect')) + '</div>'
     body = '<article class="collect-panel"><h2>수집과 새로고침</h2>'
     if offline:
         body += '<p>오프라인 모드에서는 GitHub 수집을 실행하지 않습니다.</p>'
@@ -95,7 +98,7 @@ def analysis_panel(conn, pr, csrf, offline):
         body += '<p class="muted">하루 20회 모델 호출 예산과 격리 검사는 수동 요청에도 적용됩니다.' + (' draft PR도 같은 동의, 예산을 따릅니다.' if pr['draft'] else '') + '</p>'
         body += form('/jobs/analyze', csrf,
                      f'<input type="hidden" name="host" value="{esc(pr.get("host", "github.com"))}"><input type="hidden" name="repository" value="{esc(pr["owner"] + "/" + pr["name"])}">'
-                     f'<input type="hidden" name="number" value="{int(pr["number"])}"><button>이 PR 분석</button>')
+                     f'<input type="hidden" name="number" value="{int(pr["number"])}"><button>이 PR 분석</button>', variant='primary')
     running = jobs.active(conn, 'analyze')
     if running is not None and running['target_id'] != pr['id']:
         body += ('<p>다른 분석 작업(' + esc(running['target'] or '자동 분석') + ')이 '
@@ -113,16 +116,16 @@ def status_page(conn, csrf, offline):
     if offline:
         body += '<p>오프라인 모드에서는 gh, Codex를 실행하는 상태 점검을 하지 않습니다.</p>'
     else:
-        body += form('/jobs/doctor', csrf, '<button>상태 점검 실행</button>')
+        body += form('/jobs/doctor', csrf, '<button>상태 점검 실행</button>', variant='primary')
     body += job_box(jobs.latest(conn, 'doctor'))
     body += '<h2>복구 안내</h2><ul>' + ''.join(f'<li><strong>{esc(name)}</strong>: {esc(text)}</li>' for name, text in RECOVERY) + '</ul></article>'
     body += collect_panel(conn, csrf, offline)
     body += '<h2>활성 작업</h2>'
     active_rows = conn.execute("SELECT * FROM jobs WHERE status IN ('pending','running') ORDER BY id").fetchall()
-    body += ''.join('<article class="job-row">' + job_box(row) + '</article>' for row in active_rows) or '<p class="muted">활성 작업이 없습니다.</p>'
+    body += '<div class="list">' + (''.join('<article class="job-row">' + job_box(row) + '</article>' for row in active_rows) or '<p class="muted">활성 작업이 없습니다.</p>') + '</div>'
     body += '<h2>최근 작업</h2>'
     rows = jobs.recent(conn)
-    body += ''.join('<article class="job-row">' + job_box(row) + '</article>' for row in rows) or '<p class="muted">작업 기록이 없습니다.</p>'
+    body += '<div class="list">' + (''.join('<article class="job-row">' + job_box(row) + '</article>' for row in rows) or '<p class="muted">작업 기록이 없습니다.</p>') + '</div>'
     return body + script()
 
 
