@@ -4,10 +4,11 @@ import re
 from . import jobs
 from .db import analysis_allowed
 from .repos import web_repository
+from .hosts import registered
 
 JOB_PATHS = {'/jobs/collect', '/jobs/analyze', '/jobs/doctor'}
 RECOVERY = [
-    ('gh', 'gh auth login으로 다시 인증하고, 조직 저장소는 gh 자격 증명의 SSO 승인을 확인하세요.'),
+    ('gh', 'gh auth login --hostname <host>로 다시 인증하고, 조직 저장소는 gh 자격 증명의 SSO 승인을 확인하세요.'),
     ('codex-home', 'skim codex-home init으로 분석 전용 인증 링크를 만드세요. 본인 소유 경로 복구는 --reset을 사용합니다.'),
     ('version, flags', 'Codex 안정 버전 0.165.0 이상을 설치하고 PATH를 확인하세요.'),
     ('probe, 모델', '모델 변경 후나 probe 만료 시 터미널에서 skim doctor --probe를 실행하세요. 실제 모델을 호출하므로 웹에서는 자동 실행하지 않습니다.'),
@@ -93,7 +94,7 @@ def analysis_panel(conn, pr, csrf, offline):
         body += '<p><strong>' + WARNING + '</strong></p>'
         body += '<p class="muted">하루 20회 모델 호출 예산과 격리 검사는 수동 요청에도 적용됩니다.' + (' draft PR도 같은 동의, 예산을 따릅니다.' if pr['draft'] else '') + '</p>'
         body += form('/jobs/analyze', csrf,
-                     f'<input type="hidden" name="repository" value="{esc(pr["owner"] + "/" + pr["name"])}">'
+                     f'<input type="hidden" name="host" value="{esc(pr.get("host", "github.com"))}"><input type="hidden" name="repository" value="{esc(pr["owner"] + "/" + pr["name"])}">'
                      f'<input type="hidden" name="number" value="{int(pr["number"])}"><button>이 PR 분석</button>')
     running = jobs.active(conn, 'analyze')
     if running is not None and running['target_id'] != pr['id']:
@@ -137,13 +138,14 @@ def mutate(server, conn, path, data):
         fields(data, ())
         jobs.enqueue(conn, 'doctor', 0, '로컬 환경')
         return '/status'
-    d = fields(data, ('repository', 'number'))
+    d = fields(data, ('repository', 'number'), ('host',))
+    host = registered(conn, d.get('host', 'github.com'))
     owner, name = web_repository(d['repository'])
     if not re.fullmatch(r'[1-9][0-9]{0,9}', d['number']):
         raise Rejected('PR 번호 형식을 확인하세요')
     pr = conn.execute('SELECT p.id,p.repo_id,p.state,p.number,p.head_sha,p.base_sha,r.owner,r.name FROM pull_requests p '
-                      'JOIN repositories r ON r.id=p.repo_id WHERE r.owner=? AND r.name=? AND p.number=?',
-                      (owner, name, int(d['number']))).fetchone()
+                      'JOIN repositories r ON r.id=p.repo_id WHERE r.host=? AND r.owner=? AND r.name=? AND p.number=?',
+                      (host, owner, name, int(d['number']))).fetchone()
     if pr is None or pr['state'] != 'open':
         raise Rejected('수집된 열린 PR이 아닙니다', 404)
     location = f'/pr/{pr["id"]}'

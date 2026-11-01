@@ -14,6 +14,7 @@ from email.utils import parsedate_to_datetime
 from urllib.parse import urlencode
 
 from .config import private_dir, private_file
+from .hosts import hostname
 
 
 class CollectionError(ValueError):
@@ -44,7 +45,8 @@ class Deferred(CollectionError):
 
 
 class GitHub:
-    def __init__(self, runner=None, clock=time.time):
+    def __init__(self, runner=None, clock=time.time, host="github.com"):
+        self.host = hostname(host)
         self.runner = runner or subprocess.run
         self.clock = clock
         self.not_before = 0
@@ -52,7 +54,7 @@ class GitHub:
     def get(self, endpoint, *, diff=False):
         if self.clock() < self.not_before:
             raise Deferred(self.not_before)
-        command = ['gh', 'api', '--hostname', 'github.com', '--method', 'GET', '--include', endpoint]
+        command = ['gh', 'api', '--hostname', hostname(self.host), '--method', 'GET', '--include', endpoint]
         if diff:
             command += ['-H', 'Accept: application/vnd.github.diff']
         try:
@@ -125,6 +127,7 @@ class Collector:
     def __init__(self, conn, config, runner=None, clock=time.time):
         self.conn, self.config = conn, config
         self.gh = GitHub(runner, clock)
+        self._host_limits = {}
         # 웹 작업 진행 표시용 콜백(stage, processed, total). 실패해도 수집을 막지 않는다.
         self.progress = None
         self._mutex = threading.RLock()
@@ -154,10 +157,31 @@ class Collector:
 
     def collect(self):
         with self.lock():
-            return self._collect()
+            total = 0
+            errors = []
+            for row in self.conn.execute('SELECT host FROM github_hosts ORDER BY host').fetchall():
+                self.gh.host = row['host']
+                self.gh.not_before = self._host_limits.get(row['host'], 0)
+                try:
+                    total += self._collect()
+                except Exception as exc:
+                    errors.append((row['host'], exc))
+                finally:
+                    self._host_limits[row['host']] = self.gh.not_before
+            if errors:
+                message = '; '.join(host + ': ' + error_message(exc) for host, exc in errors)
+                first = errors[0][1]
+                if isinstance(first, CollectionError):
+                    first.args = (message,)
+                    raise first
+                if isinstance(first, OSError):
+                    raise OSError(message) from first
+                raise CollectionError(message) from first
+            return total
 
     def _collect(self):
         gh, conn = self.gh, self.conn
+        host = gh.host
         login = gh.get('user')['login']
         discovered = gh.pages('user/repos', affiliation='owner,organization_member,collaborator')
         candidates = []
@@ -168,7 +192,7 @@ class Collector:
         targets = {}
         names = {}
         listing_failures = []
-        for row in conn.execute('SELECT * FROM repositories WHERE tracked=1 AND enabled=1'):
+        for row in conn.execute('SELECT * FROM repositories WHERE host=? AND tracked=1 AND enabled=1', (host,)):
             full = row['owner'] + '/' + row['name']
             names[full.lower()] = full
             try:
@@ -190,8 +214,8 @@ class Collector:
                 targets.setdefault((full.lower(), item['number']), set()).add('review_request')
         # 목록에서 사라진 PR도 상세 조회하여 닫힘·머지를 구분한다.
         old = {(r['owner'].lower() + '/' + r['name'].lower(), r['number']) for r in conn.execute(
-            "SELECT r.owner,r.name,p.number FROM pull_requests p JOIN repositories r ON p.repo_id=r.id WHERE p.state='open'")}
-        for r in conn.execute("SELECT owner,name FROM repositories"):
+            "SELECT r.owner,r.name,p.number FROM pull_requests p JOIN repositories r ON p.repo_id=r.id WHERE r.host=? AND p.state='open'", (host,))}
+        for r in conn.execute("SELECT owner,name FROM repositories WHERE host=?", (host,)):
             names.setdefault((r['owner'] + '/' + r['name']).lower(), r['owner'] + '/' + r['name'])
         collected = []
         failures = []
@@ -239,17 +263,17 @@ class Collector:
         cache = private_dir(self.config.data_dir / 'cache' / 'diffs')
         # 크기 초과는 미분석 스냅샷으로 남기고 접근 불가는 출처를 제거한다.
         with conn:
-            conn.execute("UPDATE repositories SET source='responsible' WHERE tracked=0 AND source IN ('owned','managed')")
-            conn.executemany('INSERT INTO repositories(owner,name,source) VALUES(?,?,?) ON CONFLICT(owner,name) DO UPDATE SET source=excluded.source WHERE repositories.tracked=0', candidates)
+            conn.execute("UPDATE repositories SET source='responsible' WHERE host=? AND tracked=0 AND source IN ('owned','managed')", (host,))
+            conn.executemany('INSERT INTO repositories(owner,name,source,host) VALUES(?,?,?,?) ON CONFLICT(host,owner,name) DO UPDATE SET source=excluded.source WHERE repositories.tracked=0', [(*c, host) for c in candidates])
             for key, number, pr, state, snapshot in collected:
                 full = names[key]
-                conn.execute('INSERT INTO repositories(owner,name) VALUES(?,?) ON CONFLICT(owner,name) DO NOTHING', repo_parts(full))
-                repo_id = conn.execute('SELECT id FROM repositories WHERE owner=? AND name=?', repo_parts(full)).fetchone()[0]
+                conn.execute('INSERT INTO repositories(owner,name,host) VALUES(?,?,?) ON CONFLICT(host,owner,name) DO NOTHING', (*repo_parts(full), host))
+                repo_id = conn.execute('SELECT id FROM repositories WHERE host=? AND owner=? AND name=?', (host, *repo_parts(full))).fetchone()[0]
                 conn.execute('INSERT INTO pull_requests(repo_id,number,url,title,body,author,state,draft,head_branch,base_sha,head_sha,updated_at,last_seen_at) '
                              'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(repo_id,number) DO UPDATE SET '
                              'url=excluded.url,title=excluded.title,body=excluded.body,author=excluded.author,state=excluded.state,draft=excluded.draft,'
                              'head_branch=excluded.head_branch,base_sha=excluded.base_sha,head_sha=excluded.head_sha,updated_at=excluded.updated_at,last_seen_at=excluded.last_seen_at',
-                             (repo_id, number, f'https://github.com/{full}/pull/{number}', pr['title'], pr.get('body') or '', pr['user']['login'], state,
+                             (repo_id, number, f'https://{host}/{full}/pull/{number}', pr['title'], pr.get('body') or '', pr['user']['login'], state,
                               int(pr.get('draft', False)), pr['head']['ref'], pr['base']['sha'], pr['head']['sha'], pr['updated_at'], now))
                 pr_id = conn.execute('SELECT id FROM pull_requests WHERE repo_id=? AND number=?', (repo_id, number)).fetchone()[0]
                 conn.execute('DELETE FROM pr_sources WHERE pr_id=?', (pr_id,))
@@ -284,8 +308,8 @@ class Collector:
                         conn.execute('INSERT INTO snapshots(pr_id,base_sha,head_sha,diff_hash,input_hash,diff_path,coverage) VALUES(?,?,?,?,?,?,?)',
                                      (pr_id, pr['base']['sha'], pr['head']['sha'], diff_hash, input_hash, str(path), coverage))
             for full, number, exc in failures:
-                row = conn.execute('SELECT p.id FROM pull_requests p JOIN repositories r ON p.repo_id=r.id WHERE r.owner=? AND r.name=? AND p.number=?',
-                                   (*repo_parts(full), number)).fetchone()
+                row = conn.execute('SELECT p.id FROM pull_requests p JOIN repositories r ON p.repo_id=r.id WHERE r.host=? AND r.owner=? AND r.name=? AND p.number=?',
+                                   (host, *repo_parts(full), number)).fetchone()
                 if row:
                     if isinstance(exc, Inaccessible):
                         conn.execute('DELETE FROM pr_sources WHERE pr_id=?', (row['id'],))
@@ -299,8 +323,8 @@ class Collector:
                         if isinstance(exc, Oversized):
                             coverage.update(omitted=coverage.get('total_files', 0), omission_reason=error_message(exc))
                         conn.execute('UPDATE snapshots SET coverage=? WHERE id=?', (json.dumps(coverage, ensure_ascii=False), snapshot['id']))
-            conn.execute("DELETE FROM pull_requests WHERE state='open' AND NOT EXISTS (SELECT 1 FROM pr_sources WHERE pr_id=pull_requests.id)")
-            conn.execute('UPDATE repositories SET last_synced_at=? WHERE tracked=1 AND enabled=1', (now,))
+            conn.execute("DELETE FROM pull_requests WHERE repo_id IN (SELECT id FROM repositories WHERE host=?) AND state='open' AND NOT EXISTS (SELECT 1 FROM pr_sources WHERE pr_id=pull_requests.id)", (host,))
+            conn.execute('UPDATE repositories SET last_synced_at=? WHERE host=? AND tracked=1 AND enabled=1', (now, host))
         self.clean_cache()
         deferred = [exc.retry_at for exc in listing_failures + [f[2] for f in failures] if isinstance(exc, Deferred)]
         if deferred:

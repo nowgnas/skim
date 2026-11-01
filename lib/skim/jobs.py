@@ -215,7 +215,7 @@ class Runner:
             return 'failed', None, '저장소 조회 워커가 없습니다.'
         params = json.loads(job['params'] or '{}')
         parts = tuple(params['repository'].split('/')) if params.get('repository') else None
-        return 'completed', self.lookup.run(parts, params.get('source')), None
+        return 'completed', self.lookup.run(parts, params.get('source'), params.get('host', 'github.com')), None
 
 
 def safe_error(kind, exc):

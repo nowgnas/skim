@@ -68,6 +68,8 @@ def seed(config):
                 if number == 5:
                     conn.execute("UPDATE pull_requests SET head_sha='new-head' WHERE id=?", (pr,))
         with conn:
+            conn.execute("INSERT INTO github_hosts VALUES('github.corp.example')")
+            conn.execute("INSERT INTO repositories(host,owner,name,tracked) VALUES('github.corp.example','demo-org','intranet',1)")
             conn.execute("INSERT INTO repositories(owner,name,tracked) VALUES('demo-org','library',1)")
             conn.execute("INSERT INTO repositories(owner,name,tracked,analysis_policy) VALUES('demo-org','private',1,'deny')")
             conn.execute("INSERT INTO organization_policies VALUES('demo-org','allow')")
