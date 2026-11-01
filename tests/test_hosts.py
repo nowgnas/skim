@@ -1,0 +1,167 @@
+"""GHE 경계는 임시 DB와 목 실행기로만 검증한다."""
+import os
+import sqlite3
+import tempfile
+import unittest
+from contextlib import closing
+from pathlib import Path
+from unittest.mock import Mock, patch
+import subprocess
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))
+from skim import db, doctor
+from skim.config import Config
+from skim.hosts import hostname, authenticated
+from skim.collect import Collector
+from skim.web import github
+import test_collect
+import test_web_settings
+
+HOST = 'github.corp.example'
+
+
+class HostTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        env = patch.dict(os.environ, SKIM_HOME=temp.name)
+        env.start()
+        self.addCleanup(env.stop)
+        self.config = Config.load()
+
+    def test_validation(self):
+        self.assertEqual(hostname('GitHub.Corp.Example'), HOST)
+        self.assertEqual(hostname('intranet'), 'intranet')
+        self.assertEqual(len(hostname('a' * 63 + '.' + 'b' * 63 + '.' + 'c' * 63 + '.' + 'd' * 61)), 253)
+        for value in ['', 'https://github.com', '//github.com', 'github.com/', 'github.com:443',
+                      'user@github.com', 'github.com?x', 'github.com#x', 'github.com\\x',
+                      ' github.com', 'github.com ', 'git hub.com', 'github.com\n',
+                      '.github.com', 'github.com.', 'git..com', '-git.com', 'git-.com',
+                      'git._com', 'git.한글', 'a' * 64, 'a.' * 127 + 'a']:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                hostname(value)
+
+    def test_v5_migration_preserves_entire_reference_chain(self):
+        with patch.object(db, 'MIGRATIONS', db.MIGRATIONS[:5]):
+            with closing(db.connect(self.config)) as conn, conn:
+                conn.execute("INSERT INTO repositories(id,owner,name) VALUES(8,'org','repo')")
+                conn.execute('INSERT INTO pull_requests(id,repo_id,number) VALUES(9,8,1)')
+                conn.execute("INSERT INTO pr_sources VALUES(9,'repository')")
+                conn.execute("INSERT INTO snapshots(id,pr_id,base_sha,head_sha,diff_hash,input_hash) VALUES(10,9,'b','h','d','i')")
+                conn.execute("INSERT INTO changes(id,snapshot_id,file_path,kind) VALUES(11,10,'a','file')")
+                conn.execute("INSERT INTO analyses(id,snapshot_id,input_hash,provider,model,cli_version,prompt_version,schema_version,status) VALUES(12,10,'i','fake','fake','1','1','1','completed')")
+                conn.execute("INSERT INTO analysis_items(analysis_id,change_id,importance,reason) VALUES(12,11,'low','ok')")
+        with closing(db.connect(self.config)) as conn, conn:
+            self.assertEqual(conn.execute('PRAGMA user_version').fetchone()[0], len(db.MIGRATIONS))
+            self.assertEqual(conn.execute('SELECT host FROM repositories WHERE id=8').fetchone()[0], 'github.com')
+            self.assertEqual(conn.execute('SELECT reason FROM analysis_items').fetchone()[0], 'ok')
+            self.assertEqual(conn.execute('PRAGMA foreign_key_check').fetchall(), [])
+            conn.execute('INSERT INTO repositories(host,owner,name) VALUES(?,?,?)', (HOST, 'org', 'repo'))
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute("INSERT INTO repositories(owner,name) VALUES('ORG','REPO')")
+            conn.execute('DELETE FROM repositories WHERE id=8')
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM analysis_items').fetchone()[0], 0)
+
+    def test_collection_is_scoped_read_only_and_url_and_consent(self):
+        fake = test_collect.FakeGH()
+        calls = []
+        def runner(command, **kwargs):
+            calls.append(command[:])
+            # Reuse existing payload fixture, while independently asserting real host/method.
+            self.assertIn(command[3], ['github.com', HOST])
+            self.assertEqual(command[4:6], ['--method', 'GET'])
+            fixture_command = command[:]
+            fixture_command[3] = 'github.com'
+            return fake(fixture_command, **kwargs)
+        with closing(db.connect(self.config)) as conn, conn:
+            conn.execute('INSERT INTO github_hosts VALUES(?)', (HOST,))
+            for host in ['github.com', HOST]:
+                conn.execute("INSERT INTO repositories(host,owner,name,tracked) VALUES(?,'org','repo',1)", (host,))
+            conn.execute("INSERT INTO organization_policies VALUES('org','allow')")
+            Collector(conn, self.config, runner).collect()
+            self.assertEqual({c[3] for c in calls}, {'github.com', HOST})
+            rows = conn.execute('SELECT r.*,p.number,p.url FROM repositories r JOIN pull_requests p ON p.repo_id=r.id').fetchall()
+            self.assertGreaterEqual(len(rows), 2)
+            for row in rows:
+                self.assertEqual(row['url'], github(dict(row)))
+                self.assertEqual(row['url'], f"https://{row['host']}/{row['owner']}/{row['name']}/pull/{row['number']}")
+                self.assertEqual(db.analysis_allowed(conn, row['id']), row['host'] == 'github.com')
+            conn.execute("INSERT INTO host_organization_policies VALUES(?,'org','allow')", (HOST,))
+            self.assertTrue(all(db.analysis_allowed(conn, row['id']) for row in rows))
+
+    def test_doctor_checks_all_hosts_and_hides_raw_output(self):
+        with closing(db.connect(self.config)) as conn, conn:
+            conn.execute('INSERT INTO github_hosts VALUES(?)', (HOST,))
+        runner = Mock(side_effect=lambda cmd, **kw: subprocess.CompletedProcess(cmd, int(cmd[-1] == HOST), 'SECRET', 'TOKEN'))
+        lines = []
+        doctor.run(self.config, runner=runner, which=lambda name: '/fake',
+                   adapter=Mock(model='fake', unknown_enabled=[]), out=lines.append)
+        self.assertEqual([c.args[0] for c in runner.call_args_list],
+                         [['gh','auth','status','--hostname', h] for h in ['github.com', HOST]])
+        self.assertIn('실패: gh ' + HOST, '\n'.join(lines))
+        self.assertNotIn('SECRET', '\n'.join(lines))
+        self.assertNotIn('TOKEN', '\n'.join(lines))
+        self.assertFalse(authenticated(HOST, Mock(side_effect=OSError)))
+
+
+class HostWebTests(unittest.TestCase):
+    setUp = test_web_settings.SettingsTests.setUp
+    setup_http = test_web_settings.SettingsTests.setup_http
+    request = test_web_settings.SettingsTests.request
+    post = test_web_settings.SettingsTests.post
+    wait_lookup = test_web_settings.SettingsTests.wait_lookup
+
+    def test_host_lifecycle_and_auth_status(self):
+        self.assertEqual(self.post('/hosts/add', host='GIT.ENTERPRISE.EXAMPLE')[0], 303)
+        with patch('skim.web_settings.authenticated', side_effect=lambda h: h == 'git.enterprise.example') as status:
+            body = self.request('/repos')[2]
+            self.assertIn('git.enterprise.example: 로그인됨', body)
+            self.assertIn('github.com: 로그인 안 됨', body)
+            self.assertIn(unittest.mock.call('git.enterprise.example'), status.call_args_list)
+        self.assertEqual(self.post('/hosts/remove', host='github.com')[0], 400)
+        self.assertEqual(self.request('/hosts/remove', 'POST', {'host': 'git.enterprise.example'})[0], 403)
+        self.assertEqual(self.post('/hosts/remove', host='git.enterprise.example')[0], 303)
+        with closing(db.connect(self.config)) as conn:
+            self.assertIsNone(conn.execute("SELECT 1 FROM github_hosts WHERE host='git.enterprise.example'").fetchone())
+        for host in ['https://bad', 'bad:443', 'bad/name', 'bad host']:
+            self.assertEqual(self.post('/hosts/add', host=host)[0], 400)
+
+    def test_lookup_and_add_host_through_worker_and_policy_isolation(self):
+        lookup = self.server.repo_lookup
+        with patch.object(lookup.gh, 'runner', return_value=subprocess.CompletedProcess([], 0, '{"login":"me"}', '')) as runner:
+            # List payload differs from user payload, so route by endpoint.
+            runner.side_effect = lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, '{"login":"me"}' if cmd[7] == 'user' else '[]', '')
+            self.assertEqual(self.post('/repos/load', host=HOST)[0], 303)
+            self.wait_lookup()
+            self.assertTrue(all(c.args[0][3] == HOST for c in runner.call_args_list))
+            self.assertEqual(lookup.host, HOST)
+        with patch.object(lookup.gh, 'get', return_value={'full_name': 'demo/checkout'}):
+            self.assertEqual(self.post('/repos/add', host=HOST, repository='demo/checkout', source='responsible')[0], 303)
+            self.wait_lookup()
+        with closing(db.connect(self.config)) as conn:
+            row = conn.execute("SELECT id FROM repositories WHERE host=? AND owner='demo' AND name='checkout'", (HOST,)).fetchone()
+            self.assertFalse(db.analysis_allowed(conn, row[0]))
+        self.assertEqual(self.post('/settings/analysis', host=HOST, scope='org', target='demo', policy='allow', confirm='yes')[0], 303)
+        with closing(db.connect(self.config)) as conn:
+            self.assertTrue(db.analysis_allowed(conn, row[0]))
+        self.assertEqual(self.post('/settings/analysis', host=HOST, scope='repo', target='demo/checkout', policy='deny')[0], 303)
+        with closing(db.connect(self.config)) as conn:
+            self.assertFalse(db.analysis_allowed(conn, row[0]))
+            self.assertTrue(db.analysis_allowed(conn, 1))
+
+    def test_removal_and_manual_analysis_use_host_identity(self):
+        with closing(db.connect(self.config)) as conn, conn:
+            repo_id = conn.execute("INSERT INTO repositories(host,owner,name,tracked,analysis_policy) VALUES(?,'demo','checkout',1,'allow')", (HOST,)).lastrowid
+            pr_id = conn.execute("INSERT INTO pull_requests(repo_id,number,base_sha,head_sha) VALUES(?,1,'base','head')", (repo_id,)).lastrowid
+            conn.execute("INSERT INTO pr_sources VALUES(?,'repository')", (pr_id,))
+            conn.execute("INSERT INTO snapshots(pr_id,base_sha,head_sha,diff_hash,input_hash) VALUES(?,'base','head','d','i')", (pr_id,))
+        self.assertEqual(self.post('/jobs/analyze', host=HOST, repository='demo/checkout', number='1')[0], 303)
+        with closing(db.connect(self.config)) as conn:
+            self.assertEqual(conn.execute("SELECT target_id FROM jobs WHERE type='analyze'").fetchone()[0], pr_id)
+        self.assertEqual(self.post('/repos/remove', host=HOST, repository='demo/checkout')[0], 303)
+        with closing(db.connect(self.config)) as conn:
+            self.assertEqual(conn.execute('SELECT tracked FROM repositories WHERE id=?', (repo_id,)).fetchone()[0], 0)
+            self.assertEqual(conn.execute('SELECT tracked FROM repositories WHERE id=1').fetchone()[0], 1)
+        self.assertEqual(self.post('/hosts/remove', host=HOST)[0], 303)
+        with closing(db.connect(self.config)) as conn:
+            self.assertEqual(conn.execute('SELECT enabled FROM repositories WHERE id=?', (repo_id,)).fetchone()[0], 0)

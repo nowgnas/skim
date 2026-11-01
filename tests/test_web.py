@@ -35,6 +35,9 @@ class FakeConnection:
 
 class WebTests(unittest.TestCase):
     def setUp(self):
+        auth_status = patch('skim.web_settings.authenticated', return_value=False)
+        auth_status.start()
+        self.addCleanup(auth_status.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         env = patch.dict(os.environ, SKIM_HOME=self.temp.name)
