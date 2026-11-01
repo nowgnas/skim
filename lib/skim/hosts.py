@@ -4,6 +4,8 @@ import subprocess
 
 
 def hostname(value):
+    if not value.isascii():
+        raise ValueError('호스트 이름 형식을 확인하세요')
     value = value.lower()
     if len(value) > 253 or not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*', value, flags=re.ASCII):
         raise ValueError('호스트 이름 형식을 확인하세요')

@@ -37,7 +37,7 @@ class HostTests(unittest.TestCase):
                       'user@github.com', 'github.com?x', 'github.com#x', 'github.com\\x',
                       ' github.com', 'github.com ', 'git hub.com', 'github.com\n',
                       '.github.com', 'github.com.', 'git..com', '-git.com', 'git-.com',
-                      'git._com', 'git.한글', 'a' * 64, 'a.' * 127 + 'a']:
+                      'git._com', 'git.한글', 'git\x00.com', 'K.com', 'a' * 64, 'a.' * 127 + 'a']:
             with self.subTest(value=value), self.assertRaises(ValueError):
                 hostname(value)
 
@@ -61,6 +61,27 @@ class HostTests(unittest.TestCase):
                 conn.execute("INSERT INTO repositories(owner,name) VALUES('ORG','REPO')")
             conn.execute('DELETE FROM repositories WHERE id=8')
             self.assertEqual(conn.execute('SELECT COUNT(*) FROM analysis_items').fetchone()[0], 0)
+
+    def test_v6_failure_rolls_back_and_restores_foreign_keys(self):
+        with patch.object(db, 'MIGRATIONS', db.MIGRATIONS[:5]):
+            with closing(db.connect(self.config)) as conn, conn:
+                conn.execute("INSERT INTO repositories(id,owner,name) VALUES(8,'org','repo')")
+                conn.execute('INSERT INTO pull_requests(id,repo_id,number) VALUES(9,8,1)')
+        failures = [
+            db.MIGRATIONS[5].replace('DROP TABLE repositories;', 'SELECT missing_column FROM repositories;'),
+            db.MIGRATIONS[5] + "UPDATE pull_requests SET repo_id=999 WHERE id=9;",
+        ]
+        with closing(sqlite3.connect(self.config.db_path)) as conn:
+            conn.execute('PRAGMA foreign_keys=ON')
+            for migration in failures:
+                with self.subTest(migration=migration), patch.object(db, 'MIGRATIONS', db.MIGRATIONS[:5] + (migration,)):
+                    with self.assertRaises((sqlite3.Error, ValueError)):
+                        db.migrate(conn, self.config.db_path)
+                    self.assertEqual(conn.execute('PRAGMA user_version').fetchone()[0], 5)
+                    self.assertEqual(conn.execute('PRAGMA foreign_keys').fetchone()[0], 1)
+                    self.assertIsNone(conn.execute("SELECT name FROM sqlite_master WHERE name='repositories_v6'").fetchone())
+                    self.assertEqual(conn.execute('SELECT id,owner,name FROM repositories').fetchall(), [(8, 'org', 'repo')])
+                    self.assertEqual(conn.execute('SELECT id,repo_id,number FROM pull_requests').fetchall(), [(9, 8, 1)])
 
     def test_collection_is_scoped_read_only_and_url_and_consent(self):
         fake = test_collect.FakeGH()
