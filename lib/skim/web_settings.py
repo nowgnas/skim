@@ -138,7 +138,7 @@ def render(server, conn, csrf, path):
         for row in conn.execute('SELECT * FROM repositories WHERE tracked=1 ORDER BY owner,name'):
             name = row['owner'] + '/' + row['name']
             body += '<article class="list-row"><div class="row-content"><h3>' + esc(name) + '</h3>' + meta(row['host'], row['source'], '추적 중') + '</div><div class="toolbar row-actions">'
-            body += form('/repos/remove', csrf, f'<input type="hidden" name="host" value="{esc(row["host"])}"><input type="hidden" name="repository" value="{esc(name)}"><button aria-label="{esc(row["host"] + "/" + name)} 연결 해제">연결 해제</button>') + '</div></article>'
+            body += form('/repos/remove', csrf, f'<input type="hidden" name="host" value="{esc(row["host"])}"><input type="hidden" name="repository" value="{esc(name)}"><button aria-label="{esc(row["host"] + "/" + name)} 연결 해제">연결 해제</button>', variant='danger') + '</div></article>'
         body += '</div><h2>저장소 연결</h2><div class="connect-toolbar">' + form('/repos/add', csrf, host_field(conn) + '<label>owner/repo<input name="repository" required maxlength="140"></label>' + source_field() + '<button>저장소 연결</button>', variant='primary')
         body += form('/repos/load', csrf, host_field(conn, '저장소 불러오기') + '<button>접근 가능한 저장소 불러오기</button>') + '</div>'
         lookup = getattr(server, 'repo_lookup', None)
@@ -151,7 +151,7 @@ def render(server, conn, csrf, path):
         body += job_box(jobs.latest(conn, 'repos')) + script()
         body += '<div class="list">'
         for name in items:
-            body += '<article class="list-row"><span class="row-content">' + esc(lookup_host + '/' + name) + '</span>' + form('/repos/add', csrf, f'<input type="hidden" name="host" value="{esc(lookup_host)}"><input type="hidden" name="repository" value="{esc(name)}">' + source_field(lookup_host + '/' + name) + f'<button aria-label="{esc(lookup_host + "/" + name)} 연결">선택하여 연결</button>') + '</article>'
+            body += '<article class="list-row"><span class="row-content">' + esc(lookup_host + '/' + name) + '</span>' + form('/repos/add', csrf, f'<input type="hidden" name="host" value="{esc(lookup_host)}"><input type="hidden" name="repository" value="{esc(name)}">' + source_field(lookup_host + '/' + name) + f'<button aria-label="{esc(lookup_host + "/" + name)} 선택하여 연결">선택하여 연결</button>') + '</article>'
         return body + '</div>'
     settings = json.loads((server.config.config_dir / 'config.json').read_text())
     model = settings.get('codex_model', '')
@@ -291,7 +291,7 @@ def host_settings(server, conn, csrf):
         body += '<article class="list-row"><div class="row-content"><h3>' + esc(host) + '</h3><p class="meta"><span class="badge">' + esc(status) + '</span><span>마지막 확인: ' + esc(cached[1] if cached else '없음') + '</span></p></div><div class="toolbar row-actions">'
         body += form('/hosts/check', csrf, f'<input type="hidden" name="host" value="{esc(host)}"><button aria-label="{esc(host)} 인증 다시 확인">인증 다시 확인</button>')
         if host != 'github.com':
-            body += form('/hosts/remove', csrf, f'<input type="hidden" name="host" value="{esc(host)}"><button aria-label="{esc(host)} 삭제">호스트 삭제</button>')
+            body += form('/hosts/remove', csrf, f'<input type="hidden" name="host" value="{esc(host)}"><button aria-label="{esc(host)} 호스트 삭제">호스트 삭제</button>', variant='danger')
         body += '</div></article>'
     return body + '</div>' + form('/hosts/add', csrf, '<label>호스트<input name="host" aria-label="새 호스트 추가" required maxlength="253" placeholder="github.corp.example"></label><button>호스트 추가</button>')
 

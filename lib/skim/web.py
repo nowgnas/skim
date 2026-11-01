@@ -155,7 +155,8 @@ def badges(pr):
         labels.append('모델 판단: ' + ', '.join(pr['model_flags']))
     if pr['unanalysed']:
         labels.append('모델 판단: 미분석' if not pr['items'] else '모델 판단: 일부 미분석')
-    return (f'<span class="badge {esc(pr["importance"])}">{esc(pr["importance"])}</span> '
+    return ((f'<span class="badge {esc(pr["importance"])}">{esc(pr["importance"])}</span> '
+             if pr["importance"] != "unanalyzed" else "")
             + ''.join(f'<span>{esc(label)}</span>' for label in labels)
             + ('<span class="badge">리뷰 요청</span>' if pr.get('review') else '')
             + ('<span>이전 SHA 결과</span>' if pr['stale'] else '') + ('<span>draft</span>' if pr['draft'] else ''))
@@ -226,7 +227,7 @@ def detail(pr, query, config, offline=False):
     if session:
         sid, url = session
         content += f'<p><a href="{esc(url)}" rel="noreferrer">Sessio: {esc(sid)} ↗</a></p>'
-    content += f'<article><h2>의도</h2><p>{esc(a["intent"] if a and a["intent"] else "미분석: 분석 결과가 없습니다.")}</p><h2>위험 요약</h2><p class="meta">{badges(pr)}</p><p>{esc(pr["status"])} {esc(a["error"] if a else "")}</p>'
+    content += f'<article><h2>의도</h2><p>{esc(a["intent"] if a and a["intent"] else "미분석: 분석 결과가 없습니다.")}</p><h2>위험 요약</h2><p class="meta">{badges(pr)}</p><p><span class="badge">{esc(pr["status"])}</span> {esc(a["error"] if a else "")}</p>'
     if a:
         content += meta('모델 ' + a['model'], 'Codex CLI ' + a['cli_version'])
     if s:
