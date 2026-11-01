@@ -90,7 +90,20 @@ class RepoLookup:
 
 def form(action, csrf, content):
     from .web import esc
-    return (f'<form method="post" action="{action}"><input type="hidden" name="csrf" value="{esc(csrf)}">'
+    if action in ('/repos/remove', '/hosts/remove'):
+        variant = 'danger'
+    elif action in ('/repos/add', '/settings/model', '/settings/analysis', '/jobs/analyze'):
+        variant = 'primary'
+    else:
+        variant = 'secondary'
+    icon = ''
+    if action in ('/jobs/collect', '/hosts/check'):
+        icon = ('<svg viewBox="0 0 16 16" fill="none" aria-hidden="true">'
+                '<path d="M13 7a5 5 0 1 0-1 4M13 3v4H9" stroke="currentColor" '
+                'stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>')
+    size = ' sm' if action in ('/repos/remove', '/hosts/remove', '/hosts/check') else ''
+    content = content.replace('<button>', f'<button class="btn {variant}{size}">' + icon)
+    return (f'<form class="action-form" method="post" action="{action}"><input type="hidden" name="csrf" value="{esc(csrf)}">'
             + content + '</form>')
 
 
@@ -102,8 +115,8 @@ def policy_form(csrf, scope, target, host="github.com"):
     from .web import esc
     return form('/settings/analysis', csrf,
                 f'<input type="hidden" name="host" value="{esc(host)}"><input type="hidden" name="scope" value="{scope}"><label>대상<input name="target" value="{esc(target)}" required></label>'
-                '<select name="policy"><option value="deny">거부</option><option value="reset">초기화 / 조직 설정 상속</option><option value="allow">허용</option></select>'
-                '<label><input type="checkbox" name="confirm" value="yes">코드가 Codex(모델 서비스)로 전송됨을 이해하고 허용합니다</label><button>분석 정책 저장</button>')
+                '<label>정책<select name="policy"><option value="deny">거부</option><option value="reset">초기화 / 조직 설정 상속</option><option value="allow">허용</option></select></label>'
+                '<label class="consent"><input type="checkbox" name="confirm" value="yes">코드가 Codex(모델 서비스)로 전송됨을 이해하고 허용합니다</label><button>분석 정책 저장</button>')
 
 
 def render(server, conn, csrf, path):
@@ -112,12 +125,13 @@ def render(server, conn, csrf, path):
         body = '<h1>저장소</h1><p>조직 저장소를 포함하여 GitHub에는 항상 읽기 전용으로 접근합니다.</p>'
         body += '<p>연결 해제는 로컬 추적만 해제합니다. 리뷰 요청 결과와 분석 정책은 보존되며 분석 동의 철회가 아닙니다. 분석 허용 화면에서 별도로 끄세요.</p>'
         body += host_settings(server, conn, csrf)
+        body += '<h2>연결된 저장소</h2>'
         for row in conn.execute('SELECT * FROM repositories WHERE tracked=1 ORDER BY owner,name'):
             name = row['owner'] + '/' + row['name']
-            body += '<article>' + meta(row['host'], name, row['source'])
-            body += form('/repos/remove', csrf, f'<input type="hidden" name="host" value="{esc(row["host"])}"><input type="hidden" name="repository" value="{esc(name)}"><button>연결 해제</button>') + '</article>'
-        body += '<h2>직접 연결</h2>' + form('/repos/add', csrf, host_field(conn) + '<label>owner/repo<input name="repository" required maxlength="140"></label>' + source_field() + '<button>저장소 연결</button>')
-        body += form('/repos/load', csrf, host_field(conn) + '<button>접근 가능한 저장소 불러오기</button>')
+            body += '<article class="list-row"><div class="row-content"><h3>' + esc(name) + '</h3>' + meta(row['host'], row['source'], '추적 중') + '</div><div class="toolbar row-actions">'
+            body += form('/repos/remove', csrf, f'<input type="hidden" name="host" value="{esc(row["host"])}"><input type="hidden" name="repository" value="{esc(name)}"><button>연결 해제</button>') + '</div></article>'
+        body += '<h2>저장소 연결</h2><div class="toolbar connect-toolbar">' + form('/repos/add', csrf, host_field(conn) + '<label>owner/repo<input name="repository" required maxlength="140"></label>' + source_field() + '<button>저장소 연결</button>')
+        body += form('/repos/load', csrf, host_field(conn) + '<button>접근 가능한 저장소 불러오기</button>') + '</div>'
         lookup = getattr(server, 'repo_lookup', None)
         lookup_host, items = lookup.snapshot(with_host=True) if lookup else ('github.com', [])
         if getattr(server, 'offline', False):
@@ -127,7 +141,7 @@ def render(server, conn, csrf, path):
             body += '<p>이미 저장소 조회 작업이 진행 중입니다. 완료 후 다시 요청하세요. 진행 중 요청은 새 작업을 만들지 않습니다.</p>'
         body += job_box(jobs.latest(conn, 'repos')) + script()
         for name in items:
-            body += '<article>' + esc(lookup_host + '/' + name) + form('/repos/add', csrf, f'<input type="hidden" name="host" value="{esc(lookup_host)}"><input type="hidden" name="repository" value="{esc(name)}">' + source_field() + '<button>선택하여 연결</button>') + '</article>'
+            body += '<article class="list-row"><span class="row-content">' + esc(lookup_host + '/' + name) + '</span>' + form('/repos/add', csrf, f'<input type="hidden" name="host" value="{esc(lookup_host)}"><input type="hidden" name="repository" value="{esc(name)}">' + source_field() + '<button>선택하여 연결</button>') + '</article>'
         return body
     settings = json.loads((server.config.config_dir / 'config.json').read_text())
     model = settings.get('codex_model', '')
@@ -264,12 +278,11 @@ def host_settings(server, conn, csrf):
         host = row[0]
         cached = getattr(server, 'host_auth', {}).get(host)
         status = ('로그인됨' if cached[0] else '로그인 안 됨') if cached else '미확인'
-        status += ' 마지막 확인: ' + (cached[1] if cached else '없음')
-        body += '<article>' + esc(host) + ': ' + status
+        body += '<article class="list-row"><div class="row-content"><h3>' + esc(host) + '</h3><p class="meta"><span class="badge">' + esc(status) + '</span><span>마지막 확인: ' + esc(cached[1] if cached else '없음') + '</span></p></div><div class="toolbar row-actions">'
         body += form('/hosts/check', csrf, f'<input type="hidden" name="host" value="{esc(host)}"><button>인증 다시 확인</button>')
         if host != 'github.com':
             body += form('/hosts/remove', csrf, f'<input type="hidden" name="host" value="{esc(host)}"><button>호스트 삭제</button>')
-        body += '</article>'
+        body += '</div></article>'
     return body + form('/hosts/add', csrf, '<label>호스트<input name="host" required maxlength="253" placeholder="github.corp.example"></label><button>호스트 추가</button>')
 
 

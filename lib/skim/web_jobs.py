@@ -53,7 +53,7 @@ def job_box(row, poll=True):
         return '<p class="muted">최근 작업 없음</p>'
     d = jobs.describe(row)
     body = (f'<div class="job" data-job-id="{d["id"]}" data-job-active="{int(poll and d["active"])}">'
-            '<p class="meta" data-job-field="summary">'
+            '<p class="meta" aria-live="polite" data-job-field="summary">'
             + ''.join(f'<span>{esc(part)}</span>' for part in summary_parts(row)) + '</p>')
     if d['error']:
         body += f'<p class="error">{esc(d["error"])}</p>'
@@ -68,7 +68,7 @@ def script():
 
 def collect_panel(conn, csrf, offline):
     from .web_settings import form
-    body = '<article><h2>수집과 새로고침</h2>'
+    body = '<article class="collect-panel"><h2>수집과 새로고침</h2>'
     if offline:
         body += '<p>오프라인 모드에서는 GitHub 수집을 실행하지 않습니다.</p>'
     else:
@@ -119,10 +119,10 @@ def status_page(conn, csrf, offline):
     body += collect_panel(conn, csrf, offline)
     body += '<h2>활성 작업</h2>'
     active_rows = conn.execute("SELECT * FROM jobs WHERE status IN ('pending','running') ORDER BY id").fetchall()
-    body += ''.join('<article>' + job_box(row) + '</article>' for row in active_rows) or '<p class="muted">활성 작업이 없습니다.</p>'
+    body += ''.join('<article class="job-row">' + job_box(row) + '</article>' for row in active_rows) or '<p class="muted">활성 작업이 없습니다.</p>'
     body += '<h2>최근 작업</h2>'
     rows = jobs.recent(conn)
-    body += ''.join('<article>' + job_box(row) + '</article>' for row in rows) or '<p class="muted">작업 기록이 없습니다.</p>'
+    body += ''.join('<article class="job-row">' + job_box(row) + '</article>' for row in rows) or '<p class="muted">작업 기록이 없습니다.</p>'
     return body + script()
 
 
