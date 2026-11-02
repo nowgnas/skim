@@ -64,9 +64,12 @@ GitHub.com 로그인과 대상 저장소 읽기 권한이 필요하며, 조직�
 
 ### 2. 분석 허용과 모델 설정
 
-**분석 허용 · 모델 설정**에서 저장소별 또는 조직별 LLM 분석을 명시적으로 허용하세요. 기본값은 꺼짐입니다.
-저장소의 명시적 허용·거부가 조직 정책보다 우선하며, 조직 설정 상속도 선택할 수 있습니다.
-조직 허용은 리뷰 요청으로 발견된 저장소를 포함해 해당 조직 저장소 전체에 적용됩니다.
+**저장소 → 분석 허용 범위**에서 GitHub 앱 설치처럼 호스트마다 범위를 고르세요. 기본값은 **분석 안 함**입니다.
+- **모든 저장소**: 그 호스트의 모든 저장소(앞으로 연결하거나 리뷰 요청으로 들어오는 저장소 포함)
+- **선택한 저장소만**: 체크한 저장소만. 연결했거나 열린 PR이 있는 저장소가 후보로 나옵니다.
+
+범위를 넓히거나 저장소를 새로 고를 때는 전송 확인 체크가 필요하고, 좁히거나 빼는 것은 바로 저장됩니다.
+**분석 안 함**이나 **모든 저장소**로 바꾸면 이전 선택은 지워집니다.
 
 **허용하면 PR 코드·diff와 제목·설명이 Codex CLI를 통해 모델 서비스로 전송됩니다.
 민감 정보 제외는 완전하지 않으며 서비스의 전송·보존 정책이 적용됩니다.**
@@ -140,9 +143,9 @@ GitHub·모델 서비스에 접속하지 않습니다. 이 README의 스크린�
 | `skim` | 로컬 서버 시작과 브라우저 열기 (`skim web`과 동일) |
 | `skim web --no-browser` | 브라우저 자동 열기 없이 실행 (`--port`, `--offline` 지원) |
 | `skim repo add owner/repo` / `skim repo list` / `skim repo remove owner/repo` | 추적 저장소 관리 |
-| `skim analysis allow owner/repo` / `skim analysis deny owner/repo` | 저장소 분석 전송 허용·거부 |
-| `skim analysis allow --org owner` / `skim analysis deny --org owner` | 조직 분석 전송 허용·거부 |
-| `skim analysis reset owner/repo` | 저장소 정책을 지우고 조직 설정 상속 |
+| `skim analysis scope none\|all\|selected [--host H]` | 호스트 분석 범위 변경 |
+| `skim analysis allow owner/repo` / `skim analysis deny owner/repo` | 선택한 저장소 목록에 추가·제외 (범위가 안 함이면 선택 범위로 전환) |
+| `skim analysis reset owner/repo` | 선택에서 제외 (`deny`와 같음) |
 | `skim collect` | PR 수집 |
 | `skim analyze` | 허용된 최신 스냅샷 분석 (기본 draft 제외, `--include-drafts` 지원) |
 | `skim doctor` | 모델 호출 없이 상태 점검 |
@@ -178,7 +181,7 @@ GitHub·모델 서비스에 접속하지 않습니다. 이 README의 스크린�
 | 진입 토큰 만료·사용됨 | `skim`을 다시 실행해 새 URL을 받으세요. |
 | 모델 설정과 실제 적용값이 다름 | 서버 터미널의 `SKIM_CODEX_MODEL`을 확인하고 probe에도 같은 모델을 사용하세요. |
 
-정책 상속·분석 예산·캐시·격리·Sessio 연결은 [상세 문서](docs/02-details.md),
+분석 허용 범위·분석 예산·캐시·격리·Sessio 연결은 [상세 문서](docs/02-details.md),
 웹 인증과 화면 동작은 [웹 문서](docs/04-web.md),
 웹 우선 전환의 구현 상태는 [웹 우선 설계 부록](docs/05-web-first.md),
 전체 설계는 [설계 문서](docs/01-design.md)를 참고하세요.
@@ -188,4 +191,4 @@ GitHub·모델 서비스에 접속하지 않습니다. 이 README의 스크린�
 터미널에서 `gh auth login --hostname github.corp.example`로 로그인한 뒤,
 웹의 **저장소(/repos)** 에서 호스트를 추가하고 해당 호스트를 선택해 **저장소 불러오기**를 누르세요.
 회사 GitHub도 항상 읽기 전용으로 접근하며, LLM 분석은 기본 OFF입니다.
-필요한 경우 설정에서 해당 호스트의 저장소 또는 조직별로 분석을 허용하세요.
+필요한 경우 저장소 화면의 분석 허용 범위에서 그 호스트를 고른 뒤 범위를 정하세요.

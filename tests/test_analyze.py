@@ -59,6 +59,7 @@ class AnalysisTests(unittest.TestCase):
         self.addCleanup(self.conn.close)
         with self.conn:
             self.conn.execute("INSERT INTO repositories(owner,name,analysis_policy) VALUES('org','repo','allow')")
+            self.conn.execute("UPDATE github_hosts SET analysis_scope='selected'")
             self.conn.execute("INSERT INTO pull_requests(repo_id,number,title,body,base_sha,head_sha) VALUES(1,1,'변경','설명','base','head')")
         self.snapshot(DIFF)
         self.fake = Fake()
@@ -141,13 +142,15 @@ class AnalysisTests(unittest.TestCase):
         self.assertTrue(self.analyzer.run(snapshot_id=1)[0]['intent'])
         self.assertEqual(len(self.fake.calls), 4)
 
-    def test_opt_in_draft_and_policy_precedence(self):
+    def test_opt_in_draft_and_host_scope(self):
+        # 선택 범위에서 빠진 저장소, 범위 '안 함'은 모델을 부르지 않는다. '전체'는 선택과 무관하게 허용한다.
+        for scope, policy in [('selected', 'inherit'), ('none', 'allow')]:
+            with self.conn:
+                self.conn.execute('UPDATE github_hosts SET analysis_scope=?', (scope,))
+                self.conn.execute('UPDATE repositories SET analysis_policy=?', (policy,))
+            self.assertEqual(self.analyzer.run(), [])
         with self.conn:
-            self.conn.execute("UPDATE repositories SET analysis_policy='deny'")
-            self.conn.execute("INSERT INTO organization_policies VALUES('org','allow')")
-        self.assertEqual(self.analyzer.run(), [])
-        with self.conn:
-            self.conn.execute("UPDATE repositories SET analysis_policy='inherit'")
+            self.conn.execute("UPDATE github_hosts SET analysis_scope='all'")
             self.conn.execute('UPDATE pull_requests SET draft=1')
         self.assertEqual(self.analyzer.run(), [])
         self.assertEqual(self.fake.calls, [])

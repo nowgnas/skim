@@ -129,6 +129,7 @@ def run_case(config, case, corpus):
             coverage = dict(files=files, total_files=len(files), status='collected', policy='raw-v1')
             with conn:
                 conn.execute("INSERT INTO repositories(owner,name,analysis_policy) VALUES('release','eval','allow')")
+                conn.execute("UPDATE github_hosts SET analysis_scope='selected' WHERE host='github.com'")
                 conn.execute("INSERT INTO pull_requests(repo_id,number,title,body,base_sha,head_sha) VALUES(1,1,?,?,'base','head')", (title, body))
                 conn.execute('INSERT INTO snapshots(pr_id,base_sha,head_sha,diff_hash,input_hash,diff_path,coverage) VALUES(1,?,?,?,?,?,?)',
                              ('base', 'head', digest, raw_hash, str(path), json.dumps(coverage)))

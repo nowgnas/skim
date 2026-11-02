@@ -59,7 +59,7 @@ class WebTests(unittest.TestCase):
         self.csrf = self.auth.csrf(self.cookie)
 
     def request(self, path='/', method='GET', data=None, headers=None, authenticated=True):
-        body = urlencode(data or {}).encode()
+        body = urlencode(data or {}, doseq=True).encode()
         fields = [('Host', self.server.authority)]
         if authenticated:
             fields.append(('Cookie', self.cookie))
@@ -115,10 +115,11 @@ class WebTests(unittest.TestCase):
         self.assertIn('type="hidden" name="available_q" value="other"', tracked_form)
         self.assertIn('name="tracked_q" value="missing"', tracked_form)
         self.assertIn('검색 결과가 없습니다', body)
-        body = self.request('/settings?policy_q=missing&org_q=other')[2]
-        org_form = body.split('<form class="filters" method="get">', 1)[1].split('</form>', 1)[0]
-        self.assertIn('type="hidden" name="policy_q" value="missing"', org_form)
-        self.assertIn('name="org_q" value="other"', org_form)
+        body = self.request('/repos?tracked_q=demo&select_q=other')[2]
+        select_form = next(form.split('</form>', 1)[0] for form in body.split('<form class="filters" method="get">')[1:]
+                           if 'type="search" name="select_q"' in form.split('</form>', 1)[0])
+        self.assertIn('type="hidden" name="tracked_q" value="demo"', select_form)
+        self.assertIn('name="select_q" value="other"', select_form)
         body = self.request('/pr/1?unit_q=payment&order=original')[2]
         self.assertIn('unit_q=payment', body)
         self.assertIn('name="order" value="original"', body)

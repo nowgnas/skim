@@ -45,6 +45,7 @@ def seed(config):
             raise ValueError('비어 있는 SKIM_HOME을 사용하세요')
         with conn:
             repo = conn.execute("INSERT INTO repositories(owner,name,analysis_policy,tracked) VALUES('demo','checkout','allow',1)").lastrowid
+            conn.execute("UPDATE github_hosts SET analysis_scope='selected' WHERE host='github.com'")
             for number, title, paths in [
                 (1, '결제 인증 경계 보완', ['auth/session.py', 'service.py', 'README.md', '.env']),
                 (2, '일반 API 응답 정리', ['handler.py', 'tests/test_handler.py']),
@@ -68,11 +69,10 @@ def seed(config):
                 if number == 5:
                     conn.execute("UPDATE pull_requests SET head_sha='new-head' WHERE id=?", (pr,))
         with conn:
-            conn.execute("INSERT INTO github_hosts VALUES('github.corp.example')")
+            conn.execute("INSERT INTO github_hosts(host) VALUES('github.corp.example')")
             conn.execute("INSERT INTO repositories(host,owner,name,tracked) VALUES('github.corp.example','demo-org','intranet',1)")
             conn.execute("INSERT INTO repositories(owner,name,tracked) VALUES('demo-org','library',1)")
-            conn.execute("INSERT INTO repositories(owner,name,tracked,analysis_policy) VALUES('demo-org','private',1,'deny')")
-            conn.execute("INSERT INTO organization_policies VALUES('demo-org','allow')")
+            conn.execute("INSERT INTO repositories(owner,name,tracked) VALUES('demo-org','private',1)")
         print('가짜 PR 5개 생성 완료. 같은 SKIM_HOME으로 bin/skim web --offline을 실행하세요.')
 
 

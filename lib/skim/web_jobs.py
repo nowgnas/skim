@@ -100,10 +100,11 @@ def analysis_panel(conn, pr, csrf, offline):
         body += '<p>오프라인 모드에서는 모델 분석을 실행하지 않습니다.</p>'
     elif not analysis_allowed(conn, pr['repo_id']):
         # 대상 저장소만 검색된 상태로 열고, 저장 후 이 PR로 돌아올 수 있게 번호를 넘긴다.
-        target = urlencode([('tracked_q', pr.get('host', 'github.com') + '/' + pr['owner'] + '/' + pr['name']), ('from_pr', str(int(pr['id'])))])
-        body += ('<p>이 저장소는 LLM 분석이 허용되지 않았습니다. 저장소 분석 설정에서 허용한 뒤 돌아와 분석을 요청하세요. '
+        target = urlencode([('scope_host', pr.get('host', 'github.com')), ('select_q', pr['owner'] + '/' + pr['name']),
+                            ('from_pr', str(int(pr['id'])))])
+        body += ('<p>이 저장소는 LLM 분석이 허용되지 않았습니다. 호스트의 분석 허용 범위에서 이 저장소를 허용한 뒤 돌아와 분석을 요청하세요. '
                  '분석 버튼은 동의를 켜지 않습니다.</p>'
-                 f'<p><a class="btn primary" href="/repos?{esc(target)}#connected-repositories">이 저장소 분석 설정 열기</a></p>')
+                 f'<p><a class="btn primary" href="/repos?{esc(target)}#analysis-scope">분석 허용 범위 열기</a></p>')
     elif not snapshot or snapshot['head_sha'] != pr['head_sha'] or snapshot['base_sha'] != pr['base_sha']:
         body += '<p>최신 SHA의 스냅샷이 없습니다. <a href="/status">먼저 수집</a>한 뒤 분석을 요청하세요.</p>'
     else:

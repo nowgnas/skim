@@ -9,7 +9,7 @@
 ## 사용자 흐름
 
 1. `skim doctor`로 `gh`·분석 CLI의 PATH·인증·격리 기능을 확인하고 `skim repo add owner/repo`로 소유/담당 저장소를 등록한다. 조직 소유·관리 권한 저장소도 추적 대상에 포함하며, 소유·관리 저장소는 후보로 제시하고 사용자가 선택한다. 담당 여부는 자동 추측하지 않고 명시적 목록으로 관리한다.
-2. MVP는 Codex CLI를 사용한다. 코드의 모델 서비스 전송을 안내한 뒤 `skim analysis allow owner/repo` 또는 `--org owner`로 명시적으로 허용한다(저장소별 명시적 allow/deny가 조직 정책보다 우선). 등록·리뷰 요청만으로 전송을 허용하지 않으며 별도 API 키는 받지 않는다.
+2. MVP는 Codex CLI를 사용한다. 코드의 모델 서비스 전송을 안내한 뒤 호스트별 분석 범위(`skim analysis scope none|all|selected`, 선택 범위의 `skim analysis allow owner/repo`)로 명시적으로 허용한다(GitHub 앱 설치와 같은 안 함·모든 저장소·선택한 저장소만 모델, 기본 안 함). 등록·리뷰 요청만으로 전송을 허용하지 않으며 별도 API 키는 받지 않는다.
 3. MVP는 `skim web` 프로세스 안의 스케줄러가 기본 5분 간격으로 수집한다. 수동 새로고침도 같은 작업 큐를 사용한다. launchd/systemd daemon 등록은 이후로 미룬다.
 4. `skim web`이 `127.0.0.1`의 로컬 대시보드를 열고 최신 저장 결과를 즉시 표시한다. 수집·분석 중에도 기존 결과를 볼 수 있다.
 5. PR 의도와 위험 신호를 훑고 high 변경부터 읽는다. 규칙 기반 후보·미분석은 펼치고 나머지 mid/low는 접어 두되 전체 diff와 GitHub 원문으로 이동할 수 있다.
@@ -26,7 +26,7 @@
                                 └─ Codex CLI ── 모델 서비스
 ```
 
-- **수집:** 조직 소유·관리 권한 저장소를 포함한 명시적 추적 저장소의 열린 PR과 현재 사용자에게 온 개인·팀 리뷰 요청을 기존 `gh` 로그인 권한으로 읽기 전용 조회한다. 리뷰 요청은 등록 목록 밖의 저장소도 포함하며 `(repo, PR 번호)`로 중복을 제거한다. 모든 저장소는 org/repo 분석 opt-in 전에는 모델로 보내지 않는다.
+- **수집:** 조직 소유·관리 권한 저장소를 포함한 명시적 추적 저장소의 열린 PR과 현재 사용자에게 온 개인·팀 리뷰 요청을 기존 `gh` 로그인 권한으로 읽기 전용 조회한다. 리뷰 요청은 등록 목록 밖의 저장소도 포함하며 `(repo, PR 번호)`로 중복을 제거한다. 모든 저장소는 호스트 분석 범위(모든 저장소 또는 선택한 저장소)에 들어가기 전에는 모델로 보내지 않는다.
 - **스냅샷:** base/head SHA, PR 설명, 파일 목록과 diff를 수집한다. 수집 전후 SHA가 달라지면 결과를 버리고 재시도한다. 닫힘·머지·리뷰 요청 해제도 주기적으로 조정하며, merged 또는 closed 상태의 PR은 목록에서 제외한다.
 - **분석:** PR 전체 요약과 파일/hunk 분류를 생성한다. diff 크기에 따라 나누고 파일 경로·분석 단위 ID는 skim이 부여한다. 전송 전에 민감 정보 제외 규칙을 적용한다. 초과·누락 구간은 미분석으로 남기며 조용히 잘라내지 않는다.
 - **운영:** `skim web` 단일 실행 잠금, SQLite WAL, 트랜잭션으로 결과를 원자적으로 교체한다. 초기 동시 분석은 1개로 제한한다. 네트워크·CLI 실패는 지수 백오프하고 인증 실패는 사용자 조치를 표시한다.
@@ -40,7 +40,7 @@ SQLite를 기준 저장소로 사용한다. 설정·DB·캐시는 사용자 전�
 
 | 엔터티 | 주요 필드 |
 | --- | --- |
-| `repositories` | `id`, `owner/name`, `source`(owned/managed/responsible; 조직 소유 포함), `tracked`(명시적 추적 여부, 기본 0), `enabled`, `analysis_policy`(org/repo allow/deny), `last_synced_at` |
+| `repositories` | `id`, `owner/name`, `source`(owned/managed/responsible; 조직 소유 포함), `tracked`(명시적 추적 여부, 기본 0), `enabled`, `analysis_policy`(호스트 범위가 selected일 때 allow=선택됨), `github_hosts.analysis_scope`(none/all/selected, v7), `last_synced_at` |
 | `pull_requests` | `repo_id`, `number`, `url`, `title`, `author`, `state`, `draft`, `head_branch`, `base_sha`, `head_sha`, `updated_at`, `last_seen_at` |
 | `pr_sources` | `pr_id`, `source`(repository/review_request); 여러 유입 경로 보존 |
 | `snapshots` | `id`, `pr_id`, `base_sha`, `head_sha`, `diff_hash`, `input_hash`, `diff_path`, `coverage`, `collected_at` |
@@ -49,7 +49,7 @@ SQLite를 기준 저장소로 사용한다. 설정·DB·캐시는 사용자 전�
 | `analysis_items` | `analysis_id`, `change_id`, `importance`, `reason`, `risk_flags`; unique `(analysis_id, change_id)`, 파일 집계는 skim이 계산 |
 | `jobs` | `id`, `type`, `target_id`, `input_hash`, `status`, `attempts`, `next_run_at`, `last_error`; 대기/실행 중 `(type, target_id, input_hash)` unique |
 
-리뷰 요청만으로 발견한 저장소는 `tracked=0`으로 저장하고 추적 목록과 저장소 전체 PR 수집에서 제외한다. 명시적 등록은 `tracked=1`로 전환한다. 추적 해제는 `repository` 출처만 제거하고, 출처가 없어진 PR은 삭제하되 `review_request` 출처가 남은 PR과 스냅샷·분석은 보존한다. 저장소 레코드와 분석 정책은 유지하여 리뷰 요청과 조직 opt-in에 계속 사용한다. 삭제된 스냅샷의 diff 캐시 정리는 수집·캐시 구현 시 함께 처리한다.
+리뷰 요청만으로 발견한 저장소는 `tracked=0`으로 저장하고 추적 목록과 저장소 전체 PR 수집에서 제외한다. 명시적 등록은 `tracked=1`로 전환한다. 추적 해제는 `repository` 출처만 제거하고, 출처가 없어진 PR은 삭제하되 `review_request` 출처가 남은 PR과 스냅샷·분석은 보존한다. 저장소 레코드와 선택 상태는 유지하여 리뷰 요청과 호스트 분석 범위에 계속 사용한다. 삭제된 스냅샷의 diff 캐시 정리는 수집·캐시 구현 시 함께 처리한다.
 
 분석 캐시 키는 `repo + PR + base/head SHA + input_hash + provider/model + cli_version + prompt_version + schema_version`이다. `input_hash`는 전송할 제목·설명·정제 diff·테스트 목록·제외/분할 정책의 해시이며 스냅샷과 분석에 기록한다. 모델 식별자가 `unknown`이면 CLI 버전을 기록하고 영속 캐시는 재사용하지 않는다. `coverage`에는 전체/분석/제외/누락 단위 수와 사유를 보관한다. 기본 보존 기간은 30일이다.
 

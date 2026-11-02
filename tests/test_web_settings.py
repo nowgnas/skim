@@ -40,6 +40,11 @@ class SettingsTests(unittest.TestCase):
     def post(self, path, **data):
         return self.request(path, 'POST', {'csrf': self.csrf, **data})
 
+    def shown(self, query=''):
+        import re
+        body = self.request('/repos' + query)[2].split('id="analysis-scope"', 1)[1]
+        return re.findall(r'name="shown" value="(\d+)"', body)
+
     def repo_jobs(self, status=None):
         with closing(connect(self.config)) as conn:
             query = "SELECT * FROM jobs WHERE type='repos'" + (' AND status=?' if status else '') + ' ORDER BY id'
@@ -118,30 +123,20 @@ class SettingsTests(unittest.TestCase):
         self.assertIn('&lt;script&gt;', self.request('/repos')[2])
         self.assertNotIn('<script>bad', self.request('/repos')[2])
 
-    def test_policy_current_value_and_fixed_target(self):
-        from skim.web_settings import policy_form
-        class PolicyFields(HTMLParser):
-            def __init__(self):
-                super().__init__()
-                self.inputs, self.selected = [], []
-            def handle_starttag(self, tag, attrs):
-                attrs = dict(attrs)
-                if tag == 'input':
-                    self.inputs.append(attrs)
-                if tag == 'option' and 'selected' in attrs:
-                    self.selected.append(attrs['value'])
-        for scope in ('repo', 'org'):
-            for policy, expected in [('allow', 'allow'), ('deny', 'deny'), ('inherit', 'reset')]:
-                with self.subTest(scope=scope, policy=policy):
-                    body = policy_form(self.csrf, scope, 'demo/checkout' if scope == 'repo' else 'demo', policy=policy)
-                    parser = PolicyFields()
-                    parser.feed(body)
-                    self.assertEqual(parser.selected, [expected])
-                    target = next(i for i in parser.inputs if i.get('name') == 'target')
-                    self.assertEqual(target['type'], 'hidden')
-                    # 동의 체크를 읽은 뒤 저장하도록 체크가 버튼보다 앞에 온다.
-                    self.assertLess(body.index('class="consent"'), body.index('<button'))
-                    self.assertNotIn('btn primary', body)
+    def test_scope_form_reflects_current_scope_and_selection(self):
+        body = self.request('/repos')[2]
+        section = body.split('id="analysis-scope"', 1)[1].split('</section>', 1)[0]
+        self.assertIn('name="scope" value="selected" checked', section)
+        self.assertIn('name="repository" value="demo/checkout" checked', section)
+        self.assertIn('name="repository" value="demo-org/library">', section)
+        # 동의 체크를 읽은 뒤 저장하도록 체크가 버튼보다 앞에 온다.
+        self.assertLess(section.index('class="consent"'), section.index('범위 저장</button>'))
+        self.assertNotIn('btn primary', section)
+        self.assertNotIn('demo-org/intranet', section)  # 다른 호스트 저장소는 섞이지 않는다
+        other = self.request('/repos?scope_host=github.corp.example')[2].split('id="analysis-scope"', 1)[1].split('</section>', 1)[0]
+        self.assertIn('name="scope" value="none" checked', other)
+        self.assertIn('demo-org/intranet', other)
+        self.assertNotIn('demo/checkout', other)
 
     def test_dashboard_filter_get_without_csrf_and_single_primary(self):
         status, _, body = self.request('/?status=partial&review=1')
@@ -158,11 +153,12 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(segment.count('aria-current='), 1)
 
     def test_post_preserves_allowed_list_state(self):
-        body = self.request('/settings?policy_q=demo&policy_page=2&org_q=team')[2]
+        body = self.request('/repos?scope_host=github.com&select_q=demo&tracked_q=demo')[2]
         self.assertIn('name="return_query"', body)
-        status, headers, _ = self.post('/settings/analysis', scope='repo', target='demo/checkout', policy='deny', return_query='policy_q=demo&policy_page=2&org_q=team')
+        status, headers, _ = self.post('/repos/scope', host='github.com', scope='selected', repository='demo/checkout',
+                                       shown='1', return_query='scope_host=github.com&select_q=demo')
         self.assertEqual(status, 303)
-        self.assertEqual(headers['Location'], '/settings?policy_q=demo&policy_page=2&org_q=team')
+        self.assertEqual(headers['Location'], '/repos?scope_host=github.com&select_q=demo')
         status, headers, _ = self.post('/repos/remove', repository='demo/checkout', return_query='tracked_q=demo&tracked_page=2')
         self.assertEqual(status, 303)
         self.assertEqual(headers['Location'], '/repos?tracked_q=demo&tracked_page=2')
@@ -170,16 +166,15 @@ class SettingsTests(unittest.TestCase):
 
     def test_post_preserves_long_unicode_searches(self):
         from urllib.parse import urlencode
-        query = urlencode({'policy_q': '😀' * 200, 'org_q': '한' * 200, 'policy_page': '2'})
-        body = self.request('/settings?' + query)[2]
+        query = urlencode({'tracked_q': '😀' * 200, 'select_q': '한' * 200, 'tracked_page': '2'})
+        body = self.request('/repos?' + query)[2]
         self.assertIn('name="return_query"', body)
-        status, headers, _ = self.post('/settings/model', model='valid-model', return_query=query)
+        status, headers, _ = self.post('/repos/load', return_query=query)
         self.assertEqual(status, 303)
-        self.assertEqual(headers['Location'], '/settings?' + query)
-        self.assertEqual(self.post('/settings/model', model='valid-model', return_query='policy_page=invalid')[0], 400)
-        body = self.request('/settings?policy_page=invalid&policy_q=demo')[2]
-        self.assertIn('name="return_query" value="policy_q=demo"', body)
-        self.assertEqual(self.post('/settings/model', model='valid-model', return_query='policy_q=demo')[0], 303)
+        self.assertEqual(headers['Location'], '/repos?' + query)
+        self.assertEqual(self.post('/repos/load', return_query='tracked_page=invalid')[0], 400)
+        body = self.request('/repos?tracked_page=invalid&tracked_q=demo')[2]
+        self.assertIn('name="return_query" value="tracked_q=demo"', body)
 
     def test_add_validates_input_and_source_before_external_call(self):
         for name in ['a/..', 'a/a..b', 'a/.', 'a/b/c', '-a/b', 'a/b?x', 'a/b;sh', 'a/b c', 'a'*40+'/b', 'a/'+'b'*101]:
@@ -403,37 +398,54 @@ class SettingsTests(unittest.TestCase):
             self.assertIn('오프라인', self.request('/repos')[2])
         self.assertEqual(self.repo_jobs(), [])
 
-    def test_repo_org_policy_confirmation_precedence_reset_and_default(self):
+    def test_host_scope_confirmation_selection_and_default(self):
         with closing(connect(self.config)) as conn, conn:
             conn.execute("INSERT INTO repositories(owner,name,tracked) VALUES('neworg','repo',1)")
-        def allowed():
+            conn.execute("UPDATE github_hosts SET analysis_scope='none'")
+            conn.execute("UPDATE repositories SET analysis_policy='inherit'")
+        def allowed(name='neworg/repo'):
             with closing(connect(self.config)) as conn:
-                return analysis_allowed(conn, conn.execute("SELECT id FROM repositories WHERE owner='neworg'").fetchone()[0])
+                owner, repo = name.split('/')
+                return analysis_allowed(conn, conn.execute('SELECT id FROM repositories WHERE owner=? AND name=?', (owner, repo)).fetchone()[0])
+        shown = self.shown()
+        # 범위를 넓히거나 저장소를 새로 고를 때는 전송 확인이 필요하다.
+        self.assertEqual(self.post('/repos/scope', host='github.com', scope='all')[0], 400)
+        self.assertEqual(self.post('/repos/scope', host='github.com', scope='selected', repository='neworg/repo', shown=shown)[0], 400)
         self.assertFalse(allowed())
-        for scope, target in [('repo', 'neworg/repo'), ('org', 'neworg')]:
-            self.assertEqual(self.post('/settings/analysis', scope=scope, target=target, policy='allow')[0], 400)
-        self.assertEqual(self.post('/settings/analysis', scope='org', target='neworg', policy='allow', confirm='yes')[0], 303)
-        self.assertTrue(allowed())
-        self.post('/settings/analysis', scope='repo', target='neworg/repo', policy='deny')
+        self.assertEqual(self.post('/repos/scope', host='github.com', scope='all', confirm='yes')[0], 303)
+        self.assertTrue(allowed() and allowed('demo/checkout'))
+        # 전체 → 선택으로 좁히는 것은 확인 없이 가능하고, 체크한 것만 남는다.
+        self.assertEqual(self.post('/repos/scope', host='github.com', scope='selected', shown=shown)[0], 303)
         self.assertFalse(allowed())
-        self.post('/settings/analysis', scope='repo', target='neworg/repo', policy='reset')
+        # 선택 → 전체로 넓힐 때도 확인이 필요하다.
+        self.assertEqual(self.post('/repos/scope', host='github.com', scope='all')[0], 400)
+        self.assertEqual(self.post('/repos/scope', host='github.com', scope='selected', repository=['neworg/repo', 'demo/checkout'], shown=shown, confirm='yes')[0], 303)
+        self.assertTrue(allowed() and allowed('demo/checkout'))
+        # 이미 고른 저장소를 빼는 것은 확인 없이 가능하다.
+        self.assertEqual(self.post('/repos/scope', host='github.com', scope='selected', repository='neworg/repo', shown=shown)[0], 303)
         self.assertTrue(allowed())
-        self.post('/settings/analysis', scope='org', target='neworg', policy='reset')
+        self.assertFalse(allowed('demo/checkout'))
+        # 안 함으로 바꾸면 선택도 비워 나중에 확인 없이 되살아나지 않는다.
+        self.assertEqual(self.post('/repos/scope', host='github.com', scope='none')[0], 303)
+        self.assertEqual(self.post('/repos/scope', host='github.com', scope='selected', shown=shown)[0], 303)
         self.assertFalse(allowed())
-        self.post('/settings/analysis', scope='repo', target='neworg/repo', policy='allow', confirm='yes')
-        self.post('/settings/analysis', scope='org', target='neworg', policy='deny')
-        self.assertTrue(allowed())
-        body = self.request('/settings')[2]
-        for text in ['PR 코드, diff', '모델 서비스로 전송', 'Codex(모델 서비스)', '저장소의 명시적']:
+        body = self.request('/repos')[2]
+        for text in ['PR 코드, diff', '모델 서비스로 전송', 'Codex(모델 서비스)', '모든 저장소', '선택한 저장소만']:
             self.assertIn(text, body)
-        self.assertIn('실제 분석: 허용', self.request('/repos')[2])
+        self.assertNotIn('조직 정책', self.request('/settings')[2])
 
-    def test_invalid_policy_targets_and_extra_fields(self):
-        for data in [dict(scope='org', target='../evil', policy='deny'), dict(scope='repo', target='no/repo', policy='deny'),
-                     dict(scope='invalid', target='org', policy='deny'), dict(scope='org', target='org', policy='invalid'),
-                     dict(scope='org', target='org', policy='allow', confirm='no'),
-                     dict(scope='org', target='org', policy='deny', unexpected='x')]:
-            self.assertEqual(self.post('/settings/analysis', **data)[0], 400)
+    def test_invalid_scope_input_and_extra_fields(self):
+        for data in [dict(host='github.com', scope='invalid'), dict(host='github.com'),
+                     dict(host='unknown.example', scope='none'), dict(host='github.com', scope='none', unexpected='x'),
+                     dict(host='github.com', scope='selected', repository='../evil', shown='1', confirm='yes'),
+                     dict(host='github.com', scope='selected', repository='demo/unregistered', shown='1', confirm='yes'),
+                     dict(host='github.com', scope='selected', repository='demo-org/intranet', shown='2', confirm='yes'),
+                     dict(host='github.com', scope='selected', shown='x'),
+                     dict(host=['github.com', 'github.com'], scope='none')]:
+            with self.subTest(data=data):
+                self.assertEqual(self.post('/repos/scope', **data)[0], 400)
+        for path in ('/settings/analysis', '/repos/policy'):
+            self.assertEqual(self.post(path, scope='org', target='demo', policy='deny')[0], 405)
 
     def test_model_dropdown_validates_cache_and_preserves_legacy(self):
         import tempfile
@@ -530,11 +542,28 @@ class SettingsTests(unittest.TestCase):
         with closing(connect(self.config)) as conn:
             self.assertEqual(conn.execute("SELECT model FROM jobs WHERE type='analyze'").fetchone()[0], 'new')
 
-    def test_repo_policy_rejects_missing_confirmation_org_and_unknown_repository(self):
-        for data in [dict(scope='repo', target='demo/checkout', policy='allow'),
-                     dict(scope='org', target='demo', policy='deny'),
-                     dict(scope='repo', target='demo/unregistered', policy='deny')]:
-            self.assertEqual(self.post('/repos/policy', **data)[0], 400)
+    def test_save_touches_only_rows_shown_and_revoke_always_succeeds(self):
+        with closing(connect(self.config)) as conn, conn:
+            for index in range(25):
+                conn.execute("INSERT INTO repositories(owner,name,tracked,analysis_policy) VALUES('page',?,1,'allow')", (f'r{index:02d}',))
+        page = self.shown('?select_q=page')
+        self.assertEqual(len(page), 20)
+        names = [f'page/r{i:02d}' for i in range(25)]
+        # 렌더 이후 다른 탭·CLI가 추적을 해제해 정렬이 바뀐다.
+        with closing(connect(self.config)) as conn, conn:
+            conn.execute("UPDATE repositories SET tracked=0 WHERE name IN ('r00','r05')")
+        # 화면에서 r05만 해제해 저장해도, 보지 못한 r20~r24의 선택은 그대로다.
+        status = self.post('/repos/scope', host='github.com', scope='selected', shown=page,
+                           repository=[n for n in names[:20] if n != 'page/r05'])[0]
+        self.assertEqual(status, 303)
+        with closing(connect(self.config)) as conn:
+            policy = dict(conn.execute("SELECT name, analysis_policy FROM repositories WHERE owner='page'").fetchall())
+        self.assertEqual(policy['r05'], 'inherit')
+        self.assertTrue(all(policy[f'r{i}'] == 'allow' for i in range(20, 25)))
+        # 숨겨진 체크박스에 목록 밖 값이 있어도 '안 함'으로의 철회는 거부되지 않는다.
+        self.assertEqual(self.post('/repos/scope', host='github.com', scope='none', repository='page/vanished', shown='999')[0], 303)
+        with closing(connect(self.config)) as conn:
+            self.assertEqual(conn.execute("SELECT count(*) FROM repositories WHERE analysis_policy='allow'").fetchone()[0], 0)
 
     def test_home_team_rejects_invalid_name_and_concurrent_lookup(self):
         self.assertEqual(self.post('/home/team', host='github.com', team='demo/../bad')[0], 400)
