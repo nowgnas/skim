@@ -26,3 +26,6 @@ input::placeholder{color:var(--muted);opacity:1}
 
 @media(min-width:900px){.issue-row .meta:last-child{grid-column:1 / -1;grid-row:4;justify-content:flex-start}}
 html,body{overflow-x:clip}
+
+.diff .diff-add{background:#294d3b;color:#d5f5df}.diff .diff-delete{background:#593439;color:#ffe0e1}.diff .diff-hunk{background:#303f5a;color:#d8eaff}.diff .diff-header{color:var(--muted)}
+@media(prefers-color-scheme:light){.diff .diff-add{background:#ddf4e3;color:#183e28}.diff .diff-delete{background:#ffe1e2;color:#542329}.diff .diff-hunk{background:#e0edff;color:#203c60}}

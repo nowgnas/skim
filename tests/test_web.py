@@ -17,7 +17,7 @@ sys.path.insert(0, str(ROOT / 'lib'))
 sys.path.insert(0, str(ROOT / 'scripts'))
 from skim.config import Config
 from skim.db import connect
-from skim.web import Auth, Handler, CSP, Server, badges, load_prs, worker, read_diff, serve
+from skim.web import Auth, Handler, CSP, Server, badges, load_prs, worker, read_diff, render_diff, serve
 from demo_seed import seed
 
 
@@ -304,6 +304,18 @@ class WebTests(unittest.TestCase):
         self.assertNotIn('모델 판단:', badges(base))
         self.assertIn('모델 판단: 미분석', badges(dict(base, unanalysed=True, items={})))
         self.assertIn('모델 판단: 일부 미분석', badges(dict(base, unanalysed=True)))
+
+    def test_diff_colors_preserve_and_escape_content(self):
+        diff = '--- a/file\n+++ b/file\n@@ -1 +1 @@\n-old\n+<script>\n+++ content\n context\n'
+        rendered = render_diff(diff)
+        self.assertIn('<span class="diff-header">--- a/file\n</span>', rendered)
+        self.assertIn('<span class="diff-hunk">@@ -1 +1 @@\n</span>', rendered)
+        self.assertIn('<span class="diff-delete">-old\n</span>', rendered)
+        self.assertIn('<span class="diff-add">+&lt;script&gt;\n</span>', rendered)
+        self.assertIn('<span class="diff-add">+++ content\n</span>', rendered)
+        self.assertIn('<span class="diff-context"> context\n</span>', rendered)
+        self.assertIn('class="diff-add"', self.request('/pr/1')[2])
+        self.assertIn('class="diff-hunk"', self.request('/pr/1?diff=1')[2])
 
     def test_untrusted_content_and_cache_paths(self):
         with closing(connect(self.config)) as conn, conn:

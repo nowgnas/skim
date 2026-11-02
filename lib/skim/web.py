@@ -252,6 +252,27 @@ def github(pr):
     return None
 
 
+def render_diff(diff):
+    lines = []
+    in_hunk = False
+    for line in diff.splitlines(keepends=True):
+        if line.startswith('diff --git '):
+            in_hunk = False
+        if line.startswith('@@'):
+            kind = 'hunk'
+            in_hunk = True
+        elif not in_hunk and line.startswith(('+++ ', '--- ')):
+            kind = 'header'
+        elif line.startswith('+'):
+            kind = 'add'
+        elif line.startswith('-'):
+            kind = 'delete'
+        else:
+            kind = 'context'
+        lines.append(f'<span class="diff-{kind}">{esc(line)}</span>')
+    return '<pre class="diff">' + ''.join(lines) + '</pre>'
+
+
 def detail(pr, query, config, offline=False):
     a, s = pr['analysis'], pr['snapshot']
     content = f'<p><a href="/">← PR 목록</a></p><h1>{esc(pr["title"])}</h1>'
@@ -310,12 +331,12 @@ def detail(pr, query, config, offline=False):
         if link:
             anchor = hashlib.sha256(unit['file_path'].encode()).hexdigest()
             content += f'<a href="{esc(link)}/files#diff-{anchor}" rel="noreferrer">GitHub 변경</a>'
-        content += f'<pre>{esc(unit.get("diff", ""))}</pre></details>'
+        content += render_diff(unit.get("diff", "")) + '</details>'
     if not has_units:
         content += '<article>미분석: 수집된 변경 단위가 없습니다.</article>'
     content += navigation
     if query.get('diff') == ['1']:
-        content += '<h2>전체 원본 diff</h2><pre>' + esc(read_diff(config, s) or 'diff 캐시가 없습니다.') + '</pre>'
+        content += '<h2>전체 원본 diff</h2>' + render_diff(read_diff(config, s) or 'diff 캐시가 없습니다.')
     return content
 
 
