@@ -91,6 +91,7 @@ class BundleTests(unittest.TestCase):
         with patch.object(bundle.sys, 'platform', 'linux'), redirect_stderr(io.StringIO()):
             self.assertEqual(self.prepare(), 1)
             self.assertEqual(bundle.install_app(self.config), 1)
+            self.assertEqual(bundle.uninstall_app(self.config), 1)
         self.assertEqual(self.commands, [])
 
     def test_existing_marker_environment_permissions_and_types(self):
@@ -123,3 +124,26 @@ class BundleTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             bundle.trusted(agent)
 
+    def test_uninstall_preserves_data_and_refuses_unmanaged_app(self):
+        # 실제 소스 루트에 속한 가짜 번들을 사용자 임시 홈으로 설치한다.
+        self.root = Path(bundle.__file__).resolve().parents[2]
+        self.prepare()
+        app = self.home / 'Applications' / bundle.APP_NAME
+        agent = self.home / 'Library/LaunchAgents/com.skim.web.plist'
+        app.parent.mkdir()
+        agent.parent.mkdir(parents=True)
+        (self.output / bundle.APP_NAME).rename(app)
+        (self.output / agent.name).rename(agent)
+        data = self.config.data_dir / 'demo.txt'
+        data.write_text('demo')
+        with redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(bundle.uninstall_app(self.config), 0)
+        self.assertIn('진행 중인 작업', err.getvalue())
+        self.assertFalse(app.exists())
+        self.assertFalse(agent.exists())
+        self.assertEqual(data.read_text(), 'demo')
+        self.assertTrue(any(c[1] == 'bootout' for c in self.commands if len(c) > 1))
+        app.mkdir()
+        with redirect_stderr(io.StringIO()):
+            self.assertEqual(bundle.uninstall_app(self.config), 1)
+        self.assertTrue(app.exists())

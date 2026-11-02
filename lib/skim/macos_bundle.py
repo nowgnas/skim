@@ -64,6 +64,28 @@ def validate_existing(app, agent, root, config, check_environment=True):
             raise ValueError('기존 LaunchAgent와 현재 환경이 다릅니다. 같은 환경에서 실행하세요.')
 
 
+def uninstall_app(config):
+    if sys.platform != 'darwin':
+        print('skim app은 macOS에서 사용할 수 있습니다.', file=sys.stderr)
+        return 1
+    app = Path.home() / 'Applications' / APP_NAME
+    agent = Path.home() / 'Library/LaunchAgents/com.skim.web.plist'
+    try:
+        validate_existing(app, agent, Path(__file__).resolve().parents[2], config, check_environment=False)
+        print('경고: 자동 시작 서버와 진행 중인 작업이 중단됩니다. 데이터는 보존합니다.', file=sys.stderr)
+        label = f'gui/{os.getuid()}/com.skim.web'
+        result = subprocess.run(['/bin/launchctl', 'bootout', label], capture_output=True)
+        if result.returncode and subprocess.run(['/bin/launchctl', 'print', label], capture_output=True).returncode == 0:
+            raise ValueError('서버를 중단하지 못했습니다. 앱과 설정은 보존합니다.')
+        agent.unlink(missing_ok=True)
+        if app.exists():
+            shutil.rmtree(app)
+        return 0
+    except (OSError, ValueError, plistlib.InvalidFileException) as exc:
+        print(f'skim app: {exc}', file=sys.stderr)
+        return 1
+
+
 def main(argv=None, quiet=False):
     parser = argparse.ArgumentParser(description='skim macOS 실행 파일 준비')
     parser.add_argument('--root', type=Path, required=True)
