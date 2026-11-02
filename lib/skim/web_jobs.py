@@ -139,7 +139,7 @@ def status_page(conn, csrf, offline):
         body += '<p>오프라인 모드에서는 초기화와 격리 검증을 실행하지 않습니다.</p>'
     else:
         body += '<div class="toolbar">' + form('/jobs/doctor', csrf, '<input type="hidden" name="action" value="init"><button>분석 준비 초기화</button>')
-        body += form('/jobs/doctor', csrf, '<input type="hidden" name="action" value="probe"><button>격리 검증 실행</button>') + '</div>'
+        body += form('/jobs/doctor', csrf, '<input type="hidden" name="action" value="probe"><label><input type="checkbox" name="confirm" value="yes" required>실제 유료 모델 호출에 동의합니다</label><button>격리 검증 실행</button>') + '</div>'
         active = jobs.active(conn, 'doctor')
         if active:
             body += '<p>상태 점검 또는 분석 준비 작업이 진행 중입니다. 완료 후 다른 작업을 요청하세요.</p>'
@@ -163,8 +163,10 @@ def mutate(server, conn, path, data):
         jobs.request_collect(conn)
         return '/status'
     if path == '/jobs/doctor':
-        d = fields(data, (), ('action',))
+        d = fields(data, (), ('action', 'confirm'))
         action = d.get('action', 'check')
+        if action == 'probe' and d.get('confirm') != 'yes':
+            raise Rejected('실제 유료 모델 호출 확인이 필요합니다', 400)
         labels = {'check': '로컬 환경', 'init': '분석 준비 초기화', 'probe': '격리 검증'}
         if action not in labels:
             raise Rejected('지원하지 않는 상태 점검 작업입니다', 400)

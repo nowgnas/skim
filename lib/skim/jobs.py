@@ -219,7 +219,7 @@ class Runner:
             lines = []
             code = (self.doctor or doctor.run)(self.config, probe=False, out=lines.append)
             message = ('상태 점검에 확인할 항목이 있습니다.' if code else '상태 점검 정상.')
-            return 'completed', '분석 준비 초기화 완료. ' + message + ' 이어서 격리 검증을 실행하세요.' + ('\n' + '\n'.join(lines) if lines else ''), None
+            return 'failed' if code else 'completed', '분석 준비 초기화 완료. ' + message + ' 이어서 격리 검증을 실행하세요.' + ('\n' + '\n'.join(lines) if lines else ''), None
         lines = []
         if action == 'probe':
             progress(self.state, job['id'], '격리 검증 중')

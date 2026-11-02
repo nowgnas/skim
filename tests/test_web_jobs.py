@@ -66,22 +66,22 @@ class JobTests(unittest.TestCase):
         self.assertIn('격리 검증 실행', body)
         self.assertIn('실제 모델', body)
         self.assertEqual(self.post('/jobs/doctor', action='init')[0], 303)
-        self.assertEqual(self.post('/jobs/doctor', action='probe')[0], 409)
+        self.assertEqual(self.post('/jobs/doctor', action='probe', confirm='yes')[0], 409)
         self.assertEqual(len(self.rows('doctor')), 1)
         with patch('skim.analyze.codex.CodexAdapter.init_home') as initialize:
             check = Mock(return_value=1)
             self.runner(doctor=check).step()
             initialize.assert_called_once_with(reset=False)
             self.assertFalse(check.call_args.kwargs['probe'])
-        self.assertEqual(self.rows('doctor')[-1]['status'], 'completed')
-        self.assertEqual(self.post('/jobs/doctor', action='probe')[0], 303)
+        self.assertEqual(self.rows('doctor')[-1]['status'], 'failed')
+        self.assertEqual(self.post('/jobs/doctor', action='probe', confirm='yes')[0], 303)
         doctor = Mock(return_value=0)
         self.runner(doctor=doctor).step()
         self.assertTrue(doctor.call_args.kwargs['probe'])
         self.assertEqual(self.rows('doctor')[-1]['status'], 'completed')
         self.assertEqual(self.post('/jobs/doctor', action='reset')[0], 400)
         self.server.offline = True
-        self.assertEqual(self.post('/jobs/doctor', action='probe')[0], 409)
+        self.assertEqual(self.post('/jobs/doctor', action='probe', confirm='yes')[0], 409)
 
     def test_setup_preserves_existing_files_and_probe_failure_is_visible(self):
         source = Path(self.temp.name) / 'codex-source'
@@ -98,7 +98,7 @@ class JobTests(unittest.TestCase):
             self.runner().step()
             self.assertEqual(self.rows('doctor')[-1]['status'], 'failed')
             self.assertEqual((home / 'keep.txt').read_text(), 'preserve')
-        self.post('/jobs/doctor', action='probe')
+        self.post('/jobs/doctor', action='probe', confirm='yes')
         doctor = Mock(return_value=1)
         self.runner(doctor=doctor).step()
         self.assertTrue(doctor.call_args.kwargs['probe'])
@@ -146,7 +146,8 @@ class JobTests(unittest.TestCase):
             conn.execute("UPDATE repositories SET analysis_policy='inherit' WHERE owner='demo'")
         body = self.request('/pr/1')[2]
         self.assertNotIn('action="/jobs/analyze"', body)
-        self.assertIn('분석 허용', body)
+        self.assertIn('href="/repos#connected-repositories"', body)
+        self.assertIn('저장소 분석 설정', body)
         self.assertNotIn('action="/jobs/analyze"', self.request('/pr/5')[2])
 
     def test_runner_maps_analysis_outcomes_and_rechecks_policy(self):
