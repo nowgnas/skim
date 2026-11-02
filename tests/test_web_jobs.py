@@ -1,6 +1,8 @@
 """웹 백그라운드 작업은 가짜 HTTP·수집기·분석기·doctor로만 검증한다. 실제 gh·모델은 호출하지 않는다."""
 from contextlib import closing
 import json
+import os
+from pathlib import Path
 import sqlite3
 from types import SimpleNamespace
 import unittest
@@ -57,6 +59,50 @@ class JobTests(unittest.TestCase):
             self.assertEqual(self.request(path, 'POST', {'csrf': self.csrf}, [('!Origin', 'http://127.0.0.1:9999')])[0], 403)
             self.assertEqual(self.request(path, 'POST', {'csrf': self.csrf}, authenticated=False)[0], 403)
         self.assertEqual(self.rows(), [])
+
+    def test_web_codex_setup_and_probe_are_explicit_and_serialized(self):
+        body = self.request('/status')[2]
+        self.assertIn('분석 준비 초기화', body)
+        self.assertIn('격리 검증 실행', body)
+        self.assertIn('실제 모델', body)
+        self.assertEqual(self.post('/jobs/doctor', action='init')[0], 303)
+        self.assertEqual(self.post('/jobs/doctor', action='probe')[0], 409)
+        self.assertEqual(len(self.rows('doctor')), 1)
+        with patch('skim.analyze.codex.CodexAdapter.init_home') as initialize:
+            check = Mock(return_value=1)
+            self.runner(doctor=check).step()
+            initialize.assert_called_once_with(reset=False)
+            self.assertFalse(check.call_args.kwargs['probe'])
+        self.assertEqual(self.rows('doctor')[-1]['status'], 'completed')
+        self.assertEqual(self.post('/jobs/doctor', action='probe')[0], 303)
+        doctor = Mock(return_value=0)
+        self.runner(doctor=doctor).step()
+        self.assertTrue(doctor.call_args.kwargs['probe'])
+        self.assertEqual(self.rows('doctor')[-1]['status'], 'completed')
+        self.assertEqual(self.post('/jobs/doctor', action='reset')[0], 400)
+        self.server.offline = True
+        self.assertEqual(self.post('/jobs/doctor', action='probe')[0], 409)
+
+    def test_setup_preserves_existing_files_and_probe_failure_is_visible(self):
+        source = Path(self.temp.name) / 'codex-source'
+        source.mkdir()
+        (source / 'auth.json').write_text('fake authentication fixture')
+        with patch.dict(os.environ, CODEX_HOME=str(source)):
+            self.post('/jobs/doctor', action='init')
+            self.runner(doctor=Mock(return_value=0)).step()
+            home = self.config.data_dir / 'codex-home'
+            self.assertTrue((home / 'auth.json').is_symlink())
+            self.assertEqual(self.rows('doctor')[-1]['status'], 'completed')
+            (home / 'keep.txt').write_text('preserve')
+            self.post('/jobs/doctor', action='init')
+            self.runner().step()
+            self.assertEqual(self.rows('doctor')[-1]['status'], 'failed')
+            self.assertEqual((home / 'keep.txt').read_text(), 'preserve')
+        self.post('/jobs/doctor', action='probe')
+        doctor = Mock(return_value=1)
+        self.runner(doctor=doctor).step()
+        self.assertTrue(doctor.call_args.kwargs['probe'])
+        self.assertEqual(self.rows('doctor')[-1]['status'], 'failed')
 
     def test_analyze_validates_target_before_queueing(self):
         for repository, number in [('demo/..', '1'), ('a/b;sh', '1'), ('-a/b', '1'), ('demo/checkout', '0'),
@@ -228,7 +274,8 @@ class JobTests(unittest.TestCase):
         success = script.split('.then(job => {', 1)[1].split('.catch', 1)[0]
         self.assertIn('retryDelay = 2000', success)
         self.assertIn('if (job.active) setTimeout(tick, 2000)', success)
-        self.assertIn('else location.reload()', success)
+        self.assertNotIn('location.reload()', success)
+        self.assertIn('resultText.textContent = text', success)
         self.assertNotIn('innerHTML', script)
 
     def test_runner_rejects_stale_snapshot_and_hides_raw_errors(self):

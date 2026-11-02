@@ -1,5 +1,6 @@
 """웹 작업 등록, 상태 화면. HTTP에서는 검증과 등록만 하고 실행은 워커가 맡는다."""
 import re
+import json
 
 from . import jobs
 from .db import analysis_allowed
@@ -9,9 +10,9 @@ from .hosts import registered
 JOB_PATHS = {'/jobs/collect', '/jobs/analyze', '/jobs/doctor'}
 RECOVERY = [
     ('gh', 'gh auth login --hostname <host>로 다시 인증하고, 조직 저장소는 gh 자격 증명의 SSO 승인을 확인하세요.'),
-    ('codex-home', 'skim codex-home init으로 분석 전용 인증 링크를 만드세요. 본인 소유 경로 복구는 --reset을 사용합니다.'),
+    ('codex-home', '분석 준비 초기화를 실행하세요. 터미널에서는 skim codex-home init을 사용합니다. 기존 파일이나 소유권 문제는 경로를 확인하세요.'),
     ('version, flags', 'Codex 안정 버전 0.165.0 이상을 설치하고 PATH를 확인하세요.'),
-    ('probe, 모델', '모델 변경 후나 probe 만료 시 터미널에서 skim doctor --probe를 실행하세요. 실제 모델을 호출하므로 웹에서는 자동 실행하지 않습니다.'),
+    ('probe, 모델', '모델 변경 후나 probe 만료 시 격리 검증을 실행하세요. 터미널에서는 skim doctor --probe를 사용합니다. 실제 모델 호출은 명시적 요청 때만 실행합니다.'),
     ('로컬 권한', 'SKIM_HOME 아래 디렉터리 0700, 파일 0600, 본인 소유, 심볼릭 링크 없음을 확인하세요.'),
 ]
 
@@ -62,10 +63,10 @@ def job_box(row, poll=True):
                  + '<span class="job-progress-label" data-job-progress-label>' + ('작업 중' if running else '대기 중') + '</span>'
                  + '<progress aria-label="작업 진행"' + (f' max="{d["total"]}" value="{d["processed"]}"' if known else '')
                  + ('' if running else ' hidden') + '></progress></div>')
-    if d['error']:
-        body += f'<p class="error">{esc(d["error"])}</p>'
-    if d['result']:
-        body += f'<pre>{esc(d["result"])}</pre>'
+    result = '\n'.join(str(value) for value in (d['error'], d['result']) if value)
+    body += ('<div class="job-result-slot"><details data-job-result' + ('' if result else ' hidden')
+             + '><summary>결과 상세</summary><pre data-job-result-text>' + esc(result) + '</pre></details>'
+             + '<a class="btn secondary sm" data-job-refresh href="" hidden>화면 새로고침</a></div>')
     return body + '</div>'
 
 
@@ -91,12 +92,12 @@ def collect_panel(conn, csrf, offline, compact=False):
 def analysis_panel(conn, pr, csrf, offline):
     from .web import esc
     from .web_settings import form, WARNING
-    body = '<article><h2>PR 분석 요청</h2>'
+    body = '<article class="detail-action"><h2>PR 분석 요청</h2>'
     snapshot = pr['snapshot']
     if offline:
         body += '<p>오프라인 모드에서는 모델 분석을 실행하지 않습니다.</p>'
     elif not analysis_allowed(conn, pr['repo_id']):
-        body += ('<p>이 저장소는 LLM 분석이 허용되지 않았습니다. <a href="/settings">분석 허용</a>에서 켠 뒤 요청하세요. '
+        body += ('<p>이 저장소는 LLM 분석이 허용되지 않았습니다. <a href="/repos#connected-repositories">저장소 분석 설정</a>에서 켠 뒤 요청하세요. '
                  '분석 버튼은 동의를 켜지 않습니다.</p>')
     elif not snapshot or snapshot['head_sha'] != pr['head_sha'] or snapshot['base_sha'] != pr['base_sha']:
         body += '<p>최신 SHA의 스냅샷이 없습니다. <a href="/status">먼저 수집</a>한 뒤 분석을 요청하세요.</p>'
@@ -131,6 +132,18 @@ def status_page(conn, csrf, offline):
         body += form('/jobs/doctor', csrf, '<button>상태 점검 실행</button>', variant='primary')
     body += job_box(jobs.latest(conn, 'doctor')) + '</article>'
     body += collect_panel(conn, csrf, offline) + '</div>'
+    body += '<section class="status-section"><h2>Codex 분석 준비</h2>'
+    body += '<p>초기화는 로컬 인증 링크를 준비합니다. 기존 파일은 삭제하거나 덮어쓰지 않습니다.</p>'
+    body += '<p>격리 검증은 저장소 코드를 보내지 않으며 실제 모델 서비스를 호출합니다. 사용량 또는 비용이 발생할 수 있습니다.</p>'
+    if offline:
+        body += '<p>오프라인 모드에서는 초기화와 격리 검증을 실행하지 않습니다.</p>'
+    else:
+        body += '<div class="toolbar">' + form('/jobs/doctor', csrf, '<input type="hidden" name="action" value="init"><button>분석 준비 초기화</button>')
+        body += form('/jobs/doctor', csrf, '<input type="hidden" name="action" value="probe"><button>격리 검증 실행</button>') + '</div>'
+        active = jobs.active(conn, 'doctor')
+        if active:
+            body += '<p>상태 점검 또는 분석 준비 작업이 진행 중입니다. 완료 후 다른 작업을 요청하세요.</p>'
+    body += '</section>'
     body += '<section class="status-section"><h2>활성 작업</h2>'
     active_rows = conn.execute("SELECT * FROM jobs WHERE status IN ('pending','running') ORDER BY id").fetchall()
     body += '<div class="list">' + (''.join('<article class="job-row">' + job_box(row) + '</article>' for row in active_rows) or '<p class="muted">활성 작업이 없습니다.</p>') + '</div></section>'
@@ -150,8 +163,16 @@ def mutate(server, conn, path, data):
         jobs.request_collect(conn)
         return '/status'
     if path == '/jobs/doctor':
-        fields(data, ())
-        jobs.enqueue(conn, 'doctor', 0, '로컬 환경')
+        d = fields(data, (), ('action',))
+        action = d.get('action', 'check')
+        labels = {'check': '로컬 환경', 'init': '분석 준비 초기화', 'probe': '격리 검증'}
+        if action not in labels:
+            raise Rejected('지원하지 않는 상태 점검 작업입니다', 400)
+        row, created = jobs.enqueue(conn, 'doctor', 0, labels[action], params={'action': action})
+        if not created:
+            existing = json.loads(row['params'] or '{}').get('action', 'check')
+            if existing != action:
+                raise Rejected('다른 상태 점검 또는 분석 준비 작업이 진행 중입니다. 완료 후 다시 요청하세요.', 409)
         return '/status'
     d = fields(data, ('repository', 'number'), ('host',))
     host = registered(conn, d.get('host', 'github.com'))

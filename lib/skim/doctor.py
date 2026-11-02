@@ -72,6 +72,8 @@ def run(config, runner=None, which=None, adapter=None, probe=False, out=print):
                 'flags': 'exec --help의 필수 격리 플래그와 features list 형식을 확인하세요.',
                 'probe': 'skim doctor --probe로 격리를 재검증하세요. 도구 실행·지침·파일 생성 시 차단됩니다.',
             }
+            if label == 'version' and isinstance(getattr(adapter, 'prerelease_version', None), str):
+                details[label] = '감지된 버전 ' + adapter.prerelease_version + '은 사전 공개 버전입니다. npm install --prefix "$HOME/.local/share/skim-tools" @openai/codex@latest로 안정 버전을 설치하세요. 서버를 종료한 뒤 skim web으로 다시 시작하세요.'
             report(False, label, 'Codex 분석 차단: ' + details[label])
     if model_ok:
         if adapter.model != 'unknown':

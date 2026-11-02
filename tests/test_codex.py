@@ -124,6 +124,24 @@ class CodexTests(unittest.TestCase):
                 self.adapter.verify()
         self.assertFalse(any('--output-last-message' in c for c, _ in self.calls))
 
+    def test_prerelease_version_gives_safe_actionable_diagnostic(self):
+        self.version = 'codex-cli 0.166.0-alpha.5.1'
+        output = []
+        self.assertEqual(run(Config(self.root / 'config', self.adapter.data_dir), self.runner,
+                             lambda _: '/fake', self.adapter, out=output.append), 1)
+        text = '\n'.join(output)
+        self.assertIn('0.166.0-alpha.5.1', text)
+        self.assertIn('안정 버전', text)
+        self.assertIn('npm install --prefix', text)
+        self.assertIn('skim web', text)
+        self.assertIn('선행 검사 실패', text)
+        self.assertFalse(any('--output-last-message' in command for command, _ in self.calls))
+        self.version = 'codex-cli 0.166.0-alpha.5.1 SECRET'
+        output = []
+        run(Config(self.root / 'config', self.adapter.data_dir), self.runner,
+            lambda _: '/fake', self.adapter, out=output.append)
+        self.assertNotIn('SECRET', '\n'.join(output))
+
     def test_probe_required_cached_expired_and_version_keyed(self):
         with self.assertRaises(IsolationError):
             self.adapter.generate('repo-code', {})
@@ -519,4 +537,3 @@ class ProviderSchemaTests(unittest.TestCase):
         self.assertEqual(provider_schema(named), named)
         listed = {'anyOf': [{'type': 'array', 'uniqueItems': True}]}
         self.assertEqual(provider_schema(listed), {'anyOf': [{'type': 'array'}]})
-

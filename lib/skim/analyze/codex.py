@@ -60,6 +60,7 @@ class CodexAdapter:
             raise ValueError('Codex 모델 식별자 형식을 확인하세요.')
         self.model = model if model is not None else 'unknown'
         self._detected_model = None
+        self.prerelease_version = None
         self.disabled = []
         self.unknown_enabled = []
 
@@ -130,7 +131,11 @@ class CodexAdapter:
         return {'PATH': os.environ.get('PATH', ''), 'HOME': home, 'CODEX_HOME': str(codex_home)}
 
     def check_version(self):
+        self.prerelease_version = None
         output = self._inspect(['--version']).strip()
+        prerelease = re.fullmatch(r'codex(?:-cli)? (\d{1,6}\.\d{1,6}\.\d{1,6}-(?:alpha|beta|rc)(?:[.-][0-9A-Za-z]{1,20}){0,5})', output)
+        if prerelease:
+            self.prerelease_version = prerelease.group(1)
         match = re.fullmatch(r'codex(?:-cli)? (\d+)\.(\d+)\.(\d+)', output)
         if not match or tuple(map(int, match.groups())) < (0, 165, 0):
             raise IsolationError('Codex 분석 차단: 검증된 최소 버전 0.165.0 이상이 필요합니다.')

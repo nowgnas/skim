@@ -44,6 +44,8 @@ def parser():
         group.add_argument('repository', type=repository, nargs='?')
         group.add_argument('--org')
     commands.add_parser('collect', help='gh 로그인으로 PR 읽기 전용 수집')
+    commands.add_parser('open', help='실행 중인 웹 서버를 브라우저에서 열기')
+    commands.add_parser('app', help='macOS 앱과 로그인 시 자동 시작 설정')
     analyze = commands.add_parser('analyze', help='허용한 저장소의 최신 스냅샷 분석')
     analyze.add_argument('--snapshot', type=int)
     analyze.add_argument('--include-drafts', action='store_true', help='draft도 수동 분석')
@@ -67,6 +69,12 @@ def main(argv=None):
             from .doctor import run, paths
             return run(paths(), probe=args.probe)
         config = Config.load()
+        if args.command == 'app':
+            from .macos_bundle import install_app
+            return install_app(config)
+        if args.command == 'open':
+            from .web import open_running
+            return open_running(config)
         if args.command == 'codex-home':
             from .analyze.codex import CodexAdapter
             CodexAdapter(data_dir=config.data_dir).init_home(reset=args.reset)

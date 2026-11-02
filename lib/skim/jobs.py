@@ -204,9 +204,29 @@ class Runner:
 
     def run_doctor(self, job):
         from . import doctor
+        from .analyze.codex import CodexAdapter, IsolationError
+        params = json.loads(job['params'] or '{}')
+        action = params.get('action', 'check')
+        if action not in ('check', 'init', 'probe'):
+            return 'failed', None, '지원하지 않는 상태 점검 작업입니다.'
+        if action == 'init':
+            progress(self.state, job['id'], '인증 링크 준비')
+            try:
+                with self.collector.lock('analysis.lock'):
+                    CodexAdapter(data_dir=self.config.data_dir).init_home(reset=False)
+            except (IsolationError, OSError, ValueError):
+                return 'failed', None, '초기화 실패: Codex 로그인과 전용 홈의 소유권·경로를 확인하세요. 기존 파일은 자동 삭제하지 않습니다.'
+            lines = []
+            code = (self.doctor or doctor.run)(self.config, probe=False, out=lines.append)
+            message = ('상태 점검에 확인할 항목이 있습니다.' if code else '상태 점검 정상.')
+            return 'completed', '분석 준비 초기화 완료. ' + message + ' 이어서 격리 검증을 실행하세요.' + ('\n' + '\n'.join(lines) if lines else ''), None
         lines = []
-        # 웹에서는 --probe를 실행하지 않으며 실제 모델을 호출하지 않는다.
-        code = (self.doctor or doctor.run)(self.config, probe=False, out=lines.append)
+        if action == 'probe':
+            progress(self.state, job['id'], '격리 검증 중')
+            with self.collector.lock('analysis.lock'):
+                code = (self.doctor or doctor.run)(self.config, probe=True, out=lines.append)
+        else:
+            code = (self.doctor or doctor.run)(self.config, probe=False, out=lines.append)
         summary = '점검 실패 항목이 있습니다. 아래 안내를 따르세요.' if code else '모든 점검 항목 정상'
         return 'failed' if code else 'completed', summary + '\n' + '\n'.join(lines), None
 
@@ -215,7 +235,9 @@ class Runner:
             return 'failed', None, '저장소 조회 워커가 없습니다.'
         params = json.loads(job['params'] or '{}')
         parts = tuple(params['repository'].split('/')) if params.get('repository') else None
-        return 'completed', self.lookup.run(parts, params.get('source'), params.get('host', 'github.com'), params.get('mode', 'all')), None
+        args = (parts, params.get('source'), params.get('host', 'github.com'), params.get('mode', 'all'))
+        result = self.lookup.run(*args, team=params['team']) if params.get('team') else self.lookup.run(*args)
+        return 'completed', result, None
 
 
 def safe_error(kind, exc):
