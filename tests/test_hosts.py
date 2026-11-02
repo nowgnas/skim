@@ -62,6 +62,24 @@ class HostTests(unittest.TestCase):
             conn.execute('DELETE FROM repositories WHERE id=8')
             self.assertEqual(conn.execute('SELECT COUNT(*) FROM analysis_items').fetchone()[0], 0)
 
+    def test_v7_migration_resets_consent_to_host_scope_none(self):
+        with patch.object(db, 'MIGRATIONS', db.MIGRATIONS[:6]):
+            with closing(db.connect(self.config)) as conn, conn:
+                conn.execute('INSERT INTO github_hosts VALUES(?)', (HOST,))
+                conn.execute("INSERT INTO repositories(owner,name,analysis_policy) VALUES('org','a','allow')")
+                conn.execute("INSERT INTO repositories(host,owner,name,analysis_policy) VALUES(?,'org','b','deny')", (HOST,))
+                conn.execute("INSERT INTO organization_policies VALUES('org','allow')")
+                conn.execute("INSERT INTO host_organization_policies VALUES(?,'org','allow')", (HOST,))
+        with closing(db.connect(self.config)) as conn:
+            self.assertEqual(conn.execute('PRAGMA user_version').fetchone()[0], len(db.MIGRATIONS))
+            # 동의 모델이 바뀌므로 이전 허용은 이어받지 않고 모든 호스트가 '분석 안 함'에서 시작한다.
+            self.assertEqual({r[0] for r in conn.execute('SELECT analysis_scope FROM github_hosts')}, {'none'})
+            self.assertEqual({r[0] for r in conn.execute('SELECT analysis_policy FROM repositories')}, {'inherit'})
+            self.assertFalse(any(db.analysis_allowed(conn, r[0]) for r in conn.execute('SELECT id FROM repositories')))
+            self.assertEqual(conn.execute('SELECT count(*) FROM organization_policies').fetchone()[0], 0)
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute("UPDATE github_hosts SET analysis_scope='everything'")
+
     def test_v6_failure_rolls_back_and_restores_foreign_keys(self):
         with patch.object(db, 'MIGRATIONS', db.MIGRATIONS[:5]):
             with closing(db.connect(self.config)) as conn, conn:
@@ -95,10 +113,10 @@ class HostTests(unittest.TestCase):
             fixture_command[3] = 'github.com'
             return fake(fixture_command, **kwargs)
         with closing(db.connect(self.config)) as conn, conn:
-            conn.execute('INSERT INTO github_hosts VALUES(?)', (HOST,))
+            conn.execute('INSERT INTO github_hosts(host) VALUES(?)', (HOST,))
             for host in ['github.com', HOST]:
                 conn.execute("INSERT INTO repositories(host,owner,name,tracked) VALUES(?,'org','repo',1)", (host,))
-            conn.execute("INSERT INTO organization_policies VALUES('org','allow')")
+            conn.execute("UPDATE github_hosts SET analysis_scope='all' WHERE host='github.com'")
             Collector(conn, self.config, runner).collect()
             self.assertEqual({c[3] for c in calls}, {'github.com', HOST})
             rows = conn.execute('SELECT r.*,p.number,p.url FROM repositories r JOIN pull_requests p ON p.repo_id=r.id').fetchall()
@@ -107,7 +125,8 @@ class HostTests(unittest.TestCase):
                 self.assertEqual(row['url'], github(dict(row)))
                 self.assertEqual(row['url'], f"https://{row['host']}/{row['owner']}/{row['name']}/pull/{row['number']}")
                 self.assertEqual(db.analysis_allowed(conn, row['id']), row['host'] == 'github.com')
-            conn.execute("INSERT INTO host_organization_policies VALUES(?,'org','allow')", (HOST,))
+            # 범위는 호스트마다 따로다. 다른 호스트를 열어도 기존 호스트 판정은 바뀌지 않는다.
+            conn.execute("UPDATE github_hosts SET analysis_scope='all' WHERE host=?", (HOST,))
             self.assertTrue(all(db.analysis_allowed(conn, row['id']) for row in rows))
 
     def test_failed_host_does_not_stop_other_host_collection(self):
@@ -120,7 +139,7 @@ class HostTests(unittest.TestCase):
                 raise OSError('mock failure')
             return fake(cmd, **kwargs)
         with closing(db.connect(self.config)) as conn, conn:
-            conn.execute('INSERT INTO github_hosts VALUES(?)', (HOST,))
+            conn.execute('INSERT INTO github_hosts(host) VALUES(?)', (HOST,))
             conn.execute("INSERT INTO repositories(owner,name,tracked) VALUES('org','repo',1)")
             with self.assertRaisesRegex(CollectionError, HOST):
                 Collector(conn, self.config, runner).collect()
@@ -133,22 +152,29 @@ class HostTests(unittest.TestCase):
         from io import StringIO
         from skim.cli import main
         with closing(db.connect(self.config)) as conn, conn:
-            conn.execute('INSERT INTO github_hosts VALUES(?)', (HOST,))
+            conn.execute('INSERT INTO github_hosts(host) VALUES(?)', (HOST,))
         output = StringIO()
         with redirect_stdout(output), redirect_stderr(StringIO()):
             self.assertEqual(main(['repo', 'add', 'org/repo']), 0)
             self.assertEqual(main(['repo', 'add', 'org/repo', '--host', HOST.upper()]), 0)
-            self.assertEqual(main(['analysis', 'allow', '--org', 'org', '--host', HOST]), 0)
+            self.assertEqual(main(['analysis', 'allow', 'org/repo', '--host', HOST]), 0)
             with closing(db.connect(self.config)) as conn:
                 rows = conn.execute('SELECT id,host FROM repositories ORDER BY host').fetchall()
                 for row in rows:
                     self.assertEqual(db.analysis_allowed(conn, row['id']), row['host'] == HOST)
+                self.assertEqual(db.analysis_scope(conn, HOST), 'selected')
+                self.assertEqual(db.analysis_scope(conn, 'github.com'), 'none')
             self.assertEqual(main(['analysis', 'deny', 'org/repo', '--host', HOST]), 0)
             self.assertEqual(main(['repo', 'list']), 0)
             self.assertIn('호스트\t저장소', output.getvalue())
             self.assertIn(HOST + '\torg/repo', output.getvalue())
             self.assertEqual(main(['repo', 'remove', 'org/repo', '--host', HOST]), 0)
-            self.assertEqual(main(['analysis', 'reset', '--org', 'org', '--host', HOST]), 0)
+            self.assertEqual(main(['analysis', 'allow', 'org/repo']), 0)
+            self.assertEqual(main(['analysis', 'scope', 'none', '--host', HOST]), 0)
+            with closing(db.connect(self.config)) as conn:
+                # 한 호스트의 범위 변경은 다른 호스트의 선택을 건드리지 않는다.
+                self.assertEqual(conn.execute("SELECT analysis_policy FROM repositories WHERE host='github.com'").fetchone()[0], 'allow')
+            self.assertEqual(main(['analysis', 'deny', 'org/repo']), 0)
             self.assertEqual(main(['analysis', 'reset', 'org/repo', '--host', HOST]), 0)
             for command in [['repo', 'add', 'org/other'], ['repo', 'remove', 'org/repo'], ['analysis', 'allow', 'org/repo']]:
                 self.assertEqual(main(command + ['--host', 'unregistered.example']), 1)
@@ -162,7 +188,7 @@ class HostTests(unittest.TestCase):
 
     def test_doctor_checks_all_hosts_and_hides_raw_output(self):
         with closing(db.connect(self.config)) as conn, conn:
-            conn.execute('INSERT INTO github_hosts VALUES(?)', (HOST,))
+            conn.execute('INSERT INTO github_hosts(host) VALUES(?)', (HOST,))
         runner = Mock(side_effect=lambda cmd, **kw: subprocess.CompletedProcess(cmd, int(cmd[-1] == HOST), 'SECRET', 'TOKEN'))
         lines = []
         doctor.run(self.config, runner=runner, which=lambda name: '/fake',
@@ -220,10 +246,11 @@ class HostWebTests(unittest.TestCase):
         with closing(db.connect(self.config)) as conn:
             row = conn.execute("SELECT id FROM repositories WHERE host=? AND owner='demo' AND name='checkout'", (HOST,)).fetchone()
             self.assertFalse(db.analysis_allowed(conn, row[0]))
-        self.assertEqual(self.post('/settings/analysis', host=HOST, scope='org', target='demo', policy='allow', confirm='yes')[0], 303)
+        self.assertEqual(self.post('/repos/scope', host=HOST, scope='all', confirm='yes')[0], 303)
         with closing(db.connect(self.config)) as conn:
             self.assertTrue(db.analysis_allowed(conn, row[0]))
-        self.assertEqual(self.post('/settings/analysis', host=HOST, scope='repo', target='demo/checkout', policy='deny')[0], 303)
+            self.assertTrue(db.analysis_allowed(conn, 1))
+        self.assertEqual(self.post('/repos/scope', host=HOST, scope='none')[0], 303)
         with closing(db.connect(self.config)) as conn:
             self.assertFalse(db.analysis_allowed(conn, row[0]))
             self.assertTrue(db.analysis_allowed(conn, 1))
@@ -231,6 +258,7 @@ class HostWebTests(unittest.TestCase):
     def test_removal_and_manual_analysis_use_host_identity(self):
         with closing(db.connect(self.config)) as conn, conn:
             repo_id = conn.execute("INSERT INTO repositories(host,owner,name,tracked,analysis_policy) VALUES(?,'demo','checkout',1,'allow')", (HOST,)).lastrowid
+            conn.execute("UPDATE github_hosts SET analysis_scope='selected' WHERE host=?", (HOST,))
             pr_id = conn.execute("INSERT INTO pull_requests(repo_id,number,base_sha,head_sha) VALUES(?,1,'base','head')", (repo_id,)).lastrowid
             conn.execute("INSERT INTO pr_sources VALUES(?,'repository')", (pr_id,))
             conn.execute("INSERT INTO snapshots(pr_id,base_sha,head_sha,diff_hash,input_hash) VALUES(?,'base','head','d','i')", (pr_id,))
@@ -262,14 +290,16 @@ class HostWebTests(unittest.TestCase):
             repo = conn.execute("INSERT INTO repositories(host,owner,name,tracked,analysis_policy) VALUES(?,'org','private',1,'allow')", (HOST,)).lastrowid
             pr = conn.execute("INSERT INTO pull_requests(repo_id,number,title) VALUES(?,42,'deleted host PR')", (repo,)).lastrowid
             conn.execute("INSERT INTO pr_sources VALUES(?,'review_request')", (pr,))
-            conn.execute("INSERT INTO host_organization_policies VALUES(?,'org','allow')", (HOST,))
+            conn.execute("UPDATE github_hosts SET analysis_scope='selected' WHERE host=?", (HOST,))
             self.assertIn(pr, [p['id'] for p in load_prs(conn, self.config)])
         self.assertEqual(self.post('/hosts/remove', host=HOST)[0], 303)
         with closing(db.connect(self.config)) as conn:
             self.assertNotIn(pr, [p['id'] for p in load_prs(conn, self.config)])
-            self.assertEqual(tuple(conn.execute('SELECT tracked,enabled,analysis_policy FROM repositories WHERE id=?', (repo,)).fetchone()), (0, 0, 'deny'))
+            self.assertEqual(tuple(conn.execute('SELECT tracked,enabled,analysis_policy FROM repositories WHERE id=?', (repo,)).fetchone()), (0, 0, 'inherit'))
             self.assertFalse(db.analysis_allowed(conn, repo))
-            self.assertEqual(conn.execute('SELECT count(*) FROM host_organization_policies WHERE host=?', (HOST,)).fetchone()[0], 0)
+            # 같은 이름으로 호스트를 다시 추가해도 이전 허용이 되살아나지 않는다.
+            conn.execute("INSERT INTO github_hosts(host) VALUES(?)", (HOST,))
+            self.assertFalse(db.analysis_allowed(conn, repo))
             self.assertIsNotNone(conn.execute('SELECT 1 FROM pull_requests WHERE id=?', (pr,)).fetchone())
         self.assertNotIn('deleted host PR', self.request('/')[2])
         self.assertIn('gh auth login --hostname &lt;host&gt;', self.request('/status')[2])

@@ -5,7 +5,7 @@ import re
 import sqlite3
 import sys
 from .config import Config
-from .db import analysis_allowed, connect
+from .db import SCOPES, analysis_allowed, analysis_scope, connect
 from .hosts import hostname, registered
 
 
@@ -37,12 +37,13 @@ def parser():
     remove.add_argument('--host', type=hostname, default='github.com')
     analysis = commands.add_parser('analysis', help='모델 서비스 코드 전송 허용 관리')
     policies = analysis.add_subparsers(dest='action', required=True)
-    for action in ('allow', 'deny', 'reset'):
-        p = policies.add_parser(action)
+    scope = policies.add_parser('scope', help='호스트 분석 범위: none(안 함), all(모든 저장소), selected(선택한 저장소만)')
+    scope.add_argument('scope', choices=SCOPES)
+    scope.add_argument('--host', type=hostname, default='github.com')
+    for action, text in (('allow', '선택한 저장소에 추가'), ('deny', '선택에서 제외'), ('reset', 'deny와 같음')):
+        p = policies.add_parser(action, help=text)
         p.add_argument('--host', type=hostname, default='github.com')
-        group = p.add_mutually_exclusive_group(required=True)
-        group.add_argument('repository', type=repository, nargs='?')
-        group.add_argument('--org')
+        p.add_argument('repository', type=repository)
     commands.add_parser('collect', help='gh 로그인으로 PR 읽기 전용 수집')
     commands.add_parser('open', help='실행 중인 웹 서버를 브라우저에서 열기')
     commands.add_parser('app', help='macOS 앱과 로그인 시 자동 시작 설정').add_argument('--uninstall', action='store_true')
@@ -108,7 +109,7 @@ def main(argv=None):
                 with conn:
                     if hasattr(args, 'host'):
                         args.host = registered(conn, args.host)
-                    if args.command == 'analysis' and args.action == 'allow':
+                    if args.command == 'analysis' and (args.action == 'allow' or getattr(args, 'scope', 'none') != 'none'):
                         print('허용된 코드가 선택한 LLM CLI의 모델 서비스로 전송될 수 있습니다.', flush=True)
                     if args.command == 'repo':
                         if args.action == 'list':
@@ -125,26 +126,23 @@ def main(argv=None):
                             from .repos import remove_repository
                             remove_repository(conn, args.repository, args.host)
                             print('저장소 추적을 해제했습니다.')
-                    elif args.org is not None:
-                        if not re.fullmatch(OWNER_PATTERN, args.org):
-                            raise ValueError('잘못된 조직 이름입니다')
-                        if args.host != 'github.com':
-                            conn.execute('DELETE FROM host_organization_policies WHERE host=? AND owner=?', (args.host, args.org))
-                            if args.action != 'reset':
-                                conn.execute('INSERT INTO host_organization_policies VALUES(?,?,?)', (args.host, args.org, args.action))
-                        elif args.action == 'reset':
-                            conn.execute('DELETE FROM organization_policies WHERE owner=?', (args.org,))
-                        else:
-                            conn.execute('INSERT INTO organization_policies VALUES(?,?) '
-                                         'ON CONFLICT(owner) DO UPDATE SET policy=excluded.policy', (args.org, args.action))
-                        print('조직 분석 정책을 변경했습니다.')
+                    elif args.action == 'scope':
+                        conn.execute('UPDATE github_hosts SET analysis_scope=? WHERE host=?', (args.scope, args.host))
+                        if args.scope != 'selected':
+                            conn.execute("UPDATE repositories SET analysis_policy='inherit' WHERE host=?", (args.host,))
+                        print(f'{args.host} 분석 범위를 {args.scope}로 변경했습니다.')
                     else:
-                        policy = 'inherit' if args.action == 'reset' else args.action
+                        current = analysis_scope(conn, args.host)
+                        if current == 'all':
+                            raise ValueError('모든 저장소가 허용된 호스트입니다. 개별로 정하려면 analysis scope selected를 먼저 실행하세요')
                         result = conn.execute("UPDATE repositories SET analysis_policy=? WHERE host=? AND owner=? AND name=?",
-                                              (policy, args.host, *args.repository))
+                                              ('allow' if args.action == 'allow' else 'inherit', args.host, *args.repository))
                         if not result.rowcount:
                             raise ValueError('등록되지 않은 저장소입니다')
-                        print('저장소 분석 정책을 변경했습니다.')
+                        if args.action == 'allow' and current == 'none':
+                            # 저장소를 고르는 것은 '선택한 저장소만' 범위를 켜는 것과 같다.
+                            conn.execute("UPDATE github_hosts SET analysis_scope='selected' WHERE host=?", (args.host,))
+                        print('선택한 저장소 목록을 변경했습니다.')
                 if removing:
                     collector.clean_cache()
         finally:

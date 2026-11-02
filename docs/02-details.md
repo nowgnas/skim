@@ -15,17 +15,20 @@ bin/skim collect
 bin/skim analyze
 bin/skim analyze --snapshot 1 --include-drafts
 bin/skim repo list --candidates
-bin/skim analysis allow --org owner
+bin/skim analysis scope selected
+bin/skim analysis allow owner/repo
 bin/skim analysis deny owner/repo
-bin/skim analysis reset owner/repo
+bin/skim analysis scope all --host github.corp.example
 bin/skim repo remove owner/repo
 python3 -m unittest discover -s tests
 ```
 
 `--source`는 `owned`, `managed`, `responsible` 중 하나이며 기본값은
-`responsible`입니다. 등록만으로 분석을 허용하지 않습니다. 저장소의 명시적
-allow/deny가 조직 정책보다 우선하며, `reset`은 조직 정책을 상속합니다.
-조직 정책도 `analysis reset --org owner`로 지울 수 있습니다.
+`responsible`입니다. 등록만으로 분석을 허용하지 않습니다. 분석 허용은 호스트마다
+`none`(기본), `all`, `selected` 중 하나입니다(`github_hosts.analysis_scope`, DB v7).
+`selected`일 때만 저장소의 `analysis_policy='allow'`가 의미를 가지며, 다른 범위로 바꾸면
+선택은 지워집니다. 조직 단위 정책은 v7에서 없앴고, v7 마이그레이션은 기존 허용을 모두
+초기화합니다(호스트 범위 `none`). 이전 버전 DB는 마이그레이션 전에 `.bak`으로 백업됩니다.
 저장소 삭제는 추적을 해제하고 저장소 유입 경로만 제거합니다. 리뷰 요청이 남은
 PR·스냅샷·분석은 보존하며, 출처가 없어진 PR만 삭제합니다. 저장소 레코드와
 분석 정책은 유지합니다. 리뷰 요청만으로 발견한 저장소는 추적 목록에 나타나지 않습니다.

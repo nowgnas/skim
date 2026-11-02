@@ -111,7 +111,7 @@ class CollectionTests(unittest.TestCase):
         from test_analyze import Fake
         self.collector.collect()
         with self.conn:
-            self.conn.execute("UPDATE repositories SET analysis_policy='allow'")
+            self.conn.execute("UPDATE github_hosts SET analysis_scope='all'")
         Analyzer(self.conn, self.config, Fake()).run()
         self.collector.collect()
         self.assertEqual(self.count('snapshots'), 2)

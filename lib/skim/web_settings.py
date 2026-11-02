@@ -12,13 +12,13 @@ from urllib.parse import parse_qsl, urlencode
 
 from .collect import Collector, GitHub
 from .config import Config, valid_model
-from .db import connect, analysis_allowed
+from .db import SCOPES, analysis_allowed, analysis_scope, connect
 from . import jobs
 from .hosts import hostname, registered, authenticated
 from .web_jobs import JOB_PATHS, job_box, script
 from .repos import web_repository, add_repository, remove_repository
 
-POST_PATHS = {'/hosts/check', '/hosts/add', '/hosts/remove', '/repos/add', '/repos/remove', '/repos/load', '/repos/policy', '/settings/analysis', '/settings/model', '/home/team'} | JOB_PATHS
+POST_PATHS = {'/hosts/check', '/hosts/add', '/hosts/remove', '/repos/add', '/repos/remove', '/repos/load', '/repos/scope', '/settings/model', '/home/team'} | JOB_PATHS
 WARNING = ('허용하면 PR 코드, diff와 제목, 설명이 Codex CLI를 통해 모델 서비스로 전송됩니다. '
            '민감 정보 제외는 완전하지 않으며 서비스의 전송, 보존 정책이 적용됩니다.')
 
@@ -202,33 +202,60 @@ def source_field(target="저장소 연결"):
     return '<label>출처<select name="source" aria-label="' + esc(target) + ' 출처"><option value="responsible">담당 (responsible)</option><option value="owned">소유 (owned)</option><option value="managed">관리 (managed)</option></select></label>'
 
 
-def policy_form(csrf, scope, target, host="github.com", policy="deny", action='/settings/analysis'):
-    from .web import esc
-    current = 'reset' if policy == 'inherit' else policy
-    identity = host + '/' + (target or '새 조직')
-    target_field = (f'<input type="hidden" name="target" value="{esc(target)}">' if target else
-                    f'<label>조직 이름<input name="target" aria-label="{esc(identity)} 이름" required></label>')
-    reset_label = '조직 설정 따르기' if scope == 'repo' else '정책 삭제 (기본 거부)'
-    options = ''.join(f'<option value="{value}"' + (' selected' if current == value else '') + f'>{label}</option>'
-                      for value, label in [('deny', '거부'), ('reset', reset_label), ('allow', '허용')])
-    return form(action, csrf,
-                f'<input type="hidden" name="host" value="{esc(host)}"><input type="hidden" name="scope" value="{scope}">' + target_field
-                + f'<label class="policy-select"><span class="sr-only">{esc(identity)} 분석 정책</span><select name="policy" aria-label="{esc(identity)} 분석 정책">{options}</select></label>'
-                + f'<label class="consent"><input type="checkbox" name="confirm" value="yes" aria-label="{esc(identity)} 모델 서비스 전송 동의">코드가 Codex(모델 서비스)로 전송됨을 이해하고 허용합니다</label>'
-                + f'<button aria-label="{esc(identity)} 분석 정책 저장">저장</button>')
+SCOPE_LABELS = {'none': '분석 안 함', 'all': '모든 저장소', 'selected': '선택한 저장소만'}
 
 
-def policy_row(csrf, scope, target, host, policy, effective=None):
+def scope_candidates(conn, host, query):
+    """선택 목록 후보: 선택됨·추적 중·열린 PR이 있는 저장소. 화면과 저장이 같은 페이지를 계산한다."""
+    from .web import list_controls
+    rows = conn.execute("SELECT r.*, EXISTS(SELECT 1 FROM pull_requests p WHERE p.repo_id=r.id AND p.state='open') AS has_open "
+                        "FROM repositories r WHERE r.host=? AND (r.tracked=1 OR r.analysis_policy='allow' OR has_open) "
+                        "ORDER BY r.analysis_policy='allow' DESC, r.tracked DESC, r.owner, r.name", (host,)).fetchall()
+    return list_controls(rows, query, 'select', '저장소', lambda r: r['owner'] + '/' + r['name'])
+
+
+def scope_section(conn, csrf, query):
     from .web import esc
-    applied = effective if effective is not None else policy == 'allow'
-    return ('<article class="list-row policy-row"><div class="row-content"><h3>' + esc(host + '/' + target)
-            + '</h3><span class="badge">실제 적용: ' + ('허용' if applied else '거부') + '</span></div>'
-            + policy_form(csrf, scope, target, host, policy) + '</article>')
+    hosts = [r[0] for r in conn.execute('SELECT host FROM github_hosts ORDER BY host')]
+    wanted = query.get('scope_host', [''])[0]
+    host = wanted if wanted in hosts else 'github.com'
+    scope = analysis_scope(conn, host)
+    body = ('<section id="analysis-scope" class="repo-section"><h2>분석 허용 범위</h2>'
+            '<p class="muted">GitHub 앱 설치처럼 호스트마다 코드를 분석에 보낼 범위를 정합니다. 기본은 분석 안 함입니다.</p>'
+            f'<p>{esc(WARNING)}</p>')
+    if len(hosts) > 1:
+        keep = ''.join(f'<input type="hidden" name="{k}" value="{esc(query[k][0])}">' for k in ('from_pr',) if query.get(k))
+        body += ('<form class="filters" method="get" action="/repos#analysis-scope">' + keep + '<label>호스트<select name="scope_host">'
+                 + ''.join(f'<option{" selected" if h == host else ""}>{esc(h)}</option>' for h in hosts)
+                 + '</select></label><button class="btn secondary">호스트 보기</button></form>')
+    rows, controls, navigation = scope_candidates(conn, host, query)
+    radios = ''.join(f'<label class="scope-option"><input type="radio" name="scope" value="{value}"' + (' checked' if value == scope else '')
+                     + f'><span><strong>{label}</strong><small>{hint}</small></span></label>'
+                     for value, label, hint in [('none', SCOPE_LABELS['none'], '이 호스트의 코드는 모델 서비스로 보내지 않습니다.'),
+                                                ('all', SCOPE_LABELS['all'], '앞으로 연결하거나 리뷰 요청을 받는 저장소도 포함합니다.'),
+                                                ('selected', SCOPE_LABELS['selected'], '아래에서 체크한 저장소만 허용합니다.')])
+    checks = ''.join(f'<label class="scope-repo"><input type="checkbox" name="repository" value="{esc(r["owner"] + "/" + r["name"])}"'
+                     + (' checked' if r['analysis_policy'] == 'allow' else '') + f'><span>{esc(r["owner"] + "/" + r["name"])}</span>'
+                     + ('<small>추적 중</small>' if r['tracked'] else '') + ('<small>열린 PR</small>' if r['has_open'] else '') + '</label>'
+                     for r in rows)
+    # 저장은 이 화면에 실제로 보여준 저장소만 바꾼다. 페이지를 다시 계산하면 그 사이 순서가 바뀌어 보지 못한 선택이 풀릴 수 있다.
+    paging = ''.join(f'<input type="hidden" name="shown" value="{int(r["id"])}">' for r in rows)
+    body += (f'<p class="meta"><span class="badge">{esc(host)}</span><span>현재: {SCOPE_LABELS[scope]}</span></p>'
+             + controls
+             + form('/repos/scope', csrf, f'<input type="hidden" name="host" value="{esc(host)}">' + paging
+                    + '<fieldset class="scope-choices"><legend class="sr-only">분석 범위</legend>' + radios + '</fieldset>'
+                    + '<fieldset class="scope-repos"><legend>선택할 저장소</legend>'
+                    + (checks or '<p class="muted">연결했거나 열린 PR이 있는 저장소가 없습니다. 먼저 저장소를 연결하세요.</p>') + '</fieldset>'
+                    + '<label class="consent"><input type="checkbox" name="confirm" value="yes">허용 범위의 코드가 Codex(모델 서비스)로 전송됨을 이해하고 허용합니다</label>'
+                    + f'<button aria-label="{esc(host)} 분석 허용 범위 저장">범위 저장</button>')
+             + navigation + '</section>')
+    return body
 
 
 RETURN_FIELDS = {
-    '/repos': {'tracked_q', 'tracked_page', 'available_q', 'available_page', 'available_team', 'from_pr'},
-    '/settings': {'policy_q', 'policy_page', 'org_q', 'org_page'},
+    '/repos': {'tracked_q', 'tracked_page', 'available_q', 'available_page', 'available_team', 'from_pr',
+               'scope_host', 'select_q', 'select_page'},
+    '/settings': set(),
 }
 
 
@@ -291,10 +318,10 @@ def render(server, conn, csrf, path, query=None):
     from .web import esc, meta, list_controls
     query = query or {}
     if path == '/repos':
-        body = '<div class="page-intro"><h1>저장소</h1><p>GitHub 호스트와 조회 범위를 선택하고 리뷰할 저장소를 연결하세요.</p><p class="muted">GitHub에는 읽기 전용으로 접근합니다. 분석 실행은 저장소와 조직의 분석 허용 설정을 따릅니다.</p></div>'
+        body = '<div class="page-intro"><h1>저장소</h1><p>GitHub 호스트와 조회 범위를 선택하고 리뷰할 저장소를 연결하세요.</p><p class="muted">GitHub에는 읽기 전용으로 접근합니다. 분석 실행은 아래 호스트별 분석 허용 범위를 따릅니다.</p></div>'
         from_pr = query.get('from_pr', [''])[0]
         if positive(from_pr):
-            body += (f'<p class="notice">PR에서 이동했습니다. 아래에서 분석 정책을 <strong>허용</strong>으로 저장한 뒤 '
+            body += (f'<p class="notice">PR에서 이동했습니다. <a href="#analysis-scope">분석 허용 범위</a>에서 이 저장소를 허용한 뒤 '
                      f'<a href="/pr/{int(from_pr)}">PR로 돌아가 분석을 요청하세요</a>.</p>')
         lookup = getattr(server, 'repo_lookup', None)
         lookup_host, lookup_mode, truncated, loaded, items, teams, selected_team = lookup.snapshot(with_teams=True) if lookup else ('github.com', 'all', False, False, [], [], '')
@@ -328,7 +355,7 @@ def render(server, conn, csrf, path, query=None):
             if row:
                 params = [(key, value) for key, values in query.items() if key in RETURN_FIELDS['/repos'] and key not in ('tracked_q', 'tracked_page') for value in values[:1]]
                 params.append(('tracked_q', lookup_host + '/' + name))
-                body += '<span class="badge">연결됨 · 분석 ' + ('허용' if analysis_allowed(conn, row['id']) else '거부') + '</span><a class="btn secondary sm" href="?' + esc(urlencode(params)) + '#connected-repositories">관리</a>'
+                body += '<span class="badge">연결됨 · 분석 ' + ('허용' if analysis_allowed(conn, row['id']) else '안 함') + '</span><a class="btn secondary sm" href="?' + esc(urlencode(params)) + '#connected-repositories">관리</a>'
             else:
                 body += form('/repos/add', csrf, f'<input type="hidden" name="host" value="{esc(lookup_host)}"><input type="hidden" name="repository" value="{esc(name)}">' + source_field(lookup_host + '/' + name) + f'<button aria-label="{esc(lookup_host + "/" + name)} 선택하여 연결">선택하여 연결</button>')
             body += '</article>'
@@ -337,20 +364,19 @@ def render(server, conn, csrf, path, query=None):
         body += '<div class="connect-toolbar">' + form('/repos/add', csrf, host_field(conn, selected=lookup_host) + '<label>owner/repo<input name="repository" required maxlength="140"></label>' + source_field() + '<button>저장소 연결</button>') + '</div></section>'
         rows = list(conn.execute('SELECT * FROM repositories ORDER BY tracked DESC,owner,name'))
         rows, controls, navigation = list_controls(rows, query, 'tracked', '연결된 저장소', lambda r: r['host'] + '/' + r['owner'] + '/' + r['name'])
-        body += '<section id="connected-repositories" class="repo-section"><h2>저장소 연결과 분석 설정</h2><p class="muted">이전에 연결한 저장소도 표시합니다. 연결 해제는 로컬 추적만 중단하며 정책을 유지합니다.</p><p>' + esc(WARNING) + '</p>' + controls + '<div class="list">'
+        body += '<section id="connected-repositories" class="repo-section"><h2>연결된 저장소</h2><p class="muted">이전에 연결한 저장소도 표시합니다. 연결 해제는 로컬 추적만 중단하며 분석 허용 범위는 그대로입니다.</p>' + controls + '<div class="list">'
         for row in rows:
             name = row['owner'] + '/' + row['name']
             body += '<article class="list-row"><div class="row-content"><h3>' + esc(name) + '</h3>' + meta(row['host'], row['source'], '추적 중' if row['tracked'] else '연결 해제됨') + '</div><div class="toolbar row-actions">'
             if row['tracked']:
-                body += confirm_action('연결 해제', '추적과 수집을 멈춥니다. 분석 정책은 그대로 남아 동의가 철회되지 않으며, 리뷰 요청으로만 남은 PR이 아니면 수집 기록이 정리될 수 있습니다.',
+                body += confirm_action('연결 해제', '추적과 수집을 멈춥니다. 분석 허용 범위는 그대로 남아 동의가 철회되지 않으며, 리뷰 요청으로만 남은 PR이 아니면 수집 기록이 정리될 수 있습니다.',
                                        form('/repos/remove', csrf, f'<input type="hidden" name="host" value="{esc(row["host"])}"><input type="hidden" name="repository" value="{esc(name)}"><button aria-label="{esc(row["host"] + "/" + name)} 연결 해제 확인">연결 해제 확인</button>', variant='danger'))
-            body += '</div>'
-            body += '<div class="repository-policy"><span class="badge">실제 분석: ' + ('허용' if analysis_allowed(conn, row['id']) else '거부') + '</span>' + policy_form(csrf, 'repo', name, row['host'], row['analysis_policy'], '/repos/policy') + '</div></article>'
-        body += '</div>' + navigation + '</section><details class="repo-section host-management"><summary>GitHub 호스트 관리</summary>' + host_settings(server, conn, csrf) + '</details>'
+            body += '<span class="badge">분석 ' + ('허용' if analysis_allowed(conn, row['id']) else '안 함') + '</span></div></article>'
+        body += '</div>' + navigation + '</section>' + scope_section(conn, csrf, query) + '<details class="repo-section host-management"><summary>GitHub 호스트 관리</summary>' + host_settings(server, conn, csrf) + '</details>'
         return preserve_list_state(body, path, query)
     settings = json.loads((server.config.config_dir / 'config.json').read_text())
     model = settings.get('codex_model', '')
-    body = '<h1>설정과 분석 허용</h1><p>' + WARNING + '</p><p>기본 꺼짐. 저장소의 명시적 허용, 거부는 조직 정책보다 우선합니다. 조직 허용은 해당 조직의 모든 저장소에 적용됩니다.</p>'
+    body = '<h1>설정</h1><p>분석 허용 범위(호스트별 전체 또는 선택한 저장소)는 <a href="/repos#analysis-scope">저장소 화면</a>에서 정합니다. 기본은 분석 안 함입니다.</p>'
     body += '<h2>모델 설정</h2>' + meta('파일 값: ' + (model or '미설정'), '실제 적용: ' + (Config.parse_codex_model(settings) or '자동 감지'))
     if 'SKIM_CODEX_MODEL' in os.environ:
         body += '<p>SKIM_CODEX_MODEL 환경변수가 파일 설정보다 우선합니다.</p>'
@@ -366,14 +392,7 @@ def render(server, conn, csrf, path, query=None):
     options = '<option value=""' + (' selected' if not model else '') + '>자동 선택</option>'
     options += ''.join(f'<option value="{esc(name)}"' + (' selected' if name == model else '') + f'>{esc(name)}</option>' for name in choices)
     body += form('/settings/model', csrf, '<label>분석 모델<select name="model">' + options + '</select></label><button>모델 저장</button>', variant='primary')
-    body += '<p>저장소별 분석 정책은 <a href="/repos#connected-repositories">저장소 관리</a>에서 변경하세요.</p>'
-    rows = list(conn.execute('SELECT owner,policy FROM organization_policies ORDER BY owner'))
-    rows, org_controls, org_navigation = list_controls(rows, query, 'org', '조직 정책', lambda r: r['owner'])
-    body += '<h2>조직 정책</h2>' + org_controls + '<div class="list">'
-    for row in rows:
-        body += policy_row(csrf, 'org', row['owner'], 'github.com', row['policy'])
-    body += '</div>' + org_navigation + '<section class="policy-add"><h3>github.com 조직 추가</h3>' + policy_form(csrf, 'org', '') + '</section>' + host_field_note(conn, csrf)
-    return preserve_list_state(body, path, query)
+    return body
 
 
 def fields(data, required, optional=()):
@@ -406,11 +425,11 @@ def mutate(server, path, data, strict_lookup=False):
         host = hostname(d['host'])
         with closing(connect(server.config)) as conn, Collector(conn, server.config).lock(), conn:
             if path == '/hosts/add':
-                conn.execute('INSERT OR IGNORE INTO github_hosts VALUES(?)', (host,))
+                conn.execute('INSERT OR IGNORE INTO github_hosts(host) VALUES(?)', (host,))
             else:
                 if host == 'github.com':
                     raise ValueError('기본 호스트는 삭제할 수 없습니다')
-                conn.execute("UPDATE repositories SET tracked=0,enabled=0,analysis_policy='deny' WHERE host=?", (host,))
+                conn.execute("UPDATE repositories SET tracked=0,enabled=0,analysis_policy='inherit' WHERE host=?", (host,))
                 conn.execute('DELETE FROM host_organization_policies WHERE host=?', (host,))
                 conn.execute('DELETE FROM github_hosts WHERE host=?', (host,))
         if path == '/hosts/add':
@@ -481,33 +500,45 @@ def mutate(server, path, data, strict_lookup=False):
                 d = fields(data, ('repository',), ('host',))
                 remove_repository(conn, web_repository(d['repository']), registered(conn, d.get('host', 'github.com')))
             else:
-                d = fields(data, ('scope', 'target', 'policy'), ('confirm', 'host'))
-                host = registered(conn, d.get('host', 'github.com'))
-                if d['policy'] not in ('allow', 'deny', 'reset') or d['scope'] not in ('repo', 'org'):
-                    raise ValueError('분석 정책 형식이 잘못되었습니다')
-                if path == '/repos/policy' and d['scope'] != 'repo':
-                    raise ValueError('저장소 정책만 변경할 수 있습니다')
-                if d['policy'] == 'allow' and d.get('confirm') != 'yes':
-                    raise ValueError('모델 서비스 전송 확인 체크가 필요합니다')
-                if d['scope'] == 'repo':
-                    parts = web_repository(d['target'])
-                    policy = 'inherit' if d['policy'] == 'reset' else d['policy']
-                    if not conn.execute('UPDATE repositories SET analysis_policy=? WHERE host=? AND owner=? AND name=?', (policy, host, *parts)).rowcount:
-                        raise ValueError('등록되지 않은 저장소입니다')
-                else:
-                    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9-]{0,38}', d['target']):
-                        raise ValueError('조직 이름 형식을 확인하세요')
-                    if host != 'github.com':
-                        conn.execute('DELETE FROM host_organization_policies WHERE host=? AND owner=?', (host, d['target']))
-                        if d['policy'] != 'reset':
-                            conn.execute('INSERT INTO host_organization_policies VALUES(?,?,?)', (host, d['target'], d['policy']))
-                    elif d['policy'] == 'reset':
-                        conn.execute('DELETE FROM organization_policies WHERE owner=?', (d['target'],))
-                    else:
-                        conn.execute('INSERT INTO organization_policies VALUES(?,?) ON CONFLICT(owner) DO UPDATE SET policy=excluded.policy', (d['target'], d['policy']))
+                save_scope(conn, data)
         if path == '/repos/remove':
             collector.clean_cache()
     return '/repos' if path.startswith('/repos/') else '/settings'
+
+
+def save_scope(conn, data):
+    """호스트 분석 범위와 화면에 보여준 저장소의 선택을 저장한다. 새로 허용되는 코드가 있으면 전송 확인을 요구한다."""
+    if set(data) - {'host', 'scope', 'confirm', 'repository', 'shown'} or any(
+            len(data.get(key, [])) > 1 for key in ('host', 'scope', 'confirm')):
+        raise ValueError('허용 필드와 입력 개수를 확인하세요')
+    host = registered(conn, data.get('host', ['github.com'])[0])
+    scope = data.get('scope', [''])[0]
+    if scope not in SCOPES:
+        raise ValueError('분석 범위를 선택하세요')
+    previous = analysis_scope(conn, host)
+    if scope != 'selected':
+        # 숨겨진 체크박스 값은 무시한다. 철회(안 함)는 목록이 바뀌었어도 항상 성공해야 한다.
+        if scope == 'all' and previous != 'all' and data.get('confirm', [''])[0] != 'yes':
+            raise ValueError('모델 서비스 전송 확인 체크가 필요합니다')
+        conn.execute('UPDATE github_hosts SET analysis_scope=? WHERE host=?', (scope, host))
+        # 남겨 두면 나중에 '선택' 모드로 돌아올 때 확인 없이 다시 허용되므로 비운다.
+        conn.execute("UPDATE repositories SET analysis_policy='inherit' WHERE host=?", (host,))
+        return
+    ids = data.get('shown', [])
+    if len(ids) > 200 or not all(value.isascii() and value.isdigit() and len(value) <= 18 for value in ids):
+        raise ValueError('저장소 목록을 확인하세요')
+    shown = {(r['owner'] + '/' + r['name']).casefold(): r for r in conn.execute(
+        'SELECT id, owner, name, analysis_policy FROM repositories WHERE host=? AND id IN (%s)' % ','.join('?' * len(ids)),
+        (host, *map(int, ids)))} if ids else {}
+    checked = {'/'.join(web_repository(value)).casefold() for value in data.get('repository', [])}
+    if checked - set(shown):
+        raise ValueError('저장소 목록이 바뀌었습니다. 화면을 새로고침한 뒤 다시 선택하세요')
+    added = any(shown[name]['analysis_policy'] != 'allow' for name in checked)
+    if (added or previous == 'none' and checked) and data.get('confirm', [''])[0] != 'yes':
+        raise ValueError('모델 서비스 전송 확인 체크가 필요합니다')
+    conn.execute('UPDATE github_hosts SET analysis_scope=? WHERE host=?', (scope, host))
+    for name, row in shown.items():
+        conn.execute('UPDATE repositories SET analysis_policy=? WHERE id=?', ('allow' if name in checked else 'inherit', row['id']))
 
 
 def host_field(conn, purpose="저장소 연결", selected="github.com"):
@@ -518,7 +549,7 @@ def host_field(conn, purpose="저장소 연결", selected="github.com"):
 
 def host_settings(server, conn, csrf):
     from .web import esc
-    body = '<h2>GitHub 호스트</h2><p>호스트 삭제 시 기록은 보존하고 대시보드에서 숨깁니다. 저장소 추적과 수집과 분석 허용을 끄고 조직 정책을 삭제합니다.</p>'
+    body = '<h2>GitHub 호스트</h2><p>호스트 삭제 시 기록은 보존하고 대시보드에서 숨깁니다. 저장소 추적과 수집, 분석 허용을 끕니다.</p>'
     body += '<div class="list">'
     for row in conn.execute('SELECT host FROM github_hosts ORDER BY host'):
         host = row[0]
@@ -527,20 +558,10 @@ def host_settings(server, conn, csrf):
         body += '<article class="list-row"><div class="row-content"><h3>' + esc(host) + '</h3><p class="meta"><span class="badge">' + esc(status) + '</span><span>마지막 확인: ' + esc(cached[1] if cached else '없음') + '</span></p></div><div class="toolbar row-actions">'
         body += form('/hosts/check', csrf, f'<input type="hidden" name="host" value="{esc(host)}"><button aria-label="{esc(host)} 인증 다시 확인">인증 다시 확인</button>')
         if host != 'github.com':
-            body += confirm_action('호스트 삭제', '이 호스트의 저장소 추적과 분석 허용을 끄고 조직 정책을 삭제합니다. 수집 기록은 보존하지만 대시보드에서 숨겨집니다.',
+            body += confirm_action('호스트 삭제', '이 호스트의 저장소 추적과 분석 허용을 끕니다. 수집 기록은 보존하지만 대시보드에서 숨겨집니다.',
                                form('/hosts/remove', csrf, f'<input type="hidden" name="host" value="{esc(host)}"><button aria-label="{esc(host)} 호스트 삭제 확인">호스트 삭제 확인</button>', variant='danger'))
         body += '</div></article>'
     return body + '</div>' + form('/hosts/add', csrf, '<label>호스트<input name="host" aria-label="새 호스트 추가" required maxlength="253" placeholder="github.corp.example"></label><button>호스트 추가</button>')
-
-
-def host_field_note(conn, csrf):
-    from .web import esc
-    body = ''
-    for row in conn.execute("SELECT host FROM github_hosts WHERE host!='github.com'"):
-        body += '<h3>' + esc(row[0]) + ' 조직 추가</h3><section class="policy-add">' + policy_form(csrf, 'org', '', row[0]) + '</section>'
-    for row in conn.execute('SELECT * FROM host_organization_policies ORDER BY host,owner'):
-        body += '<div class="list">' + policy_row(csrf, 'org', row['owner'], row['host'], row['policy']) + '</div>'
-    return body
 
 
 def check_auth(server, host):

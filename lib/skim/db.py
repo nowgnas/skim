@@ -118,6 +118,17 @@ CREATE TABLE host_organization_policies (
  host TEXT NOT NULL REFERENCES github_hosts(host), owner TEXT NOT NULL COLLATE NOCASE,
  policy TEXT NOT NULL CHECK(policy IN ('allow','deny')), PRIMARY KEY(host,owner));
 """,)
+# v7: GitHub 앱 설치처럼 호스트마다 분석 범위(안 함/전체/선택)를 둔다. 선택한 저장소는
+# repositories.analysis_policy='allow'로 표시한다. 동의 모델이 바뀌므로 기존 허용과 조직 정책은 초기화한다.
+# 이전 버전 skim은 새 DB 버전을 열지 않으므로 되돌릴 때는 자동 백업(.bak)으로 복원한다. 조직 정책 테이블은 남기되 쓰지 않는다.
+MIGRATIONS += ("""
+ALTER TABLE github_hosts ADD COLUMN analysis_scope TEXT NOT NULL DEFAULT 'none'
+ CHECK(analysis_scope IN ('none','all','selected'));
+UPDATE repositories SET analysis_policy='inherit';
+DELETE FROM organization_policies;
+DELETE FROM host_organization_policies;
+""",)
+SCOPES = ('none', 'all', 'selected')
 
 
 def migrate(conn, path):
@@ -170,13 +181,14 @@ def connect(config):
 
 
 def analysis_allowed(conn, repo):
-    row = conn.execute('SELECT host, owner, analysis_policy FROM repositories WHERE id=?', (repo,)).fetchone()
-    if row is None:
+    """호스트 범위가 전체면 허용, 선택이면 선택한 저장소만, 그 외(없음·삭제된 호스트)는 거부."""
+    row = conn.execute('SELECT r.analysis_policy, h.analysis_scope FROM repositories r '
+                       'LEFT JOIN github_hosts h ON h.host=r.host WHERE r.id=?', (repo,)).fetchone()
+    if row is None or row['analysis_scope'] is None:
         return False
-    if row['analysis_policy'] != 'inherit':
-        return row['analysis_policy'] == 'allow'
-    if row['host'] == 'github.com':
-        policy = conn.execute('SELECT policy FROM organization_policies WHERE owner=?', (row['owner'],)).fetchone()
-    else:
-        policy = conn.execute('SELECT policy FROM host_organization_policies WHERE host=? AND owner=?', (row['host'], row['owner'])).fetchone()
-    return policy is not None and policy['policy'] == 'allow'
+    return row['analysis_scope'] == 'all' or (row['analysis_scope'] == 'selected' and row['analysis_policy'] == 'allow')
+
+
+def analysis_scope(conn, host):
+    row = conn.execute('SELECT analysis_scope FROM github_hosts WHERE host=?', (host,)).fetchone()
+    return row[0] if row else 'none'

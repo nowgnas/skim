@@ -36,18 +36,20 @@ class ScaffoldTests(unittest.TestCase):
         config = Config.load()
         with contextlib.closing(connect(config)) as conn:
             self.assertFalse(analysis_allowed(conn, 1))
-        self.assertEqual(self.cli('analysis', 'allow', '--org', 'org')[0], 0)
+        # 호스트 범위 '전체'는 개별 선택 없이 허용하고, '안 함'으로 돌리면 선택도 비운다.
+        self.assertEqual(self.cli('analysis', 'scope', 'all')[0], 0)
         self.assertIn('inherit\t1', self.cli('repo', 'list')[1])
-        self.assertEqual(self.cli('analysis', 'deny', 'org/repo')[0], 0)
-        self.assertIn('deny\t0', self.cli('repo', 'list')[1])
-        self.cli('repo', 'add', 'ORG/REPO')
-        self.assertIn('deny\t0', self.cli('repo', 'list')[1])
-        self.cli('analysis', 'reset', 'Org/Repo')
-        self.assertIn('inherit\t1', self.cli('repo', 'list')[1])
-        self.cli('analysis', 'deny', '--org', 'org')
+        self.assertEqual(self.cli('analysis', 'allow', 'org/repo')[0], 1)
+        self.cli('analysis', 'scope', 'none')
         self.assertIn('inherit\t0', self.cli('repo', 'list')[1])
+        # 저장소를 고르면 '선택한 저장소만' 범위가 켜진다.
         self.cli('analysis', 'allow', 'Org/Repo')
         self.assertIn('allow\t1', self.cli('repo', 'list')[1])
+        self.cli('repo', 'add', 'ORG/REPO')
+        self.assertIn('allow\t1', self.cli('repo', 'list')[1])
+        self.assertEqual(self.cli('analysis', 'deny', 'org/repo')[0], 0)
+        self.assertIn('inherit\t0', self.cli('repo', 'list')[1])
+        self.cli('analysis', 'allow', 'Org/Repo')
         self.assertEqual(self.cli('repo', 'remove', 'org/repo')[0], 0)
         self.assertNotIn('Repo', self.cli('repo', 'list')[1])
         self.assertEqual(self.cli('analysis', 'allow', 'org/missing')[0], 1)
@@ -128,7 +130,7 @@ class ScaffoldTests(unittest.TestCase):
             conn.execute("INSERT INTO analyses(snapshot_id,input_hash,provider,model,cli_version,"
                          "prompt_version,schema_version,status) VALUES(1,'i','fake','fake','1','1','1','completed')")
         self.assertNotIn('outside', self.cli('repo', 'list')[1])
-        self.assertEqual(self.cli('analysis', 'allow', '--org', 'org')[0], 0)
+        self.assertEqual(self.cli('analysis', 'scope', 'all')[0], 0)
         with contextlib.closing(connect(config)) as conn:
             self.assertTrue(analysis_allowed(conn, repo_id))
         self.cli('repo', 'add', 'org/outside')
@@ -168,8 +170,12 @@ class ScaffoldTests(unittest.TestCase):
         self.cli('repo', 'add', 'a/b')
         code, output = self.cli('analysis', 'allow', 'a/b')
         self.assertEqual(code, 0)
-        self.assertLess(output.index('전송될 수 있습니다'), output.index('정책을 변경'))
-        self.assertEqual(self.cli('analysis', 'allow', '--org', 'bad-')[0], 1)
+        self.assertLess(output.index('전송될 수 있습니다'), output.index('목록을 변경'))
+        code, output = self.cli('analysis', 'scope', 'all')
+        self.assertLess(output.index('전송될 수 있습니다'), output.index('범위를 all로'))
+        self.assertNotIn('전송될 수 있습니다', self.cli('analysis', 'scope', 'none')[1])
+        with self.assertRaises(SystemExit):
+            self.cli('analysis', 'allow', '--org', 'org')
 
     def test_default_paths(self):
         with patch.dict(os.environ, {}, clear=True), patch('pathlib.Path.home', return_value=Path(self.temp.name)):
