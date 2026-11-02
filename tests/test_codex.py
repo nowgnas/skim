@@ -78,6 +78,12 @@ class CodexTests(unittest.TestCase):
             return subprocess.CompletedProcess(command, self.exitcode, stdout, self.stderr)
         return subprocess.CompletedProcess(command, 0, output, '')
 
+    def test_explicit_codex_binary_is_used_for_inspection_and_model_calls(self):
+        with patch.dict(os.environ, SKIM_CODEX_BIN='/demo/codex'):
+            self.adapter.probe()
+        self.assertTrue(self.calls)
+        self.assertTrue(all(command[0] == '/demo/codex' for command, _ in self.calls))
+
     def test_init_explicit_idempotent_and_no_credential_reads(self):
         with patch.object(Path, 'read_text', side_effect=AssertionError('인증 읽기 금지')):
             self.adapter.init_home()

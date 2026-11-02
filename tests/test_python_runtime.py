@@ -87,6 +87,23 @@ class PythonRuntimeTests(unittest.TestCase):
                     env={'PATH': str(self.bin), 'HOME': str(self.bin), **env},
                     capture_output=True, text=True)
 
+    def test_wrapper_passes_only_codex_binary_without_changing_path(self):
+        tools = self.bin / '.local/share/skim-tools/node_modules/.bin'
+        tools.mkdir(parents=True)
+        codex = tools / 'codex'
+        codex.write_text('#!/bin/sh\nexit 0\n')
+        codex.chmod(0o755)
+        python = self.bin / 'demo-python'
+        python.write_text('#!/bin/sh\nif [ "$1" = "-P" ]; then\n  printf "%s\\n%s\\n" "$PATH" "$SKIM_CODEX_BIN"\nfi\n')
+        python.chmod(0o755)
+        for tool in ('dirname', 'readlink'):
+            (self.bin / tool).symlink_to(shutil.which(tool))
+        result = subprocess.run([shutil.which('bash'), str(ROOT / 'bin/skim'), '--help'],
+                                env={'HOME': str(self.bin), 'PATH': str(self.bin), 'SKIM_PYTHON': str(python)},
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), [str(self.bin), str(codex)])
+
     def test_wrappers_exit_2_without_python(self):
         for result in self.wrappers():
             self.assertEqual(result.returncode, 2)
