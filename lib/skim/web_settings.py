@@ -18,7 +18,7 @@ from .hosts import hostname, registered, authenticated
 from .web_jobs import JOB_PATHS, job_box, script
 from .repos import web_repository, add_repository, remove_repository
 
-POST_PATHS = {'/hosts/check', '/hosts/add', '/hosts/remove', '/repos/add', '/repos/remove', '/repos/load', '/repos/scope', '/settings/model', '/home/team'} | JOB_PATHS
+POST_PATHS = {'/hosts/check', '/hosts/add', '/hosts/remove', '/repos/add', '/repos/remove', '/repos/load', '/repos/scope', '/settings/model'} | JOB_PATHS
 WARNING = ('허용하면 PR 코드, diff와 제목, 설명이 Codex CLI를 통해 모델 서비스로 전송됩니다. '
            '민감 정보 제외는 완전하지 않으며 서비스의 전송, 보존 정책이 적용됩니다.')
 
@@ -401,19 +401,7 @@ def fields(data, required, optional=()):
     return {key: value[0] for key, value in data.items()}
 
 
-def mutate(server, path, data, strict_lookup=False):
-    if path == '/home/team':
-        filter_keys = ('repo', 'importance', 'status', 'review', 'pr_q')
-        d = fields(data, ('host',), ('team',) + filter_keys)
-        if any(len(d.get(key, '')) > 200 for key in filter_keys):
-            raise ValueError('필터를 확인하세요')
-        team = d.get('team', '')
-        request = {'host': [d['host']], 'mode': ['team'], 'team': [team]}
-        mutate(server, '/repos/load', request, strict_lookup=True)
-        params = [(key, d[key]) for key in filter_keys if d.get(key)]
-        if team:
-            params.append(('team', d['host'] + '|' + team))
-        return '/?' + urlencode(params) if params else '/'
+def mutate(server, path, data):
     if path == '/hosts/check':
         d = fields(data, ('host',))
         with closing(connect(server.config)) as conn:
@@ -464,10 +452,7 @@ def mutate(server, path, data, strict_lookup=False):
                 params['team'] = team
         with closing(connect(server.config)) as conn:
             target = host + '/' + params['repository'] if parts else host + ' / ' + (team or ('내 팀 저장소' if mode == 'team' else '접근 가능한 저장소 목록'))
-            job, created = jobs.enqueue(conn, 'repos', 0, target, params=params)
-            if strict_lookup and not created and job['target'] != target:
-                from .web_jobs import Rejected
-                raise Rejected('다른 저장소 조회가 진행 중입니다. 완료 후 다시 요청하세요.', 409)
+            jobs.enqueue(conn, 'repos', 0, target, params=params)
         return '/repos'
     if path == '/settings/model':
         d = fields(data, ('model',))

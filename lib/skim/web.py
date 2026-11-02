@@ -18,7 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlsplit
 
-from .db import connect
+from .db import analysis_allowed, connect
 from .web_settings import POST_PATHS, RepoLookup, render, mutate
 from . import web_jobs
 from .jobs import worker, get as get_job
@@ -37,6 +37,71 @@ LABELS = {'high': '높음', 'mid': '보통', 'low': '낮음', 'unanalyzed': '미
 
 def label(value):
     return LABELS.get(value, value)
+
+
+# 카드에는 내부 플래그 이름 대신 읽을 수 있는 말을 쓴다. 상세 화면의 원래 표기는 그대로 둔다.
+FLAG_LABELS = {'auth': '인증', 'payments': '결제', 'db_schema_migration': 'DB 스키마', 'config': '설정',
+               'ci_workflow': 'CI 워크플로', 'dependency': '의존성', 'secrets': '민감 정보',
+               'logic_without_tests': '테스트 변경 없음', 'install_script': '설치 스크립트'}
+
+
+def file_anchor(path):
+    return 'file-' + hashlib.sha256(path.encode()).hexdigest()[:12]
+
+
+def file_rows(pr):
+    """변경 단위를 파일로 묶는다. 파일 중요도는 그 파일 단위 중 가장 높은 값이다."""
+    files = {}
+    for unit in pr['units']:
+        item = pr['items'].get(unit['change_id'])
+        row = files.setdefault(unit['file_path'], dict(path=unit['file_path'], rank=0, reason='', rule=set(), model=set()))
+        row['rule'].update(unit.get('candidates', []))
+        if not item:
+            continue
+        rank = RANK.get(item['importance'], 0)
+        if rank > row['rank'] or (rank == row['rank'] and not row['reason']):
+            row['rank'], row['reason'] = rank, item.get('reason') or ''
+        row['model'].update(item.get('risk_flags', []))
+    # 규칙 후보는 모델이 낮게 봐도 앞에 둔다.
+    return sorted(files.values(), key=lambda r: (-r['rank'], -bool(r['rule']), r['path']))
+
+
+def file_counts(rows):
+    counts = {'high': 0, 'mid': 0, 'low': 0, 'unanalyzed': 0}
+    for row in rows:
+        counts[{3: 'high', 2: 'mid', 1: 'low'}.get(row['rank'], 'unanalyzed')] += 1
+    return counts
+
+
+def file_card(pr):
+    rows = file_rows(pr)
+    # 낮음·미분석 파일은 규칙 후보가 없으면 숫자로만 보여준다.
+    top = [r for r in rows if r['rank'] >= 2 or r['rule']][:3]
+    counts = file_counts(rows)
+    body = '<div class="pr-files"><h3>먼저 볼 파일</h3>'
+    if not top:
+        body += '<p class="muted">높음, 보통 파일이 없습니다.</p>' if pr['items'] else '<p class="muted">분석 전입니다.</p>'
+    for row in top:
+        level = {3: 'high', 2: 'mid', 1: 'low'}.get(row['rank'], 'unanalyzed')
+        name = '확인' if level == 'unanalyzed' else label(level)
+        href = f'/pr/{int(pr["id"])}?' + urlencode([('unit_q', row['path'])]) + '#' + file_anchor(row['path'])
+        notes = ([row['reason']] if row['reason'] else []) + (
+            ['규칙 후보: ' + ', '.join(FLAG_LABELS.get(f, f) for f in sorted(row['rule']))] if row['rule'] else []) + (
+            ['모델 판단: ' + ', '.join(FLAG_LABELS.get(f, f) for f in sorted(row['model']))] if row['model'] else [])
+        body += (f'<a class="file-row" href="{esc(href)}"><span class="badge {level}">{name}</span>'
+                 f'<span class="file-path">{esc(row["path"])}</span><span class="file-note">' + ''.join(f'<span>{esc(n)}</span>' for n in notes) + '</span></a>')
+    rest = len(rows) - len(top)
+    # CSP가 style 속성을 막으므로 비율을 20칸으로 나눠 그린다. 0이 아닌 값은 최소 한 칸을 받는다.
+    cells = []
+    for key in ('high', 'mid', 'low', 'unanalyzed'):
+        if counts[key]:
+            cells += [key] * max(1, round(20 * counts[key] / len(rows)))
+    bar = ''.join(f'<span class="seg {key}"></span>' for key in cells[:20])
+    body += (f'<p class="file-summary"><span class="dist" role="img" aria-label="파일 {len(rows)}개 중요도 분포">{bar}</span>'
+             f'<span>파일 {len(rows)}개' + (f' (외 {rest}개)' if rest and top else '') + '</span>'
+             + ''.join(f'<span>{label(k)} {counts[k]}</span>' for k in ('high', 'mid', 'low', 'unanalyzed') if counts[k] or k != 'unanalyzed')
+             + '</p></div>') if rows else '</div>'
+    return body
 
 
 def constant_equal(left, right):
@@ -133,7 +198,7 @@ def read_diff(config, snapshot):
 
 def load_prs(conn, config):
     rows = []
-    for raw in conn.execute("SELECT p.*,r.host,r.owner,r.name,EXISTS(SELECT 1 FROM pr_sources WHERE pr_id=p.id AND source='review_request') AS review FROM pull_requests p JOIN repositories r ON r.id=p.repo_id WHERE p.state='open' AND r.host IN (SELECT host FROM github_hosts)"):
+    for raw in conn.execute("SELECT p.*,r.host,r.owner,r.name,r.tracked,EXISTS(SELECT 1 FROM pr_sources WHERE pr_id=p.id AND source='review_request') AS review FROM pull_requests p JOIN repositories r ON r.id=p.repo_id WHERE p.state='open' AND r.host IN (SELECT host FROM github_hosts)"):
         pr = dict(raw)
         snapshot = conn.execute('SELECT * FROM snapshots WHERE pr_id=? ORDER BY id DESC LIMIT 1', (pr['id'],)).fetchone()
         analysis = conn.execute('SELECT a.*,s.head_sha,s.base_sha FROM analyses a JOIN snapshots s ON s.id=a.snapshot_id WHERE s.pr_id=? ORDER BY s.id DESC,a.id DESC LIMIT 1', (pr['id'],)).fetchone()
@@ -154,6 +219,7 @@ def load_prs(conn, config):
         pr['model_flags'] = sorted({flag for item in items.values() for flag in item.get('risk_flags', [])})
         pr['flags'] = sorted(set(pr['rule_flags']) | set(pr['model_flags']))
         pr['unanalysed'] = not units or any(u['change_id'] not in items for u in units)
+        pr['allowed'] = analysis_allowed(conn, pr['repo_id'])
         rows.append(pr)
     return sorted(rows, key=lambda p: (-bool(p['flags']), -p['unanalysed'], -RANK.get(p['importance'], 0), -p['id']))
 
@@ -209,74 +275,40 @@ def list_controls(items, query, prefix, label, text, search_form=True):
     return filtered[(number - 1) * 20:number * 20], controls, navigation
 
 
-def home_team_controls(conn, csrf, lookup, offline, query):
-    from .web_settings import form, host_field
-    host, mode, truncated, loaded, items, teams, selected = lookup.snapshot(with_teams=True) if lookup else ('github.com', 'all', False, False, [], [], '')
-    requested = query.get('team', [''])[0]
-    key = host + '|' + selected if mode == 'team' and selected else ''
-    requested_target = requested.replace('|', ' / ', 1)
-    requested_job = conn.execute("SELECT * FROM jobs WHERE type='repos' AND target=? ORDER BY id DESC LIMIT 1", (requested_target,)).fetchone() if requested else None
-    ready = bool(requested and loaded and requested == key and requested_job and requested_job['status'] == 'completed')
-    filters = [(name, query[name][0][:200]) for name in ('repo', 'importance', 'status', 'review', 'pr_q') if query.get(name, [''])[0]]
-    hidden = ''.join(f'<input type="hidden" name="{esc(name)}" value="{esc(value)}">' for name, value in filters)
-    clear_link = '/?' + urlencode(filters) if filters else '/'
-    body = '<section class="home-team" aria-labelledby="home-team-title"><h2 id="home-team-title">팀 PR만 보기</h2>'
-    if offline:
-        body += '<p class="muted">오프라인에서는 팀 저장소를 조회할 수 없습니다.</p>'
-    else:
-        body += '<p class="muted">호스트의 소속 팀을 불러온 뒤 팀을 선택하세요.</p>'
-        body += form('/home/team', csrf, hidden + host_field(conn, '팀 조회', host) + '<button>내 팀 목록 불러오기</button>')
-        if mode == 'team' and loaded and teams:
-            options = '<option value="">팀을 선택하세요</option>'
-            options += ''.join('<option value="' + esc(team) + '"' + (' selected' if team == selected else '') + '>' + esc(team) + '</option>' for team in sorted(teams, key=str.casefold))
-            body += form('/home/team', csrf, hidden + '<input type="hidden" name="host" value="' + esc(host) + '"><label>소속 팀<select name="team" required>' + options + '</select></label><button>선택한 팀 보기</button>')
-    latest_job = web_jobs.jobs.latest(conn, 'repos')
-    body += web_jobs.job_box(requested_job or latest_job)
-    if not requested and mode == 'team' and loaded and latest_job and latest_job['status'] != 'completed':
-        body += '<p class="muted">표시된 팀 목록은 이전 조회 결과일 수 있습니다. 작업 결과를 확인하세요.</p>'
-    if requested:
-        if ready:
-            body += '<p>적용 중: ' + esc(host + ' / ' + selected) + ' <a href="' + esc(clear_link) + '">팀 필터 해제</a></p>'
-            if truncated:
-                body += '<p>조회 한도에 도달하여 일부 저장소만 표시합니다.</p>'
-        else:
-            message = ('선택한 팀 조회가 실패했거나 중단되었습니다. 다시 조회하세요.' if requested_job and requested_job['status'] not in ('pending', 'running', 'completed') else '선택한 팀의 조회 결과가 없습니다. 조회가 완료되면 화면을 새로고침하세요.')
-            body += '<p>' + message + '</p><p><a href="' + esc(clear_link) + '">팀 필터 해제</a></p>'
-    elif mode == 'team' and loaded and not teams:
-        body += '<p class="muted">조회된 소속 팀이 없습니다. 팀 접근 권한과 조직 SSO를 확인하세요.</p>'
-    return body + '</section>', requested, ready, host, {name.casefold() for name in items}
+# 메인 탭: 지금 볼 PR을 고르는 수치이자 필터. 탭마다 하나의 조건만 건다.
+TABS = [('', '전체', lambda pr: True),
+        ('review', '리뷰 요청', lambda pr: bool(pr['review'])),
+        ('high', '높음 파일 있음', lambda pr: pr['importance'] == 'high'),
+        ('pending', '분석 전', lambda pr: pr['status'] == 'unanalyzed' or not pr['allowed'])]
 
 
-def listing(prs, query, csrf, heading_toolbar="", team_controls=None):
-    fields = [('repo', '저장소', sorted({repository_label(p) for p in prs})),
-              ('importance', '중요도', ['high', 'mid', 'low', 'unanalyzed']),
-              ('status', '상태', ['completed', 'partial', 'failed', 'blocked', 'deferred', 'unanalyzed', 'stale']),
-              ('review', '리뷰 요청', ['1'])]
-    content = ('<div class="heading home-heading"><div><p class="eyebrow">PULL REQUESTS</p><h1>PR 리뷰</h1>'
-               '<p class="home-description">연결한 저장소의 열린 PR과 분석 결과를 확인하세요.</p></div>' + heading_toolbar + '</div>'
-               '<section class="home-results" aria-labelledby="pr-list-title"><div class="section-heading"><div>'
-               '<h2 id="pr-list-title">열린 PR</h2><p class="muted">필터와 검색으로 살펴볼 변경을 찾아보세요.</p></div></div>'
-               + (team_controls[0] if team_controls else '') + '<form class="filters pr-filters" method="get">')
-    team = query.get('team', [''])[0]
-    if team:
-        content += f'<input type="hidden" name="team" value="{esc(team)}">'
-    # 검색어와 필터를 한 번에 제출해야 바꾼 선택이 검색에서 빠지지 않는다.
-    content += ('<label class="pr-search">PR 검색<input type="search" name="pr_q" value="' + esc(query.get('pr_q', [''])[0][:200])
-                + '" maxlength="200" placeholder="제목, 저장소, 작성자"></label>')
-    for name, title, values in fields:
-        content += f'<label><span class="sr-only">{title}</span><select name="{name}"><option value="">{title}: 전체</option>'
-        for value in values:
-            selected = ' selected' if query.get(name, [''])[0] == value else ''
-            content += f'<option value="{esc(value)}"{selected}>{esc(label(value) if name != "repo" else value)}</option>'
-        content += '</select></label>'
-    reset = '/' + ('?' + urlencode([('team', team)]) if team else '')
-    filtering = any(query.get(name, [''])[0] for name in ('pr_q', 'repo', 'importance', 'status', 'review'))
-    content += '<button class="btn secondary">적용</button>' + (f'<a class="btn ghost" href="{esc(reset)}">초기화</a>' if filtering else '') + '</form>'
+def listing(prs, query, csrf, heading_toolbar=""):
+    # 메인은 내가 연결(관리)한 저장소의 PR만 다룬다. 다른 저장소의 리뷰 요청은 상세 링크로만 열린다.
+    prs = sorted((pr for pr in prs if pr.get('tracked', 1)), key=lambda pr: not pr['review'])
     has_prs = bool(prs)
-    if team_controls and team_controls[1]:
-        _, _, ready, host, items = team_controls
-        prs = [pr for pr in prs if ready and pr.get('host', 'github.com').casefold() == host.casefold()
-               and (pr['owner'] + '/' + pr['name']).casefold() in items]
+    repos = sorted({repository_label(p) for p in prs})
+    content = ('<div class="heading home-heading"><div><h1>PR 리뷰</h1>'
+               '<p class="home-description">관리하는 저장소에 올라온 PR에서 먼저 볼 파일을 보여줍니다.</p></div>' + heading_toolbar + '</div>'
+               '<section class="home-results" aria-labelledby="pr-list-title"><h2 id="pr-list-title" class="sr-only">열린 PR</h2>')
+    # 검색어와 저장소는 한 폼으로 제출하고, 탭 선택은 숨은 값으로 유지한다.
+    tab = query.get('tab', [''])[0] if query.get('tab', [''])[0] in {key for key, _, _ in TABS} else ''
+    content += '<form class="filters pr-filters" method="get">' + (f'<input type="hidden" name="tab" value="{tab}">' if tab else '')
+    content += ('<label class="pr-search"><span class="sr-only">PR 검색</span><input type="search" name="pr_q" value="' + esc(query.get('pr_q', [''])[0][:200])
+                + '" maxlength="200" placeholder="제목, 저장소, 작성자로 검색"></label>')
+    if len(repos) > 1:
+        content += '<label><span class="sr-only">저장소</span><select name="repo"><option value="">모든 저장소</option>' + ''.join(
+            f'<option value="{esc(r)}"' + (' selected' if query.get('repo', [''])[0] == r else '') + f'>{esc(r)}</option>' for r in repos) + '</select></label>'
+    filtering = any(query.get(name, [''])[0] for name in ('pr_q', 'repo', 'importance', 'status', 'review', 'tab'))
+    content += '<button class="btn secondary">검색</button>' + ('<a class="btn ghost" href="/">초기화</a>' if filtering else '') + '</form>'
+    # 탭 수치는 검색·저장소 조건을 반영한 뒤 센다.
+    term = query.get('pr_q', [''])[0][:200].casefold()
+    base = [pr for pr in prs if (not query.get('repo', [''])[0] or repository_label(pr) == query['repo'][0])
+            and (not term or term in ' '.join([repository_label(pr), str(pr['number']), pr['title'] or '', pr['author'] or '']).casefold())]
+    keep = [(k, query[k][0]) for k in ('pr_q', 'repo') if query.get(k, [''])[0]]
+    content += '<nav class="pr-tabs" aria-label="PR 보기">' + ''.join(
+        f'<a href="/?{esc(urlencode(keep + ([("tab", key)] if key else [])))}"' + (' aria-current="page"' if key == tab else '')
+        + f'><span>{title}</span><strong>{sum(map(test, base))}</strong></a>' for key, title, test in TABS) + '</nav>'
+    prs = [pr for pr in prs if next(test for key, _, test in TABS if key == tab)(pr)]
     prs = [pr for pr in prs if all(
         not query.get(key, [''])[0] or query[key][0] == value
         or (key == 'status' and query[key][0] == 'stale' and pr['stale'])
@@ -285,7 +317,7 @@ def listing(prs, query, csrf, heading_toolbar="", team_controls=None):
     prs, controls, navigation = list_controls(prs, query, 'pr', 'PR', lambda p: ' '.join([repository_label(p), str(p['number']), p['title'] or '', p['author'] or '', (p['analysis']['intent'] or '') if p['analysis'] else '']), search_form=False)
     content += controls
     if has_prs and not prs:
-        content += f'<p class="empty">조건에 맞는 PR이 없습니다. <a href="{esc(reset)}">필터 초기화</a></p>'
+        content += '<p class="empty">조건에 맞는 PR이 없습니다. <a href="/">전체 보기</a></p>'
     collected = {pr['snapshot']['collected_at'] if pr['snapshot'] else '대기' for pr in prs}
     shared_collection = len(collected) == 1
     analyzed = {pr['analysis']['created_at'] if pr['analysis'] else '대기' for pr in prs}
@@ -297,10 +329,20 @@ def listing(prs, query, csrf, heading_toolbar="", team_controls=None):
     for pr in prs:
         values = dict(repo=repository_label(pr), importance=pr['importance'], status=pr['status'], review=str(pr['review']))
         a, s = pr['analysis'], pr['snapshot']
+        state = ''
+        if not pr['allowed']:
+            target = urlencode([('scope_host', pr.get('host', 'github.com')), ('select_q', pr['owner'] + '/' + pr['name'])])
+            state = f'<p class="pr-state"><span>분석 허용 안 됨</span><a href="/repos?{esc(target)}#analysis-scope">분석 허용 범위 열기</a></p>'
+        elif pr['status'] in ('failed', 'blocked', 'deferred') or pr['stale']:
+            state = '<p class="pr-state"><span>' + esc(label('stale' if pr['stale'] else pr['status'])) + f'</span><a href="/pr/{pr["id"]}">상세에서 다시 분석</a></p>'
+        elif pr['status'] == 'unanalyzed':
+            state = f'<p class="pr-state"><span>분석 대기</span><a href="/pr/{pr["id"]}">상세에서 분석 요청</a></p>'
         content += ('<article class="issue-row"><div class="row-content">' + f'<h2><a href="/pr/{pr["id"]}">{esc(pr["title"])}</a></h2>'
-                    + meta(values['repo'] + ' #' + str(pr['number']), pr['author'])
-                    + f'<p class="issue-intent">{esc(a["intent"] if a and a["intent"] else "의도 미분석")}</p><p class="meta">{badges(pr)}</p>'
-                    + '<p class="meta"><span class="badge">' + esc(label(pr['status'])) + '</span></p>' + meta(*([] if shared_collection else ['수집 ' + (s['collected_at'] if s else '대기')]),
+                    + meta(values['repo'] + ' #' + str(pr['number']), pr['author'], *(['draft'] if pr['draft'] else []))
+                    + ('<p class="meta"><span class="badge review">리뷰 요청 받음</span></p>' if pr['review'] else '')
+                    + f'<p class="issue-intent">{esc(a["intent"] if a and a["intent"] else "변경 의도 미분석")}</p>'
+                    + state + file_card(pr)
+                    + meta(*([] if shared_collection else ['수집 ' + (s['collected_at'] if s else '대기')]),
                            *([] if shared_analysis else ['분석 ' + (a['created_at'] if a else '대기')])) + '</div></article>')
     return content + '</div>' + navigation + ('<div class="empty"><p><strong>아직 수집된 열린 PR이 없습니다.</strong></p>'
                                               '<p>저장소를 연결한 뒤 수집하면 이곳에 표시됩니다.</p>'
@@ -386,12 +428,16 @@ def detail(pr, query, config, offline=False, analysis_panel=""):
     has_units = bool(units)
     units, controls, navigation = list_controls(units, query, 'unit', '변경 단위', lambda u: ' '.join([u['file_path'], u['change_id'], u.get('diff', '')]))
     content += controls
+    anchored = set()
     for unit in units:
         item = pr['items'].get(unit['change_id'])
         flags = unit.get('candidates', [])
-        opened = bool(flags) or not item or item['importance'] == 'high'
+        # 메인 카드의 파일 링크가 도착할 위치. 파일의 첫 변경 단위에만 붙이고 링크로 왔으면 펼친다.
+        anchor = '' if unit['file_path'] in anchored else f'<span class="file-anchor" id="{file_anchor(unit["file_path"])}"></span>'
+        anchored.add(unit['file_path'])
+        opened = bool(flags) or not item or item['importance'] == 'high' or (anchor and query.get('unit_q', [''])[0] == unit['file_path'])
         importance = label(item['importance']) if item else '미분석'
-        content += (f'<details{" open" if opened else ""}><summary><span class="meta"><span>{esc(unit["file_path"])}</span><span>{esc(unit["change_id"])}</span><span>{esc(importance)}</span>'
+        content += (f'{anchor}<details{" open" if opened else ""}><summary><span class="meta"><span>{esc(unit["file_path"])}</span><span>{esc(unit["change_id"])}</span><span>{esc(importance)}</span>'
                     + ('<span>규칙 기반 후보</span>' if flags else '') + '</span></summary>'
                     f'<p>{esc(item["reason"] if item else unit.get("exclusion_reason") or unit.get("omission_reason") or "분석되지 않은 변경입니다")}</p>'
                     f'<p>규칙 후보: {esc(", ".join(RULE_LABELS.get(flag, flag) for flag in flags) or "없음")}</p>'
@@ -478,8 +524,7 @@ class Handler(BaseHTTPRequestHandler):
                 prs = load_prs(conn, self.server.config)
                 if url.path == '/':
                     query = parse_qs(url.query)
-                    team_controls = home_team_controls(conn, csrf, getattr(self.server, 'repo_lookup', None), offline, query)
-                    body = listing(prs, query, csrf, web_jobs.collect_panel(conn, csrf, offline, compact=True), team_controls) + web_jobs.script()
+                    body = listing(prs, query, csrf, web_jobs.collect_panel(conn, csrf, offline, compact=True)) + web_jobs.script()
                 else:
                     match = re.fullmatch(r'/pr/([1-9][0-9]*)', url.path)
                     pr = next((p for p in prs if match and p['id'] == int(match[1])), None)

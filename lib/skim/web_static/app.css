@@ -86,10 +86,6 @@ article>h2:first-child{margin-top:0}
 article p:last-child{margin-bottom:0}
 .home-results,.repo-section{padding:28px;margin:0 0 20px}
 .home-results .list,.repo-section .list{min-width:0}
-.home-team{margin:0 0 20px;padding:20px;border-radius:var(--radius-box);background:var(--surface-sub)}
-.home-team h2{font-size:16px;margin:0 0 4px}
-.home-team p{margin:4px 0;color:var(--muted);font-size:14px}
-.home-team .action-form{display:inline-flex;margin:12px 12px 4px 0}
 .host-management summary{font-size:17px}
 .host-management h2{margin-top:20px}
 
@@ -119,7 +115,6 @@ select{appearance:none;padding-right:34px;background-image:var(--chevron);backgr
 input:hover,select:hover{background-color:color-mix(in srgb,var(--fill) 85%,var(--text) 6%)}
 /* 회색 페이지 배경 위에서는 흰 입력창, 카드 안에서는 회색 채움 */
 main>:is(form,section,div)>:is(form,label) :is(input,select),main>form :is(input,select){background-color:var(--surface)}
-:is(article,details,.home-results,.repo-section,.status-section,.home-team,.policy-add,.repository-policy,.list-row,.issue-row) :is(input,select){background-color:var(--fill)}
 input:focus,select:focus{outline:none;border-color:var(--accent);background-color:var(--surface)}
 input[type=checkbox],input[type=radio]{width:20px;height:20px;margin:1px 0;padding:0;accent-color:var(--accent);flex-shrink:0;border-radius:6px}
 label:has(>input[type=checkbox]){flex-direction:row;align-items:center;gap:10px;color:var(--text-sub);font-size:14px;align-self:center}
@@ -314,7 +309,6 @@ pre:empty{display:none}
   .policy-row .row-content{flex-basis:100%}
   .policy-add .consent{flex-basis:100%}
   .repo-discovery>.action-form label{min-width:0;flex:1 1 100%}
-  .home-team .action-form{display:flex;width:100%;margin:8px 0}
   .segments{display:flex;width:100%}
   .segments a,.segments .btn{flex:1}
   .btn{max-width:100%}
@@ -359,3 +353,40 @@ code{font:13px "SF Mono",ui-monospace,Menlo,monospace;padding:1px 6px;border-rad
 .scope-repo small{padding:1px 6px;border-radius:6px;background:var(--fill);color:var(--muted);font-size:11px;font-weight:600}
 /* '선택한 저장소만'일 때만 저장소 목록을 보여준다 */
 @supports selector(:has(*)){.action-form:not(:has(input[name=scope][value=selected]:checked)) .scope-repos{display:none}}
+
+/* 메인: 검토 현황 수치와 PR별 먼저 볼 파일 */
+.home-results .issue-row{align-items:flex-start}
+.badge.review{background:var(--accent-weak);color:var(--accent-text)}
+.pr-state{display:flex;gap:10px;margin:6px 0;font-size:13px;color:var(--warn)}
+.file-note{display:flex;gap:10px}
+.file-anchor{display:block;scroll-margin-top:80px}
+.pr-files{margin:12px 0 4px;padding:12px;border-radius:var(--radius-ctl);background:var(--surface-sub)}
+.pr-files h3{margin:0 0 8px;font-size:13px;color:var(--muted);font-weight:600}
+.file-row{display:grid;grid-template-columns:56px minmax(0,auto) minmax(0,1fr);align-items:center;gap:10px;padding:6px 8px;border-radius:10px;color:var(--text);font-weight:400}
+.file-row:hover{background:var(--surface);text-decoration:none}
+.file-row .badge{justify-content:center}
+.file-path{font:13px "SF Mono",ui-monospace,Menlo,monospace;overflow-wrap:anywhere}
+.file-note{font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.file-summary{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;margin:8px 0 0;font-size:13px;color:var(--muted)}
+.dist{display:flex;gap:2px;width:120px;flex:none}
+.dist .seg{flex:1;height:6px;border-radius:2px;background:var(--fill)}
+.dist .seg.high{background:var(--danger)}.dist .seg.mid{background:var(--warn)}.dist .seg.low{background:var(--ok)}.dist .seg.unanalyzed{background:var(--grey-300)}
+@media(max-width:640px){.file-row{grid-template-columns:52px minmax(0,1fr)}.file-note{grid-column:1 / -1;white-space:normal}}
+/* 메인 카드는 세로 흐름으로 쌓는다(이전 2열 격자 배치를 덮어씀). */
+@media(min-width:900px){.home-results .issue-row .row-content{display:block}.home-results .issue-row .row-content>*{grid-column:auto;grid-row:auto}}
+.home-results .issue-row .meta{justify-content:flex-start;margin:2px 0}
+.pr-files{max-width:none}
+.dist{gap:0;overflow:hidden;border-radius:3px}
+.dist .seg{border-radius:0}
+
+/* 메인 탭: 수치를 겸한 보기 전환 */
+.pr-tabs{display:flex;flex-wrap:wrap;gap:4px;margin:4px 0 16px;padding:4px;border-radius:var(--radius-ctl);background:var(--fill);width:fit-content;max-width:100%}
+.pr-tabs a{display:flex;align-items:center;gap:8px;height:38px;padding:0 14px;border-radius:9px;color:var(--muted);font-size:14px;font-weight:600}
+.pr-tabs a:hover{text-decoration:none;color:var(--text)}
+.pr-tabs a strong{min-width:22px;padding:1px 7px;border-radius:999px;background:var(--surface);color:var(--text);font-size:13px;text-align:center}
+.pr-tabs a[aria-current]{background:var(--surface);color:var(--text);box-shadow:0 1px 3px rgba(0,0,0,.08)}
+.pr-tabs a[aria-current] strong{background:var(--accent);color:#fff}
+.filters.pr-filters{flex-wrap:nowrap}
+.filters.pr-filters .pr-search{flex:1 1 auto}
+@media(max-width:640px){.filters.pr-filters{flex-wrap:wrap}.pr-tabs{width:100%}.pr-tabs a{flex:1;justify-content:center;padding:0 8px}}
+.filters.pr-filters input[type=search]{appearance:none;-webkit-appearance:none;background-color:var(--fill)}
