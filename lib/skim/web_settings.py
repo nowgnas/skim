@@ -1,5 +1,6 @@
 """한국어 설정 화면과 읽기 전용 저장소 조회 워커."""
 from contextlib import closing
+from pathlib import Path
 from datetime import datetime, timezone
 import json
 import os
@@ -159,6 +160,29 @@ def preserve_list_state(body, path, query):
     return re.sub(r'(<form class="action-form"[^>]*>)', lambda m: m[1] + field, body)
 
 
+def model_choices():
+    """Codex가 저장한 표시 가능 모델만 선택지로 사용한다."""
+    root = Path(os.environ.get('CODEX_HOME', '~/.codex')).expanduser()
+    path = root / 'models_cache.json'
+    try:
+        if path.stat().st_size > 2 * 1024 * 1024:
+            return []
+        data = json.loads(path.read_text(encoding='utf-8'))
+        models = data.get('models') if isinstance(data, dict) else None
+        if not isinstance(models, list):
+            return []
+        choices = []
+        for row in models[:500]:
+            if not isinstance(row, dict):
+                continue
+            name = row.get('slug')
+            if row.get('visibility') == 'list' and valid_model(name) and len(name) <= 64 and name not in choices:
+                choices.append(name)
+        return choices
+    except (OSError, ValueError, UnicodeError):
+        return []
+
+
 def render(server, conn, csrf, path, query=None):
     from .web import esc, meta, list_controls
     query = query or {}
@@ -191,6 +215,21 @@ def render(server, conn, csrf, path, query=None):
     settings = json.loads((server.config.config_dir / 'config.json').read_text())
     model = settings.get('codex_model', '')
     body = '<h1>설정과 분석 허용</h1><p>' + WARNING + '</p><p>기본 꺼짐. 저장소의 명시적 허용, 거부는 조직 정책보다 우선합니다. 조직 허용은 해당 조직의 모든 저장소에 적용됩니다.</p>'
+    body += '<h2>모델 설정</h2>' + meta('파일 값: ' + (model or '미설정'), '실제 적용: ' + (Config.parse_codex_model(settings) or '자동 감지'))
+    if 'SKIM_CODEX_MODEL' in os.environ:
+        body += '<p>SKIM_CODEX_MODEL 환경변수가 파일 설정보다 우선합니다.</p>'
+    body += '<p>다음 분석부터 적용됩니다. 모델 변경 후 격리 검증이 일치하지 않으면 분석이 차단됩니다. skim doctor --probe로 재검증하세요.</p>'
+    choices = model_choices()
+    if not choices:
+        body += '<p class="muted">모델 목록을 불러올 수 없습니다. Codex 로그인과 모델 목록을 확인하세요.</p>'
+    else:
+        body += '<p class="muted">Codex에 저장된 모델 목록입니다. 계정과 목록의 최신 상태에 따라 사용 가능 여부가 다를 수 있습니다.</p>'
+    if model and valid_model(model) and model not in choices:
+        choices.append(model)
+    options = '<option value=""' + (' selected' if not model else '') + '>자동 선택</option>'
+    options += ''.join(f'<option value="{esc(name)}"' + (' selected' if name == model else '') + f'>{esc(name)}</option>' for name in choices)
+    body += form('/settings/model', csrf, '<label>분석 모델<select name="model">' + options + '</select></label><button>모델 저장</button>', variant='primary')
+    body += '<h2>저장소 정책</h2>'
     rows = list(conn.execute('SELECT * FROM repositories ORDER BY owner,name'))
     rows, controls, navigation = list_controls(rows, query, 'policy', '저장소 정책', lambda r: r['host'] + '/' + r['owner'] + '/' + r['name'])
     body += controls + '<div class="list">'
@@ -203,11 +242,6 @@ def render(server, conn, csrf, path, query=None):
     for row in rows:
         body += policy_row(csrf, 'org', row['owner'], 'github.com', row['policy'])
     body += '</div>' + org_navigation + '<section class="policy-add"><h3>github.com 조직 추가</h3>' + policy_form(csrf, 'org', '') + '</section>' + host_field_note(conn, csrf)
-    body += '<h2>모델 설정</h2>' + meta('파일 값: ' + (model or '미설정'), '실제 적용: ' + (Config.parse_codex_model(settings) or '자동 감지'))
-    if 'SKIM_CODEX_MODEL' in os.environ:
-        body += '<p>SKIM_CODEX_MODEL 환경변수가 파일 설정보다 우선합니다.</p>'
-    body += '<p>다음 분석부터 적용됩니다. 모델 변경 후 격리 검증이 일치하지 않으면 분석이 차단됩니다. skim doctor --probe로 재검증하세요.</p>'
-    body += form('/settings/model', csrf, '<label>codex_model<input name="model" maxlength="64" value="' + esc(model) + '" required></label><button>모델 저장</button>', variant='primary')
     return preserve_list_state(body, path, query)
 
 
@@ -262,11 +296,15 @@ def mutate(server, path, data):
     if path == '/settings/model':
         d = fields(data, ('model',))
         model = d['model']
-        if not re.fullmatch(r'[A-Za-z0-9._:-]{1,64}', model) or not valid_model(model):
-            raise ValueError('모델 이름 형식을 확인하세요 (최대 64자)')
         target = server.config.config_dir / 'config.json'
         settings = json.loads(target.read_text())
-        settings['codex_model'] = model
+        previous = settings.get('codex_model')
+        if model and (not valid_model(model) or (model != previous and (len(model) > 64 or model not in model_choices()))):
+            raise ValueError('목록에서 모델을 선택하세요')
+        if model:
+            settings['codex_model'] = model
+        else:
+            settings.pop('codex_model', None)
         fd, temporary = tempfile.mkstemp(dir=target.parent, prefix='.config-')
         try:
             with os.fdopen(fd, 'w') as output:

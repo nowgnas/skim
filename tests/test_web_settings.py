@@ -3,6 +3,8 @@ from contextlib import redirect_stdout
 from dataclasses import replace
 import io
 import threading
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 from contextlib import closing
 from html.parser import HTMLParser
@@ -27,6 +29,13 @@ class SettingsTests(unittest.TestCase):
     def setUp(self):
         self.setup_http()
         self.server.repo_lookup = RepoLookup(self.config, clock=lambda: self.now)
+        model_home = tempfile.TemporaryDirectory()
+        self.addCleanup(model_home.cleanup)
+        model_env = patch.dict(os.environ, CODEX_HOME=model_home.name)
+        model_env.start()
+        self.addCleanup(model_env.stop)
+        (Path(model_home.name) / 'models_cache.json').write_text(json.dumps({'models': [
+            {'slug': name, 'visibility': 'list'} for name in ('gpt-test:1', 'gpt-test_v1:fast', 'valid-model', 'new', 'test')]}))
 
     def post(self, path, **data):
         return self.request(path, 'POST', {'csrf': self.csrf, **data})
@@ -299,13 +308,42 @@ class SettingsTests(unittest.TestCase):
                      dict(scope='org', target='org', policy='deny', unexpected='x')]:
             self.assertEqual(self.post('/settings/analysis', **data)[0], 400)
 
+    def test_model_dropdown_validates_cache_and_preserves_legacy(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, CODEX_HOME=directory):
+            cache = Path(directory) / 'models_cache.json'
+            cache.write_text(json.dumps({'models': [{'slug': 'model-one', 'visibility': 'list'},
+                                                     {'slug': 'hidden', 'visibility': 'hide'}]}))
+            target = self.config.config_dir / 'config.json'
+            settings = json.loads(target.read_text())
+            settings['codex_model'] = 'legacy-model'
+            target.write_text(json.dumps(settings))
+            body = self.request('/settings')[2]
+            self.assertIn('<select name="model"', body)
+            self.assertIn('value="model-one"', body)
+            self.assertIn('value="legacy-model" selected', body)
+            self.assertNotIn('value="hidden"', body)
+            self.assertEqual(self.post('/settings/model', model='other-model')[0], 400)
+            settings['codex_model'] = 'a' * 65
+            target.write_text(json.dumps(settings))
+            self.assertEqual(self.post('/settings/model', model='a' * 65)[0], 303)
+            self.assertEqual(self.post('/settings/model', model='model-one')[0], 303)
+            self.assertEqual(self.post('/settings/model', model='')[0], 303)
+            self.assertNotIn('codex_model', json.loads(target.read_text()))
+            cache.write_text('invalid')
+            body = self.request('/settings')[2]
+            self.assertIn('모델 목록을 불러올 수 없습니다', body)
+            self.assertEqual(self.post('/settings/model', model='model-one')[0], 400)
+
     def test_model_validation_atomic_permissions_and_override(self):
         target = self.config.config_dir / 'config.json'
         before = json.loads(target.read_text())
-        for value in ['', 'unknown', '-flag', 'a/b', 'a b', '<script>', 'x'*65]:
+        for value in ['unknown', '-flag', 'a/b', 'a b', '<script>', 'x'*65]:
             self.assertEqual(self.post('/settings/model', model=value)[0], 400, value)
             self.assertEqual(json.loads(target.read_text()), before)
-        self.assertEqual(self.post('/settings/model', model='gpt-test_v1:fast')[0], 303)
+        with patch('skim.web_settings.model_choices', return_value=['gpt-test_v1:fast']):
+            self.assertEqual(self.post('/settings/model', model='gpt-test_v1:fast')[0], 303)
         settings = json.loads(target.read_text())
         self.assertEqual(settings['codex_model'], 'gpt-test_v1:fast')
         self.assertEqual(settings['poll_interval_seconds'], before['poll_interval_seconds'])

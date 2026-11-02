@@ -39,7 +39,8 @@ def esc(value):
 
 
 def meta(*values):
-    return '<p class="meta">' + ''.join(f'<span>{esc(value)}</span>' for value in values if value not in (None, '')) + '</p>'
+    content = ''.join(f'<span>{esc(value)}</span>' for value in values if value not in (None, ''))
+    return '<p class="meta">' + content + '</p>' if content else ''
 
 
 def page(title, content, active=None):
@@ -236,7 +237,7 @@ def listing(prs, query, csrf, heading_toolbar=""):
                     + meta(values['repo'] + ' #' + str(pr['number']), pr['author'])
                     + f'<p class="issue-intent">{esc(a["intent"] if a and a["intent"] else "의도 미분석")}</p><p class="meta">{badges(pr)}</p>'
                     + '<p class="meta"><span class="badge">' + esc(pr['status']) + '</span></p>' + meta(*([] if shared_collection else ['수집 ' + (s['collected_at'] if s else '대기')]),
-                           *([] if shared_analysis else ['분석 ' + (a['created_at'] if a else '대기')])) + f'</div><a class="btn ghost sm row-actions" href="/pr/{pr["id"]}" aria-label="검토하기: {esc(pr["title"])}">검토하기</a></article>')
+                           *([] if shared_analysis else ['분석 ' + (a['created_at'] if a else '대기')])) + '</div></article>')
     return content + '</div>' + navigation + ('<p class="muted">열린 PR이 없습니다. <a href="/repos">저장소 연결</a>과 <a href="/status">상태 점검</a>, <a href="/settings">설정</a>을 확인하세요.</p>' if not has_prs else '')
 
 
@@ -273,7 +274,7 @@ def render_diff(diff):
     return '<pre class="diff">' + ''.join(lines) + '</pre>'
 
 
-def detail(pr, query, config, offline=False):
+def detail(pr, query, config, offline=False, analysis_panel=""):
     a, s = pr['analysis'], pr['snapshot']
     content = f'<p><a href="/">← PR 목록</a></p><h1>{esc(pr["title"])}</h1>'
     link = github(pr)
@@ -292,7 +293,7 @@ def detail(pr, query, config, offline=False):
         content += meta('수집 상태: ' + coverage.get('status', '대기'), coverage.get('collection_error', ''))
         content += meta('분석 ' + str(stats.get('analyzed', 0)), '제외 ' + str(stats.get('excluded', 0)), '누락 ' + str(stats.get('omitted', 0)))
         content += meta('수집 ' + s['collected_at'], '분석 ' + (a['created_at'] if a else '대기'))
-    content += '</article><nav class="toolbar segments" aria-label="변경 보기">'
+    content += '</article>' + analysis_panel + '<nav class="toolbar segments" aria-label="변경 보기">'
     for href, label, selected in [('?order=original', '원래 파일 순서', query.get('order', [''])[0] == 'original' and query.get('diff') != ['1']),
                                   ('?order=priority', '검토 우선순위', query.get('order', [''])[0] != 'original' and query.get('diff') != ['1']),
                                   ('?diff=1', '전체 diff 보기', query.get('diff', [''])[0] == '1')]:
@@ -415,8 +416,8 @@ class Handler(BaseHTTPRequestHandler):
                     if pr is None:
                         return self.reply(404, 'PR이 없습니다')
                     title = pr['title']
-                    body = (detail(pr, parse_qs(url.query), self.server.config, offline)
-                            + web_jobs.analysis_panel(conn, pr, csrf, offline) + web_jobs.script())
+                    body = (detail(pr, parse_qs(url.query), self.server.config, offline,
+                                   web_jobs.analysis_panel(conn, pr, csrf, offline)) + web_jobs.script())
         self.reply(200, page(title, body, '/' if url.path.startswith('/pr/') else url.path))
 
     def do_POST(self):
@@ -466,7 +467,8 @@ class Handler(BaseHTTPRequestHandler):
         except web_jobs.Rejected as exc:
             return self.reply(exc.status, page('요청 거부', f'<p>{esc(exc)}</p><p><a href="/status">상태</a> <a href="/">PR 목록</a></p>'))
         except (OSError, ValueError, sqlite3.Error):
-            return self.reply(400, '입력과 설정을 확인하세요. 허용하려면 모델 서비스 전송 확인 체크가 필요합니다.')
+            back = '/repos' if self.path.startswith(('/repos/', '/hosts/')) else '/settings' if self.path.startswith('/settings/') else '/status'
+            return self.reply(400, page('요청 실패', '<h1>요청을 처리하지 못했습니다</h1><p>입력과 설정을 확인하세요. 허용하려면 모델 서비스 전송 확인 체크가 필요합니다.</p><p><a href="' + back + '">← 돌아가기</a></p>'))
         if return_query and location in ('/repos', '/settings'):
             location += '?' + return_query
         self.reply(303, extra=[('Location', location)])
