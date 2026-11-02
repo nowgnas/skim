@@ -359,3 +359,38 @@ code{font:13px "SF Mono",ui-monospace,Menlo,monospace;padding:1px 6px;border-rad
 .scope-repo small{padding:1px 6px;border-radius:6px;background:var(--fill);color:var(--muted);font-size:11px;font-weight:600}
 /* '선택한 저장소만'일 때만 저장소 목록을 보여준다 */
 @supports selector(:has(*)){.action-form:not(:has(input[name=scope][value=selected]:checked)) .scope-repos{display:none}}
+
+/* 메인: 검토 현황 수치와 PR별 먼저 볼 파일 */
+.metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr)) minmax(0,1.6fr);gap:12px;margin:0 0 20px}
+.metric{display:flex;flex-direction:column;justify-content:center;gap:4px;padding:18px 20px;border-radius:var(--radius-box);background:var(--surface);box-shadow:var(--shadow);color:var(--text)}
+a.metric:hover{text-decoration:none;background:var(--surface-sub)}
+.metric-value{font-size:28px;font-weight:700;letter-spacing:-.03em;line-height:1.1}
+.metric-label{font-size:13px;color:var(--muted);font-weight:500}
+.metric-files p{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0 0}
+.home-results .issue-row{align-items:flex-start}
+.badge.review{background:var(--accent-weak);color:var(--accent-text)}
+.pr-state{display:flex;gap:10px;margin:6px 0;font-size:13px;color:var(--warn)}
+.file-note{display:flex;gap:10px}
+.file-anchor{display:block;scroll-margin-top:80px}
+.pr-files{margin:12px 0 4px;padding:12px;border-radius:var(--radius-ctl);background:var(--surface-sub)}
+.pr-files h3{margin:0 0 8px;font-size:13px;color:var(--muted);font-weight:600}
+.file-row{display:grid;grid-template-columns:56px minmax(0,auto) minmax(0,1fr);align-items:center;gap:10px;padding:6px 8px;border-radius:10px;color:var(--text);font-weight:400}
+.file-row:hover{background:var(--surface);text-decoration:none}
+.file-row .badge{justify-content:center}
+.file-path{font:13px "SF Mono",ui-monospace,Menlo,monospace;overflow-wrap:anywhere}
+.file-note{font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.file-summary{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;margin:8px 0 0;font-size:13px;color:var(--muted)}
+.dist{display:flex;gap:2px;width:120px;flex:none}
+.dist .seg{flex:1;height:6px;border-radius:2px;background:var(--fill)}
+.dist .seg.high{background:var(--danger)}.dist .seg.mid{background:var(--warn)}.dist .seg.low{background:var(--ok)}.dist .seg.unanalyzed{background:var(--grey-300)}
+.team-filter-box{margin:0 0 12px;padding:12px 16px;background:var(--surface-sub);box-shadow:none}
+.team-filter-box>summary{font-size:14px;color:var(--text-sub)}
+.team-filter-box .home-team{margin:8px 0 0;padding:0;background:transparent}
+@media(max-width:900px){.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.metric-files{grid-column:1 / -1}}
+@media(max-width:640px){.file-row{grid-template-columns:52px minmax(0,1fr)}.file-note{grid-column:1 / -1;white-space:normal}}
+/* 메인 카드는 세로 흐름으로 쌓는다(이전 2열 격자 배치를 덮어씀). */
+@media(min-width:900px){.home-results .issue-row .row-content{display:block}.home-results .issue-row .row-content>*{grid-column:auto;grid-row:auto}}
+.home-results .issue-row .meta{justify-content:flex-start;margin:2px 0}
+.pr-files{max-width:none}
+.dist{gap:0;overflow:hidden;border-radius:3px}
+.dist .seg{border-radius:0}
