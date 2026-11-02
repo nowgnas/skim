@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # setup.sh와 bin/skim이 source한다. 최소 버전은 lib/skim/__init__.py의 MIN_PYTHON과 같아야 한다.
 SKIM_MIN_PYTHON=3.11
 # 버전을 붙인 실행 파일을 이 minor부터 내려가며 찾는다.
@@ -9,8 +10,17 @@ skim_python_ok() {
 
 # 조건을 만족하는 첫 인터프리터 경로를 출력한다. SKIM_PYTHON을 지정하면 그 값만 검사한다.
 skim_find_python() {
-  local name path minor
+  local name path minor version
+  local attempts=()
   if [[ -n "${SKIM_PYTHON:-}" ]]; then
+    if [[ ! -e "$SKIM_PYTHON" ]]; then
+      echo "SKIM_PYTHON($SKIM_PYTHON) 실행 파일이 존재하지 않습니다." >&2
+      return 1
+    fi
+    if [[ ! -f "$SKIM_PYTHON" || ! -x "$SKIM_PYTHON" ]]; then
+      echo "SKIM_PYTHON($SKIM_PYTHON) 파일을 실행할 수 없습니다." >&2
+      return 1
+    fi
     if skim_python_ok "$SKIM_PYTHON"; then
       printf '%s\n' "$SKIM_PYTHON"
       return 0
@@ -25,12 +35,18 @@ skim_find_python() {
     minor=$((minor - 1))
   done
   for name in "${candidates[@]}"; do
-    path="$(command -v "$name" 2>/dev/null)" || continue
+    if ! path="$(command -v "$name" 2>/dev/null)"; then
+      attempts+=("$name: 없음")
+      continue
+    fi
     if skim_python_ok "$path"; then
       printf '%s\n' "$path"
       return 0
     fi
+    version="$("$path" --version 2>&1)" || version="${version:-버전 확인 실패}"
+    attempts+=("$name ($path): ${version:-버전 출력 없음}")
   done
   echo "Python $SKIM_MIN_PYTHON 이상을 찾지 못했습니다. 설치하거나 SKIM_PYTHON으로 실행 파일을 지정하세요." >&2
+  printf '시도한 후보: %s\n' "${attempts[@]}" >&2
   return 1
 }
