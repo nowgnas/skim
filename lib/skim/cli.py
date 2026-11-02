@@ -113,11 +113,14 @@ def main(argv=None):
                         print('허용된 코드가 선택한 LLM CLI의 모델 서비스로 전송될 수 있습니다.', flush=True)
                     if args.command == 'repo':
                         if args.action == 'list':
-                            print('호스트\t저장소\t출처\t활성\t분석 정책\t분석 허용')
+                            print('호스트\t저장소\t출처\t활성\t분석 범위\t선택됨\t분석 허용')
                             condition = "tracked=0 AND source IN ('owned','managed')" if args.candidates else 'tracked=1'
                             for row in conn.execute('SELECT * FROM repositories WHERE ' + condition + ' ORDER BY owner,name'):
+                                scope = analysis_scope(conn, row['host'])
+                                # 선택은 범위가 selected일 때만 의미가 있으므로 다른 범위에서는 '-'로 보인다.
+                                chosen = int(row['analysis_policy'] == 'allow') if scope == 'selected' else '-'
                                 print(f"{row['host']}\t{row['owner']}/{row['name']}\t{row['source']}\t{row['enabled']}\t"
-                                      f"{row['analysis_policy']}\t{int(analysis_allowed(conn, row['id']))}")
+                                      f"{scope}\t{chosen}\t{int(analysis_allowed(conn, row['id']))}")
                         elif args.action == 'add':
                             from .repos import add_repository
                             add_repository(conn, args.repository, args.source, args.host)
