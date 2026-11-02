@@ -153,7 +153,7 @@ GitHub·모델 서비스에 접속하지 않습니다. 이 README의 스크린�
 | 증상 | 조치 |
 | --- | --- |
 | `skim: command not found` | 설치 절의 PATH 설정을 적용하거나 저장소에서 `bin/skim`을 실행하세요. |
-| Python 버전 오류 | Python 3.11 이상을 설치하세요. `SKIM_PYTHON`으로 실행 파일을 지정할 수 있습니다. |
+| Python 버전 오류 | 래퍼는 `python3`, `python3.20`…`python3.11` 순으로 3.11 이상을 찾습니다. 설치하거나 `SKIM_PYTHON`으로 실행 파일을 지정하세요. 사용 중인 인터프리터는 `skim doctor`의 `python` 줄에 나옵니다. |
 | 저장소 조회·수집 실패 | `gh auth login`과 웹 상태 점검으로 확인하세요. 조직 SSO·비공개 저장소·팀 접근 권한도 필요합니다. |
 | 분석이 차단됨 | 분석 허용, 최신 수집 스냅샷, 웹 상태 점검을 확인하세요. probe 만료·실패·모델 변경 시 `skim doctor --probe`를 실행하세요. |
 | Codex 홈 검사 실패 | `codex login`과 초기화 때의 `CODEX_HOME`을 확인하세요. 전용 홈의 다른 파일은 `skim codex-home init --reset` 후 probe로 복구하세요. |

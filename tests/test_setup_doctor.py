@@ -32,6 +32,10 @@ class SetupDoctorTests(unittest.TestCase):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             self.assertEqual(run(config, runner, lambda n: '/fake'), 1)
+        version = '.'.join(map(str, sys.version_info[:3]))
+        python_lines = [line for line in out.getvalue().splitlines() if ': python — ' in line]
+        self.assertEqual(python_lines, [
+            f'정상: python — {version} ({sys.executable}), 최소 3.11'])
         self.assertIn('SSO', out.getvalue())
         self.assertNotIn('SECRET', out.getvalue())
         self.assertNotIn('TOKEN', out.getvalue())
@@ -50,7 +54,7 @@ class SetupDoctorTests(unittest.TestCase):
             return main(['--root', str(ROOT)])
 
     def test_wrapper_and_conflict(self):
-        result = subprocess.run([str(ROOT / 'setup.sh')], env=dict(os.environ, HOME=str(self.home)), capture_output=True, text=True)
+        result = subprocess.run([str(ROOT / 'setup.sh')], env=dict(os.environ, HOME=str(self.home), SKIM_PYTHON=sys.executable), capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         link = self.home / '.local/bin/skim'
         self.assertEqual(link.resolve(), ROOT / 'bin/skim')
