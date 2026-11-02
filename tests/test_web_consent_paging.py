@@ -4,7 +4,7 @@ import json
 import re
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from test_web import WebTests
 from skim import jobs
@@ -46,6 +46,7 @@ class ConsentTests(unittest.TestCase):
         # 조직 허용은 상세 화면에서 열지 않는다.
         self.assertNotIn('value="org"', form)
         self.assertNotIn('action="/jobs/analyze"', body)
+        self.assertIn('다음 수집 성공 후 자동 분석에 포함되어 이 저장소 코드가 분석 엔진으로 전송됩니다', body)
 
     def test_explicit_deny_hides_consent_form(self):
         for repo_policy, org_policy in [('deny', None), ('inherit', 'deny')]:
@@ -73,6 +74,35 @@ class ConsentTests(unittest.TestCase):
         with closing(connect(self.config)) as conn:
             self.assertEqual(conn.execute("SELECT count(*) FROM jobs WHERE type='analyze'").fetchone()[0], 0)
         self.assertIn('action="/jobs/analyze"', self.request('/pr/1')[2])
+
+    def test_next_successful_collection_automatically_analyzes_only_after_consent(self):
+        from skim.analyze import Analyzer
+        from test_analyze import Fake
+
+        conn, state = connect(self.config), connect(self.config)
+        self.addCleanup(conn.close)
+        self.addCleanup(state.close)
+        with conn:
+            conn.execute('DELETE FROM analyses')
+        fake = Fake()
+        runner = Runner(self.config, conn, state,
+                        analyzer=lambda c, config: Analyzer(c, config, fake))
+        runner.collector.collect = Mock(return_value=0)
+        # 동의 전에도 전체 대상 큐는 생기지만 이 저장소 코드는 전송되지 않는다.
+        self.assertEqual(self.request('/jobs/collect', 'POST', {'csrf': self.csrf})[0], 303)
+        with patch('subprocess.run', side_effect=AssertionError('외부 실행 금지')):
+            self.assertTrue(runner.step())
+        self.assertEqual(fake.calls, [])
+        self.assertEqual(conn.execute('SELECT count(*) FROM analyses').fetchone()[0], 0)
+        self.assertEqual(self.consent()[0], 303)
+        self.assertEqual(state.execute("SELECT count(*) FROM jobs WHERE type='analyze'").fetchone()[0], 1)
+        self.assertEqual(self.request('/jobs/collect', 'POST', {'csrf': self.csrf})[0], 303)
+        with patch('subprocess.run', side_effect=AssertionError('외부 실행 금지')):
+            self.assertTrue(runner.step())
+        rows = state.execute("SELECT target_id,status FROM jobs WHERE type='analyze' ORDER BY id").fetchall()
+        self.assertEqual([tuple(row) for row in rows], [(0, 'completed'), (0, 'completed')])
+        self.assertEqual(runner.collector.collect.call_count, 2)
+        self.assertTrue(fake.calls)
 
     def test_consent_requires_confirm(self):
         self.assertEqual(self.consent(confirm=None)[0], 400)

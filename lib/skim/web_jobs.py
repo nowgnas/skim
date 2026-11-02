@@ -93,16 +93,16 @@ def analysis_panel(conn, pr, csrf, offline):
         body += '<p>이 저장소는 분석이 거부되어 있습니다. 바꾸려면 <a href="/settings">분석 허용</a>에서 정책을 변경하세요.</p>'
     elif not analysis_allowed(conn, pr['repo_id']):
         body += ('<p>이 저장소는 LLM 분석이 허용되지 않았습니다. 아래에서 이 저장소만 허용하거나 '
-                 '<a href="/settings">분석 허용</a>에서 조직 단위로 켜세요. 허용해도 분석은 자동으로 시작하지 않습니다.</p>'
+                 '<a href="/settings">분석 허용</a>에서 조직 단위로 켜세요. 허용하면 지금 바로 분석하지는 않지만, 다음 수집 성공 후 자동 분석에 포함되어 이 저장소 코드가 분석 엔진으로 전송됩니다.</p>'
                  '<p><strong>' + WARNING + '</strong></p>'
-                 + consent_form(csrf, pr.get('host', 'github.com'), pr['owner'] + '/' + pr['name'], f'/pr/{int(pr["id"])}'))
+                 + consent_form(csrf, pr['host'], pr['owner'] + '/' + pr['name'], f'/pr/{int(pr["id"])}'))
     elif not snapshot or snapshot['head_sha'] != pr['head_sha'] or snapshot['base_sha'] != pr['base_sha']:
         body += '<p>최신 SHA의 스냅샷이 없습니다. <a href="/status">먼저 수집</a>한 뒤 분석을 요청하세요.</p>'
     else:
         body += '<p><strong>' + WARNING + '</strong></p>'
         body += '<p class="muted">하루 20회 모델 호출 예산과 격리 검사는 수동 요청에도 적용됩니다.' + (' draft PR도 같은 동의, 예산을 따릅니다.' if pr['draft'] else '') + '</p>'
         body += form('/jobs/analyze', csrf,
-                     f'<input type="hidden" name="host" value="{esc(pr.get("host", "github.com"))}"><input type="hidden" name="repository" value="{esc(pr["owner"] + "/" + pr["name"])}">'
+                     f'<input type="hidden" name="host" value="{esc(pr["host"])}"><input type="hidden" name="repository" value="{esc(pr["owner"] + "/" + pr["name"])}">'
                      f'<input type="hidden" name="number" value="{int(pr["number"])}"><button>이 PR 분석</button>', variant='primary')
     running = jobs.active(conn, 'analyze')
     if running is not None and running['target_id'] != pr['id']:
