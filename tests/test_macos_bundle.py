@@ -38,7 +38,7 @@ class BundleTests(unittest.TestCase):
             self.commands.append(command)
             if command[0] == '/usr/bin/osacompile':
                 (Path(command[2]) / 'Contents/Resources').mkdir(parents=True)
-            return SimpleNamespace(returncode=int(self.verify_fail and command[:2] == ['codesign', '--verify']), stdout='')
+            return SimpleNamespace(returncode=int(self.verify_fail and command[:2] == ['/usr/bin/codesign', '--verify']), stdout='')
         self.run = patch.object(bundle.subprocess, 'run', side_effect=run).start()
         self.addCleanup(patch.stopall)
 
@@ -59,26 +59,27 @@ class BundleTests(unittest.TestCase):
         log = Path(saved['StandardErrorPath'])
         self.assertEqual(log.stat().st_mode & 0o777, 0o600)
         self.assertEqual(saved['StandardOutPath'], '/dev/null')
-        self.assertIn(['codesign', '--verify', str(self.output / bundle.APP_NAME)], self.commands)
+        bundle.shutil.which.assert_called_with('/usr/bin/codesign')
+        self.assertIn(['/usr/bin/codesign', '--verify', str(self.output / bundle.APP_NAME)], self.commands)
 
     def test_signature_failure_resigns_and_rechecks(self):
         attempts = []
         original = self.run.side_effect
         def run(command, **kwargs):
             result = original(command, **kwargs)
-            if command[:2] == ['codesign', '--verify']:
+            if command[:2] == ['/usr/bin/codesign', '--verify']:
                 attempts.append(command)
                 result.returncode = int(len(attempts) == 1)
             return result
         self.run.side_effect = run
         self.assertEqual(self.prepare(), 0)
         self.assertEqual(len(attempts), 2)
-        self.assertIn(['codesign', '-f', '-s', '-', str(self.output / bundle.APP_NAME)], self.commands)
+        self.assertIn(['/usr/bin/codesign', '-f', '-s', '-', str(self.output / bundle.APP_NAME)], self.commands)
 
     def test_no_codesign_skips_verification(self):
         with patch.object(bundle.shutil, 'which', return_value=None):
             self.assertEqual(self.prepare(), 0)
-        self.assertFalse(any(c[0] == 'codesign' for c in self.commands))
+        self.assertFalse(any(c[0] == '/usr/bin/codesign' for c in self.commands))
 
     def test_reused_log_and_plist_must_keep_private_stderr(self):
         self.prepare()

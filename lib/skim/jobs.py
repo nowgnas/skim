@@ -218,8 +218,9 @@ class Runner:
                 return 'failed', None, '초기화 실패: Codex 로그인과 전용 홈의 소유권·경로를 확인하세요. 기존 파일은 자동 삭제하지 않습니다.'
             lines = []
             code = (self.doctor or doctor.run)(self.config, probe=False, out=lines.append)
-            message = ('상태 점검에 확인할 항목이 있습니다.' if code else '상태 점검 정상.')
-            return 'failed' if code else 'completed', '분석 준비 초기화 완료. ' + message + ' 이어서 격리 검증을 실행하세요.' + ('\n' + '\n'.join(lines) if lines else ''), None
+            message = ('분석 준비 상태 점검 실패. 아래 점검 항목을 해결한 뒤 다시 초기화하세요.' if code
+                       else '분석 준비 초기화 완료. 상태 점검 정상. 이어서 격리 검증을 실행하세요.')
+            return 'failed' if code else 'completed', message + ('\n' + '\n'.join(lines) if lines else ''), None
         lines = []
         if action == 'probe':
             progress(self.state, job['id'], '격리 검증 중')

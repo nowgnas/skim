@@ -566,7 +566,7 @@ def open_entry(url):
         webbrowser.open(url.split('/entry#', 1)[0] + '/')
     except (OSError, webbrowser.Error):
         pass
-    print('터미널에서 skim web을 실행하고 위 URL을 브라우저 주소창에 직접 붙여 넣으세요.', flush=True)
+    print('토큰 없는 기본 주소의 브라우저 열기를 시도했습니다. 진입 URL은 출력하지 않습니다. 새 진입 URL이 필요하면 터미널에서 skim web을 다시 실행하세요.', flush=True)
     return False
 
 

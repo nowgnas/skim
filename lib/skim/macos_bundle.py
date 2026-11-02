@@ -133,10 +133,10 @@ def main(argv=None, quiet=False):
         marker = app / 'Contents/Resources/skim-managed.plist'
         with marker.open('wb') as stream:
             plistlib.dump({'root': str(args.root.resolve()), 'data_dir': data_dir, 'environment': environment}, stream)
-        if sys.platform == 'darwin' and shutil.which('codesign'):
-            if subprocess.run(['codesign', '--verify', str(app)], capture_output=True).returncode:
-                subprocess.run(['codesign', '-f', '-s', '-', str(app)], check=True, capture_output=True)
-                subprocess.run(['codesign', '--verify', str(app)], check=True, capture_output=True)
+        if sys.platform == 'darwin' and shutil.which('/usr/bin/codesign'):
+            if subprocess.run(['/usr/bin/codesign', '--verify', str(app)], capture_output=True).returncode:
+                subprocess.run(['/usr/bin/codesign', '-f', '-s', '-', str(app)], check=True, capture_output=True)
+                subprocess.run(['/usr/bin/codesign', '--verify', str(app)], check=True, capture_output=True)
         fd = os.open(agent, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, 'wb') as stream:
             plistlib.dump(plist, stream)

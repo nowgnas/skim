@@ -74,6 +74,9 @@ class JobTests(unittest.TestCase):
             initialize.assert_called_once_with(reset=False)
             self.assertFalse(check.call_args.kwargs['probe'])
         self.assertEqual(self.rows('doctor')[-1]['status'], 'failed')
+        body = self.request('/status')[2]
+        self.assertIn('분석 준비 상태 점검 실패', body)
+        self.assertNotIn('초기화 완료', body)
         self.assertEqual(self.post('/jobs/doctor', action='probe', confirm='yes')[0], 303)
         doctor = Mock(return_value=0)
         self.runner(doctor=doctor).step()
@@ -99,6 +102,7 @@ class JobTests(unittest.TestCase):
             home = self.config.data_dir / 'codex-home'
             self.assertTrue((home / 'auth.json').is_symlink())
             self.assertEqual(self.rows('doctor')[-1]['status'], 'completed')
+            self.assertIn('분석 준비 초기화 완료', self.request('/status')[2])
             (home / 'keep.txt').write_text('preserve')
             self.post('/jobs/doctor', action='init')
             self.runner().step()

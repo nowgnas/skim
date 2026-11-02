@@ -545,7 +545,9 @@ class SettingsTests(unittest.TestCase):
         for outcome in [False, OSError('사용 불가')]:
             with patch('webbrowser.open', side_effect=outcome if isinstance(outcome, Exception) else None, return_value=False), redirect_stdout(io.StringIO()) as output:
                 open_entry('http://127.0.0.1:8123/entry#fixture')
-                self.assertIn('위 URL', output.getvalue())
+                self.assertIn('skim web을 다시 실행', output.getvalue())
+                self.assertNotIn('위 URL', output.getvalue())
+                self.assertNotIn('fixture', output.getvalue())
 
     def test_rate_limit_rejects_excess_and_recovers(self):
         for _ in range(30):

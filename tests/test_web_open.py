@@ -33,8 +33,13 @@ class OpenTests(unittest.TestCase):
 
     def test_browser_argv_never_contains_token_except_system_open(self):
         url = 'http://127.0.0.1:1234/entry#DEMO_SECRET'
-        with patch.object(web.sys, 'platform', 'linux'), patch.dict(os.environ, BROWSER='/demo/browser %s'), patch('webbrowser.open', return_value=True) as browser, redirect_stdout(io.StringIO()):
+        with patch.object(web.sys, 'platform', 'linux'), patch.dict(os.environ, BROWSER='/demo/browser %s'), patch('webbrowser.open', return_value=True) as browser, redirect_stdout(io.StringIO()) as output:
             self.assertFalse(web.open_entry(url))
+            self.assertIn('토큰 없는 기본 주소', output.getvalue())
+            self.assertIn('진입 URL은 출력하지 않습니다', output.getvalue())
+            self.assertIn('skim web을 다시 실행', output.getvalue())
+            self.assertNotIn(url, output.getvalue())
+            self.assertNotIn('DEMO_SECRET', output.getvalue())
             self.assertEqual(browser.call_args.args, ('http://127.0.0.1:1234/',))
         with patch.object(web.sys, 'platform', 'darwin'), patch('subprocess.run', return_value=SimpleNamespace(returncode=0)) as run, patch('webbrowser.open') as browser:
             self.assertTrue(web.open_entry(url))
