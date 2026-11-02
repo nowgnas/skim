@@ -10,7 +10,7 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   unittest:
@@ -27,13 +27,17 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
       - name: Shell syntax
-        run: bash -n setup.sh bin/skim lib/python.sh
+        run: |
+          for file in setup.sh bin/skim lib/python.sh; do
+            bash -n "$file"
+          done
       - name: Unit tests
         env:
-          PYTHONPATH: lib
           PYTHONDONTWRITEBYTECODE: '1'
         run: python -m unittest discover -s tests -v
