@@ -128,18 +128,21 @@ def policy_row(csrf, scope, target, host, policy, effective=None):
             + policy_form(csrf, scope, target, host, policy) + '</article>')
 
 
-def render(server, conn, csrf, path):
-    from .web import esc, meta
+def render(server, conn, csrf, path, query=None):
+    from .web import esc, meta, list_controls
+    query = query or {}
     if path == '/repos':
         body = '<h1>저장소</h1><p>조직 저장소를 포함하여 GitHub에는 항상 읽기 전용으로 접근합니다.</p>'
         body += '<p>연결 해제는 로컬 추적만 해제합니다. 리뷰 요청 결과와 분석 정책은 보존되며 분석 동의 철회가 아닙니다. 분석 허용 화면에서 별도로 끄세요.</p>'
         body += host_settings(server, conn, csrf)
-        body += '<h2>연결된 저장소</h2><div class="list">'
-        for row in conn.execute('SELECT * FROM repositories WHERE tracked=1 ORDER BY owner,name'):
+        rows = list(conn.execute('SELECT * FROM repositories WHERE tracked=1 ORDER BY owner,name'))
+        rows, controls, navigation = list_controls(rows, query, 'tracked', '연결된 저장소', lambda r: r['host'] + '/' + r['owner'] + '/' + r['name'])
+        body += '<h2>연결된 저장소</h2>' + controls + '<div class="list">'
+        for row in rows:
             name = row['owner'] + '/' + row['name']
             body += '<article class="list-row"><div class="row-content"><h3>' + esc(name) + '</h3>' + meta(row['host'], row['source'], '추적 중') + '</div><div class="toolbar row-actions">'
             body += form('/repos/remove', csrf, f'<input type="hidden" name="host" value="{esc(row["host"])}"><input type="hidden" name="repository" value="{esc(name)}"><button aria-label="{esc(row["host"] + "/" + name)} 연결 해제">연결 해제</button>', variant='danger') + '</div></article>'
-        body += '</div><h2>저장소 연결</h2><div class="connect-toolbar">' + form('/repos/add', csrf, host_field(conn) + '<label>owner/repo<input name="repository" required maxlength="140"></label>' + source_field() + '<button>저장소 연결</button>', variant='primary')
+        body += '</div>' + navigation + '<h2>저장소 연결</h2><div class="connect-toolbar">' + form('/repos/add', csrf, host_field(conn) + '<label>owner/repo<input name="repository" required maxlength="140"></label>' + source_field() + '<button>저장소 연결</button>', variant='primary')
         body += form('/repos/load', csrf, host_field(conn, '저장소 불러오기') + '<button>접근 가능한 저장소 불러오기</button>') + '</div>'
         lookup = getattr(server, 'repo_lookup', None)
         lookup_host, items = lookup.snapshot(with_host=True) if lookup else ('github.com', [])
@@ -149,21 +152,26 @@ def render(server, conn, csrf, path):
         if running is not None:
             body += '<p>이미 저장소 조회 작업이 진행 중입니다. 완료 후 다시 요청하세요. 진행 중 요청은 새 작업을 만들지 않습니다.</p>'
         body += job_box(jobs.latest(conn, 'repos')) + script()
-        body += '<div class="list">'
+        items, controls, navigation = list_controls(items, query, 'available', '조회된 저장소', lambda name: lookup_host + '/' + name)
+        body += controls + '<div class="list">'
         for name in items:
             body += '<article class="list-row"><span class="row-content">' + esc(lookup_host + '/' + name) + '</span>' + form('/repos/add', csrf, f'<input type="hidden" name="host" value="{esc(lookup_host)}"><input type="hidden" name="repository" value="{esc(name)}">' + source_field(lookup_host + '/' + name) + f'<button aria-label="{esc(lookup_host + "/" + name)} 선택하여 연결">선택하여 연결</button>') + '</article>'
-        return body + '</div>'
+        return body + '</div>' + navigation
     settings = json.loads((server.config.config_dir / 'config.json').read_text())
     model = settings.get('codex_model', '')
     body = '<h1>설정과 분석 허용</h1><p>' + WARNING + '</p><p>기본 꺼짐. 저장소의 명시적 허용, 거부는 조직 정책보다 우선합니다. 조직 허용은 해당 조직의 모든 저장소에 적용됩니다.</p>'
-    body += '<div class="list">'
-    for row in conn.execute('SELECT * FROM repositories ORDER BY owner,name'):
+    rows = list(conn.execute('SELECT * FROM repositories ORDER BY owner,name'))
+    rows, controls, navigation = list_controls(rows, query, 'policy', '저장소 정책', lambda r: r['host'] + '/' + r['owner'] + '/' + r['name'])
+    body += controls + '<div class="list">'
+    for row in rows:
         name = row['owner'] + '/' + row['name']
         body += policy_row(csrf, 'repo', name, row['host'], row['analysis_policy'], analysis_allowed(conn, row['id']))
-    body += '</div><h2>조직 정책</h2><div class="list">'
-    for row in conn.execute('SELECT owner,policy FROM organization_policies ORDER BY owner'):
+    rows = list(conn.execute('SELECT owner,policy FROM organization_policies ORDER BY owner'))
+    rows, org_controls, org_navigation = list_controls(rows, query, 'org', '조직 정책', lambda r: r['owner'])
+    body += '</div>' + navigation + '<h2>조직 정책</h2>' + org_controls + '<div class="list">'
+    for row in rows:
         body += policy_row(csrf, 'org', row['owner'], 'github.com', row['policy'])
-    body += '</div><section class="policy-add"><h3>github.com 조직 추가</h3>' + policy_form(csrf, 'org', '') + '</section>' + host_field_note(conn, csrf)
+    body += '</div>' + org_navigation + '<section class="policy-add"><h3>github.com 조직 추가</h3>' + policy_form(csrf, 'org', '') + '</section>' + host_field_note(conn, csrf)
     body += '<h2>모델 설정</h2>' + meta('파일 값: ' + (model or '미설정'), '실제 적용: ' + (Config.parse_codex_model(settings) or '자동 감지'))
     if 'SKIM_CODEX_MODEL' in os.environ:
         body += '<p>SKIM_CODEX_MODEL 환경변수가 파일 설정보다 우선합니다.</p>'

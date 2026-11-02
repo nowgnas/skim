@@ -98,7 +98,7 @@ class Analyzer:
                         results.append(self._failure(row, '최신 SHA의 최신 스냅샷이 아닙니다', 'blocked', persist=False))
                     continue
                 try:
-                    results.append(self._analyze(row))
+                    results.append(self._analyze(row, retry_missing_intent=snapshot_id is not None))
                 except Exception:
                     self.conn.rollback()
                     results.append(self._failure(row, '분석 실패: diff 캐시 또는 로컬 DB를 확인하세요'))
@@ -122,7 +122,7 @@ class Analyzer:
                               (row['id'], row.get('analysis_input_hash', ''), self.adapter.provider, self.adapter.model, self.adapter.cli_version, PROMPT_VERSION, SCHEMA_VERSION, status, encode(result), error))
         return result
 
-    def _analyze(self, row):
+    def _analyze(self, row, retry_missing_intent=False):
         source_coverage = json.loads(row['coverage'])
         source_coverage.setdefault('raw_input_hash', row['input_hash'])
         if source_coverage.get('status') in ('incomplete', 'inaccessible'):
@@ -160,7 +160,9 @@ class Analyzer:
         if adapter.model != 'unknown':
             cached = self.conn.execute("SELECT output_json FROM analyses WHERE snapshot_id=? AND input_hash=? AND provider=? AND model=? AND cli_version=? AND prompt_version=? AND schema_version=? AND status IN ('completed','partial') ORDER BY id DESC LIMIT 1", key).fetchone()
             if cached:
-                return json.loads(cached['output_json'])
+                cached_result = json.loads(cached['output_json'])
+                if cached_result.get('intent') or not chunks or not retry_missing_intent:
+                    return cached_result
         coverage = dict(total=len(units), analyzed=0, excluded=sum(u['excluded'] for u in units),
                         omitted=sum(bool(u.get('omission_reason')) for u in units),
                         redacted=sum(u.get('redacted', False) for u in units))

@@ -109,6 +109,20 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(self.conn.execute('SELECT calls FROM analysis_budget').fetchone()[0], 2)
         self.assertEqual(self.conn.execute('SELECT COUNT(*) FROM analysis_items').fetchone()[0], 3)
 
+    def test_missing_intent_cache_is_retried(self):
+        self.analyzer.run()
+        with self.conn:
+            row = self.conn.execute('SELECT id,output_json FROM analyses ORDER BY id DESC').fetchone()
+            output = json.loads(row['output_json'])
+            output['intent'] = None
+            output['status'] = 'partial'
+            self.conn.execute('UPDATE analyses SET status=?,intent=NULL,output_json=? WHERE id=?',
+                              ('partial', json.dumps(output), row['id']))
+        self.assertIsNone(self.analyzer.run()[0]['intent'])
+        self.assertEqual(len(self.fake.calls), 2)
+        self.assertTrue(self.analyzer.run(snapshot_id=1)[0]['intent'])
+        self.assertEqual(len(self.fake.calls), 4)
+
     def test_opt_in_draft_and_policy_precedence(self):
         with self.conn:
             self.conn.execute("UPDATE repositories SET analysis_policy='deny'")
