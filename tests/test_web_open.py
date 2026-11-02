@@ -46,6 +46,21 @@ class OpenTests(unittest.TestCase):
             self.assertEqual(run.call_args.args[0], ['/usr/bin/open', url])
             browser.assert_not_called()
 
+    def test_darwin_system_open_failure_shows_truthful_fallback(self):
+        url = 'http://127.0.0.1:1234/entry#DEMO_SECRET'
+        for outcome in (SimpleNamespace(returncode=1), OSError(url)):
+            with self.subTest(outcome=type(outcome).__name__), patch.object(web.sys, 'platform', 'darwin'), patch(
+                    'subprocess.run', side_effect=outcome if isinstance(outcome, Exception) else None,
+                    return_value=outcome) as run, patch('webbrowser.open') as browser, redirect_stdout(io.StringIO()) as output:
+                self.assertFalse(web.open_entry(url))
+                run.assert_called_once()
+                browser.assert_not_called()
+                self.assertIn('토큰 URL의 시스템 열기에 실패', output.getvalue())
+                self.assertIn('skim web을 다시 실행', output.getvalue())
+                self.assertNotIn('토큰 없는 기본 주소', output.getvalue())
+                self.assertNotIn(url, output.getvalue())
+                self.assertNotIn('DEMO_SECRET', output.getvalue())
+
     def test_stderr_request_error_never_includes_exception_url(self):
         with redirect_stderr(io.StringIO()) as output:
             try:

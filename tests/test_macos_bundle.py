@@ -19,7 +19,7 @@ class BundleTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='demo-한글 & "')
         self.addCleanup(self.temp.cleanup)
-        self.home = Path(self.temp.name)
+        self.home = Path(self.temp.name).resolve()
         self.root = self.home / '소스 & "'
         (self.root / 'bin').mkdir(parents=True)
         (self.root / 'bin/skim').touch()
@@ -52,7 +52,7 @@ class BundleTests(unittest.TestCase):
     def test_prepare_path_permissions_special_characters_and_signature(self):
         self.assertEqual(self.prepare(), 0)
         saved = self.settings()
-        self.assertEqual(saved['EnvironmentVariables']['PATH'], '/usr/bin:/bin')
+        self.assertEqual(saved['EnvironmentVariables']['PATH'], os.pathsep.join(map(os.path.realpath, ['/usr/bin', '/bin'])))
         self.assertEqual(saved['ProgramArguments'][0], str(self.root / 'bin/skim'))
         self.assertEqual(saved['EnvironmentVariables']['SKIM_HOME'], str(self.home))
         self.assertEqual((self.output / 'com.skim.web.plist').stat().st_mode & 0o777, 0o600)
@@ -138,6 +138,46 @@ class BundleTests(unittest.TestCase):
         agent.mkdir()
         with self.assertRaises(ValueError):
             bundle.trusted(agent)
+
+    def test_symlink_tmp_paths_match_in_marker_agent_and_environment(self):
+        # macOS의 /var -> /private/var 구조를 Linux에서도 재현한다.
+        private_var = self.home / 'private/var'
+        private_var.mkdir(parents=True)
+        alias = self.home / 'var'
+        alias.symlink_to(private_var, target_is_directory=True)
+        self.root = private_var / 'source'
+        (self.root / 'bin').mkdir(parents=True)
+        (self.root / 'bin/skim').touch()
+        self.config.data_dir = private_var / 'data'
+        self.output = alias / 'output'
+        environment = {'SKIM_HOME': str(alias), 'CODEX_HOME': str(alias / 'codex'),
+                       'PATH': str(alias / 'bin'), 'SKIM_CODEX_MODEL': 'demo-model'}
+        with patch.dict(os.environ, environment), patch.object(Path, 'home', return_value=alias):
+            self.assertEqual(self.prepare(), 0)
+            app, agent = self.output / bundle.APP_NAME, self.output / 'com.skim.web.plist'
+            marker = app / 'Contents/Resources/skim-managed.plist'
+            canonical_environment = bundle.environment_settings()
+            self.assertEqual(canonical_environment['HOME'], str(private_var))
+            self.assertEqual(canonical_environment['SKIM_CODEX_MODEL'], 'demo-model')
+            # 현재 입력만 별칭인 경우와 저장된 경로만 별칭인 경우 모두 허용한다.
+            bundle.validate_existing(app, agent, alias / 'source', self.config)
+            for path in (marker, agent):
+                saved = plistlib.loads(path.read_bytes())
+                def aliases(value):
+                    if isinstance(value, str):
+                        return value.replace(str(private_var), str(alias))
+                    if isinstance(value, list):
+                        return [aliases(item) for item in value]
+                    if isinstance(value, dict):
+                        return {key: aliases(item) for key, item in value.items()}
+                    return value
+                path.write_bytes(plistlib.dumps(aliases(saved)))
+            with patch.object(Path, 'home', return_value=private_var), patch.dict(
+                    os.environ, canonical_environment):
+                bundle.validate_existing(app, agent, self.root, self.config)
+                with patch.dict(os.environ, SKIM_CODEX_MODEL='different-model'):
+                    with self.assertRaisesRegex(ValueError, '환경'):
+                        bundle.validate_existing(app, agent, self.root, self.config)
 
     def test_partial_installation_environment_mismatch_is_rejected(self):
         self.prepare()

@@ -560,12 +560,17 @@ def open_entry(url):
         return False
     try:
         if sys.platform == 'darwin':
-            return subprocess.run(['/usr/bin/open', url], stdout=subprocess.DEVNULL,
-                                  stderr=subprocess.DEVNULL).returncode == 0
-        # 일반 브라우저 실행 인자에는 인증 토큰을 포함하지 않는다.
-        webbrowser.open(url.split('/entry#', 1)[0] + '/')
+            if subprocess.run(['/usr/bin/open', url], stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL).returncode == 0:
+                return True
+        else:
+            # 일반 브라우저 실행 인자에는 인증 토큰을 포함하지 않는다.
+            webbrowser.open(url.split('/entry#', 1)[0] + '/')
     except (OSError, webbrowser.Error):
         pass
+    if sys.platform == 'darwin':
+        print('토큰 URL의 시스템 열기에 실패했습니다. 터미널에서 skim web을 다시 실행하세요.', flush=True)
+        return False
     print('토큰 없는 기본 주소의 브라우저 열기를 시도했습니다. 진입 URL은 출력하지 않습니다. 새 진입 URL이 필요하면 터미널에서 skim web을 다시 실행하세요.', flush=True)
     return False
 

@@ -21,6 +21,19 @@ LOCAL_PEERPID = 2
 APP_NAME = 'skim PR.app'
 
 
+def real_path(value):
+    return os.path.realpath(os.path.expanduser(value)) if isinstance(value, str) else value
+
+
+def normalized_environment(environment):
+    if not isinstance(environment, dict):
+        return environment
+    return {name: (value if name == 'SKIM_CODEX_MODEL' else
+                   os.pathsep.join(real_path(p) for p in value.split(os.pathsep))
+                   if name == 'PATH' and isinstance(value, str) else real_path(value))
+            for name, value in environment.items()}
+
+
 def environment_settings():
     environment = {'HOME': str(Path.home()), 'PATH': os.pathsep.join(
         os.path.normpath(p) for p in os.environ.get('PATH', '/usr/bin:/bin:/usr/sbin:/sbin').split(os.pathsep)
@@ -29,7 +42,7 @@ def environment_settings():
         if os.environ.get(name):
             value = os.environ[name]
             environment[name] = value if name == 'SKIM_CODEX_MODEL' else os.path.abspath(os.path.expanduser(value))
-    return environment
+    return normalized_environment(environment)
 
 
 def trusted(path, directory=False, private=False):
@@ -51,7 +64,7 @@ def prepare_log(data_dir):
 
 
 def validate_existing(app, agent, root, config, check_environment=True):
-    expected = {'root': str(root), 'data_dir': str(config.data_dir.resolve()),
+    expected = {'root': real_path(str(root)), 'data_dir': str(config.data_dir.resolve()),
                 'environment': environment_settings()}
     if app.exists() or app.is_symlink():
         trusted(app, directory=True)
@@ -63,17 +76,20 @@ def validate_existing(app, agent, root, config, check_environment=True):
         trusted(marker)
         with marker.open('rb') as stream:
             saved = plistlib.load(stream)
-        if any(saved.get(k) != expected[k] for k in ('root', 'data_dir')) or (check_environment and saved.get('environment') != expected['environment']):
+        if any(real_path(saved.get(k)) != expected[k] for k in ('root', 'data_dir')) or (check_environment and normalized_environment(saved.get('environment')) != expected['environment']):
             raise ValueError('기존 앱의 마커 또는 환경이 현재 설치와 다릅니다.')
     if agent.exists() or agent.is_symlink():
         trusted(agent, private=True)
         with agent.open('rb') as stream:
             saved = plistlib.load(stream)
-        if saved.get('Label') != 'com.skim.web' or saved.get('ProgramArguments') != [str(root / 'bin/skim'), 'web', '--no-browser']:
+        arguments = saved.get('ProgramArguments')
+        if isinstance(arguments, list) and arguments:
+            arguments = [real_path(arguments[0]), *arguments[1:]]
+        if saved.get('Label') != 'com.skim.web' or arguments != [real_path(str(root / 'bin/skim')), 'web', '--no-browser']:
             raise ValueError('기존 LaunchAgent는 다른 설치에 속합니다.')
-        if check_environment and (saved.get('StandardOutPath') != '/dev/null' or saved.get('StandardErrorPath') != str(config.data_dir.resolve() / 'launchagent.stderr.log')):
+        if check_environment and (real_path(saved.get('StandardOutPath')) != real_path('/dev/null') or real_path(saved.get('StandardErrorPath')) != real_path(str(config.data_dir / 'launchagent.stderr.log'))):
             raise ValueError('기존 LaunchAgent의 로그 설정이 현재 설치와 다릅니다.')
-        if check_environment and saved.get('EnvironmentVariables') != expected['environment']:
+        if check_environment and normalized_environment(saved.get('EnvironmentVariables')) != expected['environment']:
             raise ValueError('기존 LaunchAgent와 현재 환경이 다릅니다. 같은 환경에서 실행하세요.')
 
 
