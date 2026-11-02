@@ -166,6 +166,30 @@ class JobTests(unittest.TestCase):
         self.assertIn('<script src="/static/jobs.js" defer></script>', body)
         self.assertNotIn('<script>', body)
 
+    def test_status_sections_and_job_progress(self):
+        with closing(connect(self.config)) as conn:
+            row, _ = jobs.enqueue(conn, 'doctor')
+            pending = self.request('/status')[2]
+            self.assertIn('<div class="status-actions">', pending)
+            self.assertIn('<section class="status-section"><h2>활성 작업</h2>', pending)
+            self.assertIn('<section class="status-section"><h2>최근 작업</h2>', pending)
+            self.assertIn('<details class="status-recovery"><summary>복구 안내</summary>', pending)
+            self.assertIn('data-job-progress-label>대기 중</span>', pending)
+            self.assertIn('aria-label="작업 진행" hidden', pending)
+            jobs.claim(conn)
+            running = self.request('/status')[2]
+            self.assertIn('data-job-progress-label>작업 중</span>', running)
+            self.assertIn('<progress aria-label="작업 진행"></progress>', running)
+            jobs.progress(conn, row['id'], '점검', 2, 5)
+            running = self.request('/status')[2]
+            self.assertIn('aria-label="작업 진행" max="5" value="2"', running)
+            jobs.finish(conn, row['id'], 'completed')
+            self.assertNotIn('data-job-progress-label>작업 중</span>', self.request('/status')[2])
+        script = self.request('/static/jobs.js', authenticated=False)[2]
+        self.assertIn("job.status === 'running'", script)
+        self.assertIn('progress.value = job.processed', script)
+        self.assertIn("progress.removeAttribute('value')", script)
+
     def test_job_metadata_survives_polling(self):
         with closing(connect(self.config)) as conn, conn:
             row, _ = jobs.enqueue(conn, 'doctor')
