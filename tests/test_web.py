@@ -17,7 +17,7 @@ sys.path.insert(0, str(ROOT / 'lib'))
 sys.path.insert(0, str(ROOT / 'scripts'))
 from skim.config import Config
 from skim.db import connect
-from skim.web import Auth, Handler, CSP, Server, badges, load_prs, worker, read_diff, serve
+from skim.web import Auth, Handler, CSP, Server, badges, load_prs, worker, read_diff, render_diff, serve
 from demo_seed import seed
 
 
@@ -100,6 +100,47 @@ class WebTests(unittest.TestCase):
         with closing(connect(self.config)) as conn, conn:
             conn.execute('UPDATE pull_requests SET title=? WHERE id=1', ('<PR & 제목>',))
         self.assertIn('<title>&lt;PR &amp; 제목&gt; | skim</title>', self.request('/pr/1')[2])
+
+    def test_search_state_survives_filters_and_other_lists(self):
+        body = self.request('/?pr_q=payment&importance=high')[2]
+        filter_form = body.split('<form class="filters" method="get">', 1)[1].split('</form>', 1)[0]
+        self.assertIn('type="hidden" name="pr_q" value="payment"', filter_form)
+        self.assertIn('name="importance"', filter_form)
+        search_form = body.split('<form class="filters" method="get">', 2)[2].split('</form>', 1)[0]
+        self.assertIn('type="hidden" name="importance" value="high"', search_form)
+        body = self.request('/repos?tracked_q=missing&available_q=other')[2]
+        tracked_form = body.split('<form class="filters" method="get">', 1)[1].split('</form>', 1)[0]
+        self.assertIn('type="hidden" name="available_q" value="other"', tracked_form)
+        self.assertIn('name="tracked_q" value="missing"', tracked_form)
+        self.assertIn('검색 결과가 없습니다', body)
+        body = self.request('/settings?policy_q=missing&org_q=other')[2]
+        policy_form = body.split('<form class="filters" method="get">', 1)[1].split('</form>', 1)[0]
+        self.assertIn('type="hidden" name="org_q" value="other"', policy_form)
+        self.assertIn('name="policy_q" value="missing"', policy_form)
+        body = self.request('/pr/1?unit_q=payment&order=original')[2]
+        self.assertIn('unit_q=payment', body)
+        self.assertIn('name="order" value="original"', body)
+
+    def test_repository_page_navigation_preserves_other_list_state(self):
+        with closing(connect(self.config)) as conn, conn:
+            conn.executemany("INSERT INTO repositories(owner,name,tracked) VALUES('paging',?,1)",
+                             [(f'repo-{i:02}',) for i in range(25)])
+        body = self.request('/repos?tracked_q=paging&available_q=other&available_page=2')[2]
+        self.assertIn('paging/repo-00', body)
+        self.assertIn('paging/repo-19', body)
+        self.assertNotIn('paging/repo-20', body)
+        self.assertIn('available_q=other&amp;available_page=2&amp;tracked_page=2', body)
+        body = self.request('/repos?tracked_q=paging&available_q=other&available_page=2&tracked_page=2')[2]
+        self.assertNotIn('paging/repo-19', body)
+        self.assertIn('paging/repo-20', body)
+        self.assertIn('paging/repo-24', body)
+        self.assertIn('type="hidden" name="available_page" value="2"', body)
+
+    def test_null_pr_title_does_not_break_listing(self):
+        with closing(connect(self.config)) as conn, conn:
+            conn.execute('UPDATE pull_requests SET title=NULL WHERE id=1')
+        self.assertEqual(self.request('/')[0], 200)
+        self.assertEqual(self.request('/?pr_q=checkout')[0], 200)
 
     def test_analysis_time_shared_once_when_identical(self):
         with closing(connect(self.config)) as conn, conn:
@@ -269,6 +310,18 @@ class WebTests(unittest.TestCase):
         self.assertNotIn('모델 판단:', badges(base))
         self.assertIn('모델 판단: 미분석', badges(dict(base, unanalysed=True, items={})))
         self.assertIn('모델 판단: 일부 미분석', badges(dict(base, unanalysed=True)))
+
+    def test_diff_colors_preserve_and_escape_content(self):
+        diff = '--- a/file\n+++ b/file\n@@ -1 +1 @@\n-old\n+<script>\n+++ content\n context\n'
+        rendered = render_diff(diff)
+        self.assertIn('<span class="diff-header">--- a/file\n</span>', rendered)
+        self.assertIn('<span class="diff-hunk">@@ -1 +1 @@\n</span>', rendered)
+        self.assertIn('<span class="diff-delete">-old\n</span>', rendered)
+        self.assertIn('<span class="diff-add">+&lt;script&gt;\n</span>', rendered)
+        self.assertIn('<span class="diff-add">+++ content\n</span>', rendered)
+        self.assertIn('<span class="diff-context"> context\n</span>', rendered)
+        self.assertIn('class="diff-add"', self.request('/pr/1')[2])
+        self.assertIn('class="diff-hunk"', self.request('/pr/1?diff=1')[2])
 
     def test_untrusted_content_and_cache_paths(self):
         with closing(connect(self.config)) as conn, conn:

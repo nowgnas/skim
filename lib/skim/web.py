@@ -15,7 +15,7 @@ from html import escape
 from http.cookies import SimpleCookie, CookieError
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 from .db import connect
 from .web_settings import POST_PATHS, RepoLookup, render, mutate
@@ -167,12 +167,45 @@ def repository_label(pr):
     return prefix + pr['owner'] + '/' + pr['name']
 
 
+def list_controls(items, query, prefix, label, text):
+    """각 목록의 검색과 페이지 상태를 독립적으로 유지한다."""
+    search_key, page_key = prefix + '_q', prefix + '_page'
+    term = query.get(search_key, [''])[0][:200]
+    filtered = [item for item in items if term.casefold() in text(item).casefold()]
+    pages = max(1, (len(filtered) + 19) // 20)
+    raw_page = query.get(page_key, ['1'])[0]
+    number = min(int(raw_page), pages) if raw_page.isascii() and raw_page.isdigit() and len(raw_page) < 10 else 1
+    number = max(1, number)
+    hidden = ''.join(f'<input type="hidden" name="{esc(key)}" value="{esc(value)}">'
+                     for key, values in query.items() if key not in (search_key, page_key)
+                     for value in values)
+    controls = (f'<form class="filters" method="get">{hidden}<label>{esc(label)} 검색 '
+                f'<input type="search" name="{search_key}" value="{esc(term)}" maxlength="200"></label>'
+                '<button class="btn secondary">검색</button></form>')
+    controls += f'<p class="meta">{len(filtered)}개 / {number}/{pages} 페이지</p>'
+    if not filtered:
+        controls += '<p class="muted">검색 결과가 없습니다.</p>' if term else ''
+    def link(target, title):
+        params = [(key, value) for key, values in query.items() if key != page_key for value in values]
+        params.append((page_key, str(target)))
+        return f'<a class="btn secondary sm" href="?{esc(urlencode(params))}">{title}</a>'
+    navigation = '<nav class="toolbar" aria-label="' + esc(label) + ' 페이지">'
+    if number > 1:
+        navigation += link(number - 1, '이전')
+    if number < pages:
+        navigation += link(number + 1, '다음')
+    navigation += '</nav>'
+    return filtered[(number - 1) * 20:number * 20], controls, navigation
+
+
 def listing(prs, query, csrf, heading_toolbar=""):
     fields = [('repo', '저장소', sorted({repository_label(p) for p in prs})),
               ('importance', '중요도', ['high', 'mid', 'low', 'unanalyzed']),
               ('status', '상태', ['completed', 'partial', 'failed', 'blocked', 'deferred', 'unanalyzed', 'stale']),
               ('review', '리뷰 요청', ['1'])]
     content = '<div class="heading"><h1>먼저 볼 변경</h1>' + heading_toolbar + '</div><form class="filters" method="get">'
+    if query.get('pr_q', [''])[0]:
+        content += f'<input type="hidden" name="pr_q" value="{esc(query["pr_q"][0])}">'
     for name, label, values in fields:
         content += f'<label><span class="sr-only">{label}</span><select name="{name}"><option value="">{label}: 전체</option>'
         for value in values:
@@ -186,6 +219,8 @@ def listing(prs, query, csrf, heading_toolbar=""):
         or (key == 'status' and query[key][0] == 'stale' and pr['stale'])
         for key, value in dict(repo=repository_label(pr), importance=pr['importance'],
                                status=pr['status'], review=str(pr['review'])).items())]
+    prs, controls, navigation = list_controls(prs, query, 'pr', 'PR', lambda p: ' '.join([repository_label(p), str(p['number']), p['title'] or '', p['author'] or '', (p['analysis']['intent'] or '') if p['analysis'] else '']))
+    content += controls
     collected = {pr['snapshot']['collected_at'] if pr['snapshot'] else '대기' for pr in prs}
     shared_collection = len(collected) == 1
     analyzed = {pr['analysis']['created_at'] if pr['analysis'] else '대기' for pr in prs}
@@ -202,7 +237,7 @@ def listing(prs, query, csrf, heading_toolbar=""):
                     + f'<p class="issue-intent">{esc(a["intent"] if a and a["intent"] else "의도 미분석")}</p><p class="meta">{badges(pr)}</p>'
                     + '<p class="meta"><span class="badge">' + esc(pr['status']) + '</span></p>' + meta(*([] if shared_collection else ['수집 ' + (s['collected_at'] if s else '대기')]),
                            *([] if shared_analysis else ['분석 ' + (a['created_at'] if a else '대기')])) + f'</div><a class="btn ghost sm row-actions" href="/pr/{pr["id"]}" aria-label="검토하기: {esc(pr["title"])}">검토하기</a></article>')
-    return content + '</div>' + ('<p class="muted">열린 PR이 없습니다. <a href="/repos">저장소 연결</a>과 <a href="/status">상태 점검</a>, <a href="/settings">설정</a>을 확인하세요.</p>' if not has_prs else '')
+    return content + '</div>' + navigation + ('<p class="muted">열린 PR이 없습니다. <a href="/repos">저장소 연결</a>과 <a href="/status">상태 점검</a>, <a href="/settings">설정</a>을 확인하세요.</p>' if not has_prs else '')
 
 
 def github(pr):
@@ -215,6 +250,27 @@ def github(pr):
     if re.fullmatch(r'[A-Za-z0-9-]+', pr['owner']) and re.fullmatch(r'[A-Za-z0-9_.-]+', pr['name']) and pr['name'] not in ('.', '..'):
         return f'https://{host}/{pr["owner"]}/{pr["name"]}/pull/{int(pr["number"])}'
     return None
+
+
+def render_diff(diff):
+    lines = []
+    in_hunk = False
+    for line in diff.splitlines(keepends=True):
+        if line.startswith('diff --git '):
+            in_hunk = False
+        if line.startswith('@@'):
+            kind = 'hunk'
+            in_hunk = True
+        elif not in_hunk and line.startswith(('+++ ', '--- ')):
+            kind = 'header'
+        elif line.startswith('+'):
+            kind = 'add'
+        elif line.startswith('-'):
+            kind = 'delete'
+        else:
+            kind = 'context'
+        lines.append(f'<span class="diff-{kind}">{esc(line)}</span>')
+    return '<pre class="diff">' + ''.join(lines) + '</pre>'
 
 
 def detail(pr, query, config, offline=False):
@@ -240,7 +296,11 @@ def detail(pr, query, config, offline=False):
     for href, label, selected in [('?order=original', '원래 파일 순서', query.get('order', [''])[0] == 'original' and query.get('diff') != ['1']),
                                   ('?order=priority', '검토 우선순위', query.get('order', [''])[0] != 'original' and query.get('diff') != ['1']),
                                   ('?diff=1', '전체 diff 보기', query.get('diff', [''])[0] == '1')]:
-        content += f'<a class="btn ghost sm" href="{href}"' + (' aria-current="true"' if selected else '') + f'>{label}</a>'
+        params = parse_qs(href[1:])
+        if query.get('unit_q', [''])[0]:
+            params['unit_q'] = query['unit_q'][:1]
+        href = '?' + urlencode(params, doseq=True)
+        content += f'<a class="btn ghost sm" href="{esc(href)}"' + (' aria-current="true"' if selected else '') + f'>{label}</a>'
     content += '</nav>'
     units = list(pr['units'])
     def priority(unit):
@@ -252,6 +312,9 @@ def detail(pr, query, config, offline=False):
         units.sort(key=lambda unit: file_order.get(unit['file_path'], len(files)))
     else:
         units.sort(key=priority)
+    has_units = bool(units)
+    units, controls, navigation = list_controls(units, query, 'unit', '변경 단위', lambda u: ' '.join([u['file_path'], u['change_id'], u.get('diff', '')]))
+    content += controls
     for unit in units:
         item = pr['items'].get(unit['change_id'])
         flags = unit.get('candidates', [])
@@ -268,11 +331,12 @@ def detail(pr, query, config, offline=False):
         if link:
             anchor = hashlib.sha256(unit['file_path'].encode()).hexdigest()
             content += f'<a href="{esc(link)}/files#diff-{anchor}" rel="noreferrer">GitHub 변경</a>'
-        content += f'<pre>{esc(unit.get("diff", ""))}</pre></details>'
-    if not units:
+        content += render_diff(unit.get("diff", "")) + '</details>'
+    if not has_units:
         content += '<article>미분석: 수집된 변경 단위가 없습니다.</article>'
+    content += navigation
     if query.get('diff') == ['1']:
-        content += '<h2>전체 원본 diff</h2><pre>' + esc(read_diff(config, s) or 'diff 캐시가 없습니다.') + '</pre>'
+        content += '<h2>전체 원본 diff</h2>' + render_diff(read_diff(config, s) or 'diff 캐시가 없습니다.')
     return content
 
 
@@ -338,7 +402,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(200, json.dumps(web_jobs.describe(row), ensure_ascii=False), 'application/json; charset=utf-8')
             title = {'/settings': '설정', '/repos': '저장소', '/status': '상태'}.get(url.path, '대시보드')
             if url.path in ('/settings', '/repos'):
-                body = render(self.server, conn, csrf, url.path)
+                body = render(self.server, conn, csrf, url.path, parse_qs(url.query))
             elif url.path == '/status':
                 body = web_jobs.status_page(conn, csrf, offline)
             else:
@@ -359,7 +423,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self.check(mutation=True):
             return
         lengths = self.headers.get_all('Content-Length') or []
-        if len(lengths) != 1 or not lengths[0].isascii() or not lengths[0].isdigit() or int(lengths[0]) > 4096 or self.headers.get('Transfer-Encoding'):
+        if len(lengths) != 1 or not lengths[0].isascii() or not lengths[0].isdigit() or int(lengths[0]) > 16384 or self.headers.get('Transfer-Encoding'):
             return self.reply(400, '잘못된 요청 크기')
         if self.headers.get_content_type() != 'application/x-www-form-urlencoded':
             return self.reply(415, '폼 요청만 허용합니다')
@@ -387,6 +451,13 @@ class Handler(BaseHTTPRequestHandler):
         if not self.server.auth.allow_post(csrf):
             return self.reply(429, '요청이 많습니다. 60초 후 다시 시도하세요', extra=[('Retry-After', '60')])
         try:
+            return_values = data.pop('return_query', [])
+            if len(return_values) > 1:
+                raise ValueError('잘못된 목록 상태')
+            return_query = return_values[0] if return_values else ''
+            if return_query:
+                from .web_settings import validate_return_query
+                return_query = validate_return_query(self.path, return_query)
             if self.path in web_jobs.JOB_PATHS:
                 with closing(connect(self.server.config)) as conn:
                     location = web_jobs.mutate(self.server, conn, self.path, data)
@@ -396,6 +467,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(exc.status, page('요청 거부', f'<p>{esc(exc)}</p><p><a href="/status">상태</a> <a href="/">PR 목록</a></p>'))
         except (OSError, ValueError, sqlite3.Error):
             return self.reply(400, '입력과 설정을 확인하세요. 허용하려면 모델 서비스 전송 확인 체크가 필요합니다.')
+        if return_query and location in ('/repos', '/settings'):
+            location += '?' + return_query
         self.reply(303, extra=[('Location', location)])
 
     def do_PUT(self):

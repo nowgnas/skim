@@ -55,6 +55,13 @@ def job_box(row, poll=True):
     body = (f'<div class="job" data-job-id="{d["id"]}" data-job-active="{int(poll and d["active"])}">'
             '<p class="meta" aria-live="polite" data-job-field="summary">'
             + ''.join(f'<span>{esc(part)}</span>' for part in summary_parts(row)) + '</p>')
+    if d['active']:
+        running = d['status'] == 'running'
+        known = running and d['total'] is not None and d['total'] > 0 and d['processed'] is not None and 0 <= d['processed'] <= d['total']
+        body += ('<div class="job-progress" data-job-progress>'
+                 + '<span class="job-progress-label" data-job-progress-label>' + ('작업 중' if running else '대기 중') + '</span>'
+                 + '<progress aria-label="작업 진행"' + (f' max="{d["total"]}" value="{d["processed"]}"' if known else '')
+                 + ('' if running else ' hidden') + '></progress></div>')
     if d['error']:
         body += f'<p class="error">{esc(d["error"])}</p>'
     if d['result']:
@@ -96,9 +103,14 @@ def analysis_panel(conn, pr, csrf, offline):
     else:
         body += '<p><strong>' + WARNING + '</strong></p>'
         body += '<p class="muted">하루 20회 모델 호출 예산과 격리 검사는 수동 요청에도 적용됩니다.' + (' draft PR도 같은 동의, 예산을 따릅니다.' if pr['draft'] else '') + '</p>'
+        current_analysis = pr['analysis'] if pr['analysis'] and pr['analysis']['snapshot_id'] == snapshot['id'] else None
+        if current_analysis and not current_analysis['intent']:
+            body += '<p>의도가 분석되지 않았습니다. 수집 결과와 제외 사유를 확인한 뒤 다시 분석할 수 있습니다.</p>'
+        elif not current_analysis:
+            body += '<p>현재 스냅샷의 분석 결과가 없습니다.</p>'
         body += form('/jobs/analyze', csrf,
                      f'<input type="hidden" name="host" value="{esc(pr.get("host", "github.com"))}"><input type="hidden" name="repository" value="{esc(pr["owner"] + "/" + pr["name"])}">'
-                     f'<input type="hidden" name="number" value="{int(pr["number"])}"><button>이 PR 분석</button>', variant='primary')
+                     f'<input type="hidden" name="number" value="{int(pr["number"])}"><button>{"다시 분석" if current_analysis and not current_analysis["intent"] else "이 PR 분석"}</button>', variant='primary')
     running = jobs.active(conn, 'analyze')
     if running is not None and running['target_id'] != pr['id']:
         body += ('<p>다른 분석 작업(' + esc(running['target'] or '자동 분석') + ')이 '
@@ -111,21 +123,21 @@ def analysis_panel(conn, pr, csrf, offline):
 def status_page(conn, csrf, offline):
     from .web import esc
     from .web_settings import form
-    body = '<h1>상태와 작업</h1><article><h2>상태 점검 (doctor)</h2>'
+    body = '<h1>상태와 작업</h1><div class="status-actions"><article class="status-card"><h2>상태 점검 (doctor)</h2>'
     body += '<p class="muted">gh 인증, Codex 설치, 전용 홈, 캐시된 격리 probe, 모델, 로컬 권한을 점검합니다. 실제 모델 호출(--probe)과 인증, 권한 수정은 하지 않습니다.</p>'
     if offline:
         body += '<p>오프라인 모드에서는 gh, Codex를 실행하는 상태 점검을 하지 않습니다.</p>'
     else:
         body += form('/jobs/doctor', csrf, '<button>상태 점검 실행</button>', variant='primary')
-    body += job_box(jobs.latest(conn, 'doctor'))
-    body += '<h2>복구 안내</h2><ul>' + ''.join(f'<li><strong>{esc(name)}</strong>: {esc(text)}</li>' for name, text in RECOVERY) + '</ul></article>'
-    body += collect_panel(conn, csrf, offline)
-    body += '<h2>활성 작업</h2>'
+    body += job_box(jobs.latest(conn, 'doctor')) + '</article>'
+    body += collect_panel(conn, csrf, offline) + '</div>'
+    body += '<section class="status-section"><h2>활성 작업</h2>'
     active_rows = conn.execute("SELECT * FROM jobs WHERE status IN ('pending','running') ORDER BY id").fetchall()
-    body += '<div class="list">' + (''.join('<article class="job-row">' + job_box(row) + '</article>' for row in active_rows) or '<p class="muted">활성 작업이 없습니다.</p>') + '</div>'
-    body += '<h2>최근 작업</h2>'
+    body += '<div class="list">' + (''.join('<article class="job-row">' + job_box(row) + '</article>' for row in active_rows) or '<p class="muted">활성 작업이 없습니다.</p>') + '</div></section>'
+    body += '<section class="status-section"><h2>최근 작업</h2>'
     rows = jobs.recent(conn)
-    body += '<div class="list">' + (''.join('<article class="job-row">' + job_box(row) + '</article>' for row in rows) or '<p class="muted">작업 기록이 없습니다.</p>') + '</div>'
+    body += '<div class="list">' + (''.join('<article class="job-row">' + job_box(row) + '</article>' for row in rows) or '<p class="muted">작업 기록이 없습니다.</p>') + '</div></section>'
+    body += '<details class="status-recovery"><summary>복구 안내</summary><ul>' + ''.join(f'<li><strong>{esc(name)}</strong>: {esc(text)}</li>' for name, text in RECOVERY) + '</ul></details>'
     return body + script()
 
 

@@ -147,6 +147,30 @@ class SettingsTests(unittest.TestCase):
             segment = body.split('aria-label="변경 보기"', 1)[1].split('</nav>', 1)[0]
             self.assertEqual(segment.count('aria-current='), 1)
 
+    def test_post_preserves_allowed_list_state(self):
+        body = self.request('/settings?policy_q=demo&policy_page=2&org_q=team')[2]
+        self.assertIn('name="return_query"', body)
+        status, headers, _ = self.post('/settings/analysis', scope='repo', target='demo/checkout', policy='deny', return_query='policy_q=demo&policy_page=2&org_q=team')
+        self.assertEqual(status, 303)
+        self.assertEqual(headers['Location'], '/settings?policy_q=demo&policy_page=2&org_q=team')
+        status, headers, _ = self.post('/repos/remove', repository='demo/checkout', return_query='tracked_q=demo&tracked_page=2')
+        self.assertEqual(status, 303)
+        self.assertEqual(headers['Location'], '/repos?tracked_q=demo&tracked_page=2')
+        self.assertEqual(self.post('/settings/model', model='valid-model', return_query='next=https://evil.example')[0], 400)
+
+    def test_post_preserves_long_unicode_searches(self):
+        from urllib.parse import urlencode
+        query = urlencode({'policy_q': '😀' * 200, 'org_q': '한' * 200, 'policy_page': '2'})
+        body = self.request('/settings?' + query)[2]
+        self.assertIn('name="return_query"', body)
+        status, headers, _ = self.post('/settings/model', model='valid-model', return_query=query)
+        self.assertEqual(status, 303)
+        self.assertEqual(headers['Location'], '/settings?' + query)
+        self.assertEqual(self.post('/settings/model', model='valid-model', return_query='policy_page=invalid')[0], 400)
+        body = self.request('/settings?policy_page=invalid&policy_q=demo')[2]
+        self.assertIn('name="return_query" value="policy_q=demo"', body)
+        self.assertEqual(self.post('/settings/model', model='valid-model', return_query='policy_q=demo')[0], 303)
+
     def test_add_validates_input_and_source_before_external_call(self):
         for name in ['a/..', 'a/a..b', 'a/.', 'a/b/c', '-a/b', 'a/b?x', 'a/b;sh', 'a/b c', 'a'*40+'/b', 'a/'+'b'*101]:
             self.assertEqual(self.post('/repos/add', repository=name, source='responsible')[0], 400, name)
