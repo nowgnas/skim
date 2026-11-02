@@ -3,6 +3,8 @@ from contextlib import redirect_stdout
 from dataclasses import replace
 import io
 import threading
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 from contextlib import closing
 from html.parser import HTMLParser
@@ -27,6 +29,13 @@ class SettingsTests(unittest.TestCase):
     def setUp(self):
         self.setup_http()
         self.server.repo_lookup = RepoLookup(self.config, clock=lambda: self.now)
+        model_home = tempfile.TemporaryDirectory()
+        self.addCleanup(model_home.cleanup)
+        model_env = patch.dict(os.environ, CODEX_HOME=model_home.name)
+        model_env.start()
+        self.addCleanup(model_env.stop)
+        (Path(model_home.name) / 'models_cache.json').write_text(json.dumps({'models': [
+            {'slug': name, 'visibility': 'list'} for name in ('gpt-test:1', 'gpt-test_v1:fast', 'valid-model', 'new', 'test')]}))
 
     def post(self, path, **data):
         return self.request(path, 'POST', {'csrf': self.csrf, **data})
@@ -231,6 +240,131 @@ class SettingsTests(unittest.TestCase):
         with closing(connect(self.config)) as conn:
             self.assertIsNone(conn.execute("SELECT 1 FROM repositories WHERE owner='org'").fetchone())
 
+    def test_team_repository_filter_and_cache_separation(self):
+        lookup = self.server.repo_lookup
+        def response(endpoint):
+            if endpoint == 'user':
+                return {'login': 'me'}
+            if endpoint == 'user/teams?per_page=100&page=1':
+                return [{'organization': {'login': 'org'}, 'slug': 'alpha'},
+                        {'organization': {'login': 'org'}, 'slug': 'beta'}]
+            if endpoint.startswith('orgs/org/teams/'):
+                return [{'full_name': 'org/common'}, {'full_name': 'org/' + endpoint.split('/')[3].split('?')[0]}]
+            if endpoint.startswith('user/repos?'):
+                return [{'full_name': 'org/everyone'}]
+            raise AssertionError(endpoint)
+        with patch.object(lookup.gh, 'get', side_effect=response) as gh:
+            self.assertEqual(self.post('/repos/load', mode='team')[0], 303)
+            self.wait_lookup()
+            self.assertIn('github.com / 내 팀 저장소', self.repo_jobs()[-1]['target'])
+            self.assertEqual(lookup.items, ['org/alpha', 'org/beta', 'org/common'])
+            self.assertIn('내 팀 저장소', self.request('/repos')[2])
+            self.post('/repos/load', mode='all')
+            self.wait_lookup()
+            self.assertEqual(lookup.items, ['org/everyone'])
+            self.assertGreaterEqual(gh.call_count, 5)
+        with closing(connect(self.config)) as conn:
+            self.assertIsNone(conn.execute("SELECT 1 FROM repositories WHERE owner='org'").fetchone())
+
+    def test_team_filter_empty_and_truncated_results(self):
+        lookup = self.server.repo_lookup
+        with patch.object(lookup.gh, 'get', return_value=[]):
+            self.post('/repos/load', mode='team')
+            self.wait_lookup()
+        self.assertEqual(lookup.items, [])
+        self.assertIn('조회된 저장소가 없습니다', self.request('/repos')[2])
+        lookup.expires = 0
+        teams = [{'organization': {'login': 'org'}, 'slug': 'team'}]
+        def response(endpoint):
+            if endpoint.startswith('user/teams?'):
+                return teams
+            page = int(endpoint.split('page=')[-1])
+            return [{'full_name': f'org/repo-{page}-{i}'} for i in range(100)]
+        with patch.object(lookup.gh, 'get', side_effect=response):
+            self.post('/repos/load', mode='team')
+            self.wait_lookup()
+        self.assertEqual(len(lookup.items), 1000)
+        self.assertIn('일부 결과만 표시', self.request('/repos')[2])
+        self.assertFalse(lookup.fresh('github.corp.example', 'team'))
+        self.assertFalse(lookup.fresh('github.com', 'all'))
+        self.assertTrue(lookup.fresh('github.com', 'team'))
+
+    def test_team_filter_pagination_request_limit_and_failures(self):
+        lookup = self.server.repo_lookup
+        old = ['old/repo']
+        lookup.items = old[:]
+        def bad_team(endpoint):
+            return [{'organization': {'login': 'org'}, 'slug': '../bad'}]
+        with patch.object(lookup.gh, 'get', side_effect=bad_team):
+            self.post('/repos/load', mode='team')
+            self.wait_lookup()
+        self.assertEqual(lookup.items, old)
+        self.assertEqual(self.repo_jobs()[-1]['status'], 'failed')
+        def bad_repo(endpoint):
+            if endpoint.startswith('user/teams?'):
+                return [{'organization': {'login': 'org'}, 'slug': 'team'}]
+            return [{'full_name': 'other/repo'}]
+        with patch.object(lookup.gh, 'get', side_effect=bad_repo):
+            self.post('/repos/load', mode='team')
+            self.wait_lookup()
+        self.assertEqual(lookup.items, old)
+        self.assertEqual(self.repo_jobs()[-1]['status'], 'failed')
+        calls = []
+        def limited(endpoint):
+            calls.append(endpoint)
+            if endpoint == 'user/teams?per_page=100&page=1':
+                return [{'organization': {'login': 'org'}, 'slug': f'team-{i}'} for i in range(100)]
+            if endpoint == 'user/teams?per_page=100&page=2':
+                return [{'organization': {'login': 'org'}, 'slug': 'last'}]
+            return []
+        with patch.object(lookup.gh, 'get', side_effect=limited):
+            self.post('/repos/load', mode='team')
+            self.wait_lookup()
+        self.assertEqual(len(calls), 50)
+        self.assertIn('user/teams?per_page=100&page=2', calls)
+        self.assertIn('일부 결과만 표시', self.request('/repos')[2])
+
+    def test_team_filter_rejects_sso_partial_response(self):
+        lookup = self.server.repo_lookup
+        lookup.items = ['old/repo']
+        response = Mock(returncode=0, stdout='HTTP/1.1 200 OK\r\nX-GitHub-SSO: partial-results; organizations=123\r\n\r\n[]')
+        with patch.object(lookup.gh, 'runner', return_value=response):
+            self.post('/repos/load', mode='team')
+            self.wait_lookup()
+        self.assertEqual(lookup.items, ['old/repo'])
+        self.assertEqual(self.repo_jobs()[-1]['status'], 'failed')
+        self.assertIn('SSO', self.repo_jobs()[-1]['last_error'])
+        self.assertFalse(lookup.gh.require_complete_sso)
+
+    def test_team_filter_preserves_old_results_if_later_team_sso_is_partial(self):
+        lookup = self.server.repo_lookup
+        lookup.items = ['old/repo']
+        def reply(command, **kwargs):
+            endpoint = command[-1]
+            if endpoint.startswith('user/teams?'):
+                body = json.dumps([{'organization': {'login': 'org'}, 'slug': 'one'},
+                                   {'organization': {'login': 'org'}, 'slug': 'two'}])
+                return Mock(returncode=0, stdout='HTTP/1.1 200 OK\r\n\r\n' + body)
+            if '/one/' in endpoint:
+                return Mock(returncode=0, stdout='HTTP/1.1 200 OK\r\n\r\n[{"full_name":"org/one"}]')
+            return Mock(returncode=0, stdout='HTTP/1.1 200 OK\r\nX-GitHub-SSO: partial-results; organizations=123\r\n\r\n[]')
+        with patch.object(lookup.gh, 'runner', side_effect=reply):
+            self.post('/repos/load', mode='team')
+            self.wait_lookup()
+        self.assertEqual(lookup.items, ['old/repo'])
+        self.assertEqual(self.repo_jobs()[-1]['status'], 'failed')
+        self.assertIn('SSO', self.repo_jobs()[-1]['last_error'])
+
+    def test_team_filter_failure_retains_previous_result(self):
+        lookup = self.server.repo_lookup
+        lookup.items = ['old/repo']
+        with patch.object(lookup.gh, 'get', side_effect=ValueError('failed')):
+            self.post('/repos/load', mode='team')
+            self.wait_lookup()
+        self.assertEqual(lookup.items, ['old/repo'])
+        self.assertEqual(self.repo_jobs()[-1]['status'], 'failed')
+        self.assertEqual(self.post('/repos/load', mode='invalid')[0], 400)
+
     def test_listing_limit_failure_and_worker_deduplication(self):
         lookup = self.server.repo_lookup
         with patch.object(lookup.gh, 'get', side_effect=lambda endpoint: {'login': 'me'} if endpoint == 'user' else [{'full_name': 'org/repo'}]*100) as gh:
@@ -251,7 +385,7 @@ class SettingsTests(unittest.TestCase):
         self.post('/repos/add', repository='org/another', source='owned')
         pending = self.repo_jobs('pending')
         self.assertEqual(len(pending), 1)
-        self.assertEqual(pending[0]['target'], '접근 가능한 저장소 목록')
+        self.assertEqual(pending[0]['target'], 'github.com / 접근 가능한 저장소 목록')
 
     def test_github_uses_fixed_read_only_argv_no_shell(self):
         runner = Mock(return_value=Mock(returncode=0, stdout='{"login":"me"}'))
@@ -299,13 +433,42 @@ class SettingsTests(unittest.TestCase):
                      dict(scope='org', target='org', policy='deny', unexpected='x')]:
             self.assertEqual(self.post('/settings/analysis', **data)[0], 400)
 
+    def test_model_dropdown_validates_cache_and_preserves_legacy(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, CODEX_HOME=directory):
+            cache = Path(directory) / 'models_cache.json'
+            cache.write_text(json.dumps({'models': [{'slug': 'model-one', 'visibility': 'list'},
+                                                     {'slug': 'hidden', 'visibility': 'hide'}]}))
+            target = self.config.config_dir / 'config.json'
+            settings = json.loads(target.read_text())
+            settings['codex_model'] = 'legacy-model'
+            target.write_text(json.dumps(settings))
+            body = self.request('/settings')[2]
+            self.assertIn('<select name="model"', body)
+            self.assertIn('value="model-one"', body)
+            self.assertIn('value="legacy-model" selected', body)
+            self.assertNotIn('value="hidden"', body)
+            self.assertEqual(self.post('/settings/model', model='other-model')[0], 400)
+            settings['codex_model'] = 'a' * 65
+            target.write_text(json.dumps(settings))
+            self.assertEqual(self.post('/settings/model', model='a' * 65)[0], 303)
+            self.assertEqual(self.post('/settings/model', model='model-one')[0], 303)
+            self.assertEqual(self.post('/settings/model', model='')[0], 303)
+            self.assertNotIn('codex_model', json.loads(target.read_text()))
+            cache.write_text('invalid')
+            body = self.request('/settings')[2]
+            self.assertIn('모델 목록을 불러올 수 없습니다', body)
+            self.assertEqual(self.post('/settings/model', model='model-one')[0], 400)
+
     def test_model_validation_atomic_permissions_and_override(self):
         target = self.config.config_dir / 'config.json'
         before = json.loads(target.read_text())
-        for value in ['', 'unknown', '-flag', 'a/b', 'a b', '<script>', 'x'*65]:
+        for value in ['unknown', '-flag', 'a/b', 'a b', '<script>', 'x'*65]:
             self.assertEqual(self.post('/settings/model', model=value)[0], 400, value)
             self.assertEqual(json.loads(target.read_text()), before)
-        self.assertEqual(self.post('/settings/model', model='gpt-test_v1:fast')[0], 303)
+        with patch('skim.web_settings.model_choices', return_value=['gpt-test_v1:fast']):
+            self.assertEqual(self.post('/settings/model', model='gpt-test_v1:fast')[0], 303)
         settings = json.loads(target.read_text())
         self.assertEqual(settings['codex_model'], 'gpt-test_v1:fast')
         self.assertEqual(settings['poll_interval_seconds'], before['poll_interval_seconds'])

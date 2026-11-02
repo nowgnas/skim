@@ -21,7 +21,8 @@ const box = { dataset: { jobId: '1' }, querySelector(selector) {
   return selector.includes('summary') ? field : selector.includes('label') ? label : progress;
 }};
 let job = {active: true, status: 'running', processed: 2, total: 5, summary_parts: ['실행 중']};
-const context = { document: { querySelectorAll: () => [box], createElement: () => ({}) },
+const listeners = {};
+const context = { document: { querySelectorAll: () => [box], createElement: () => ({}), addEventListener: (name, fn) => { listeners[name] = fn; } },
   fetch: () => Promise.resolve({ok: true, json: () => Promise.resolve(job)}),
   setTimeout: fn => queue.push(fn), location: {reload: () => { throw Error('unexpected reload'); }},
   encodeURIComponent, Number };
@@ -40,6 +41,13 @@ const tick = async () => { queue.shift()(); await new Promise(resolve => setImme
   await tick();
   assert.equal(label.textContent, '대기 중');
   assert.equal(progress.hidden, true);
+  listeners.input({target: {closest: () => true}});
+  const added = [];
+  box.append = node => added.push(node);
+  job = {active: false, status: 'completed', summary_parts: ['완료']};
+  await tick();
+  assert.equal(label.textContent, '작업 종료');
+  assert.equal(added[0].textContent, '결과 새로고침');
 })().catch(err => { console.error(err); process.exitCode = 1; });
 '''
         subprocess.run(['node', '-e', harness, str(script)], check=True, capture_output=True, text=True)

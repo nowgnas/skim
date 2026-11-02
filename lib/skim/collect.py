@@ -50,6 +50,7 @@ class GitHub:
         self.runner = runner or subprocess.run
         self.clock = clock
         self.not_before = 0
+        self.require_complete_sso = False
 
     def get(self, endpoint, *, diff=False):
         if self.clock() < self.not_before:
@@ -96,6 +97,8 @@ class GitHub:
             if status in (401, 403):
                 raise CollectionError('GitHub 인증·권한 실패: gh auth login과 저장소 권한을 확인하세요')
             raise CollectionError('GitHub 조회 실패: 네트워크 연결과 GitHub 상태를 확인하세요')
+        if self.require_complete_sso and 'partial-results' in headers.get('x-github-sso', '').lower():
+            raise CollectionError('GitHub 조직 SSO 승인 필요: 일부 결과가 누락되어 이전 목록을 유지합니다')
         return raw if diff else json.loads(raw)
 
     def pages(self, endpoint, **params):

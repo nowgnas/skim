@@ -142,6 +142,11 @@ class WebTests(unittest.TestCase):
         self.assertEqual(self.request('/')[0], 200)
         self.assertEqual(self.request('/?pr_q=checkout')[0], 200)
 
+    def test_detail_analysis_action_precedes_change_units(self):
+        body = self.request('/pr/1')[2]
+        self.assertLess(body.index('PR 분석 요청'), body.index('aria-label="변경 보기"'))
+        self.assertNotIn('aria-label="검토하기:', self.request('/')[2])
+
     def test_analysis_time_shared_once_when_identical(self):
         with closing(connect(self.config)) as conn, conn:
             conn.execute("UPDATE analyses SET created_at='same-analysis'")
