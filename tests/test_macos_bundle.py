@@ -80,6 +80,20 @@ class BundleTests(unittest.TestCase):
             self.assertEqual(self.prepare(), 0)
         self.assertFalse(any(c[0] == 'codesign' for c in self.commands))
 
+    def test_reused_log_and_plist_must_keep_private_stderr(self):
+        self.prepare()
+        app, agent = self.output / bundle.APP_NAME, self.output / 'com.skim.web.plist'
+        log = self.config.data_dir / 'launchagent.stderr.log'
+        log.chmod(0o622)
+        with self.assertRaises(ValueError):
+            bundle.prepare_log(self.config.data_dir)
+        log.chmod(0o600)
+        saved = self.settings()
+        saved['StandardErrorPath'] = '/dev/null'
+        agent.write_bytes(plistlib.dumps(saved))
+        with self.assertRaisesRegex(ValueError, '로그'):
+            bundle.validate_existing(app, agent, self.root, self.config)
+
     def test_refuses_overwrite(self):
         self.assertEqual(self.prepare(), 0)
         saved = (self.output / 'com.skim.web.plist').read_bytes()
@@ -123,6 +137,24 @@ class BundleTests(unittest.TestCase):
         agent.mkdir()
         with self.assertRaises(ValueError):
             bundle.trusted(agent)
+
+    def test_partial_installation_environment_mismatch_is_rejected(self):
+        self.prepare()
+        app, agent = self.output / bundle.APP_NAME, self.output / 'com.skim.web.plist'
+        missing = self.output / 'missing'
+        with patch.dict(os.environ, CODEX_HOME='/demo/different'):
+            for existing_app, existing_agent in ((app, missing), (missing, agent)):
+                with self.assertRaisesRegex(ValueError, '환경'):
+                    bundle.validate_existing(existing_app, existing_agent, self.root, self.config)
+
+    def test_install_refuses_unmanaged_name_collision_before_launchctl(self):
+        app = self.home / 'Applications' / bundle.APP_NAME
+        app.mkdir(parents=True)
+        with redirect_stderr(io.StringIO()) as output:
+            self.assertEqual(bundle.install_app(self.config), 1)
+        self.assertIn('마커 없는 기존 앱', output.getvalue())
+        self.assertTrue(app.exists())
+        self.assertEqual(self.commands, [])
 
     def test_uninstall_preserves_data_and_refuses_unmanaged_app(self):
         # 실제 소스 루트에 속한 가짜 번들을 사용자 임시 홈으로 설치한다.

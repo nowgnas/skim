@@ -39,6 +39,17 @@ def trusted(path, directory=False, private=False):
         raise ValueError(f'소유자·권한·종류가 안전하지 않습니다: {path}')
 
 
+def prepare_log(data_dir):
+    data_dir = Path(data_dir)
+    data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    log = data_dir / 'launchagent.stderr.log'
+    if log.exists() or log.is_symlink():
+        trusted(log, private=True)
+    fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    os.close(fd)
+    return log
+
+
 def validate_existing(app, agent, root, config, check_environment=True):
     expected = {'root': str(root), 'data_dir': str(config.data_dir.resolve()),
                 'environment': environment_settings()}
@@ -60,6 +71,8 @@ def validate_existing(app, agent, root, config, check_environment=True):
             saved = plistlib.load(stream)
         if saved.get('Label') != 'com.skim.web' or saved.get('ProgramArguments') != [str(root / 'bin/skim'), 'web', '--no-browser']:
             raise ValueError('기존 LaunchAgent는 다른 설치에 속합니다.')
+        if check_environment and (saved.get('StandardOutPath') != '/dev/null' or saved.get('StandardErrorPath') != str(config.data_dir.resolve() / 'launchagent.stderr.log')):
+            raise ValueError('기존 LaunchAgent의 로그 설정이 현재 설치와 다릅니다.')
         if check_environment and saved.get('EnvironmentVariables') != expected['environment']:
             raise ValueError('기존 LaunchAgent와 현재 환경이 다릅니다. 같은 환경에서 실행하세요.')
 
@@ -115,12 +128,7 @@ def main(argv=None, quiet=False):
               'on error\ndisplay dialog "skim 서버가 실행 중인지 확인해 주세요." buttons {"확인"} default button 1\n'
               'end try\nend run')
     try:
-        Path(data_dir).mkdir(parents=True, exist_ok=True, mode=0o700)
-        log = Path(plist['StandardErrorPath'])
-        if log.exists() or log.is_symlink():
-            trusted(log, private=True)
-        fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-        os.close(fd)
+        prepare_log(data_dir)
         subprocess.run(['/usr/bin/osacompile', '-o', str(app), '-e', source], check=True, capture_output=True)
         marker = app / 'Contents/Resources/skim-managed.plist'
         with marker.open('wb') as stream:
@@ -150,10 +158,10 @@ def install_app(config):
     home = Path.home()
     app = home / 'Applications' / APP_NAME
     agent = home / 'Library/LaunchAgents/com.skim.web.plist'
-    marker = app / 'Contents/Resources/skim-managed.plist'
     label = f'gui/{os.getuid()}/com.skim.web'
     try:
         validate_existing(app, agent, root, config)
+        prepare_log(config.data_dir.resolve())
         status = subprocess.run(['/bin/launchctl', 'print', label], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
         if status == 0:
             if not agent.exists():
