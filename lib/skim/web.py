@@ -29,6 +29,14 @@ CSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'sel
 STATIC = Path(__file__).with_name('web_static')
 RULE_LABELS = {'install_script': '설치 스크립트'}
 RANK = {'high': 3, 'mid': 2, 'low': 1}
+# 값(쿼리·클래스)은 그대로 두고 화면 표시만 한국어로 바꾼다.
+LABELS = {'high': '높음', 'mid': '보통', 'low': '낮음', 'unanalyzed': '미분석',
+          'completed': '분석 완료', 'partial': '일부 분석', 'failed': '분석 실패', 'blocked': '분석 차단',
+          'deferred': '분석 보류', 'stale': '이전 SHA 결과', '1': '리뷰 요청 받음'}
+
+
+def label(value):
+    return LABELS.get(value, value)
 
 
 def constant_equal(left, right):
@@ -158,7 +166,7 @@ def badges(pr):
         labels.append('모델 판단: ' + ', '.join(pr['model_flags']))
     if pr['unanalysed']:
         labels.append('모델 판단: 미분석' if not pr['items'] else '모델 판단: 일부 미분석')
-    return ((f'<span class="badge {esc(pr["importance"])}">{esc(pr["importance"])}</span> '
+    return ((f'<span class="badge {esc(pr["importance"])}">중요도 {esc(label(pr["importance"]))}</span> '
              if pr["importance"] != "unanalyzed" else "")
             + ''.join(f'<span>{esc(label)}</span>' for label in labels)
             + ('<span class="badge">리뷰 요청</span>' if pr.get('review') else '')
@@ -170,7 +178,7 @@ def repository_label(pr):
     return prefix + pr['owner'] + '/' + pr['name']
 
 
-def list_controls(items, query, prefix, label, text):
+def list_controls(items, query, prefix, label, text, search_form=True):
     """각 목록의 검색과 페이지 상태를 독립적으로 유지한다."""
     search_key, page_key = prefix + '_q', prefix + '_page'
     term = query.get(search_key, [''])[0][:200]
@@ -184,9 +192,9 @@ def list_controls(items, query, prefix, label, text):
                      for value in values)
     controls = (f'<form class="filters" method="get">{hidden}<label>{esc(label)} 검색 '
                 f'<input type="search" name="{search_key}" value="{esc(term)}" maxlength="200"></label>'
-                '<button class="btn secondary">검색</button></form>')
+                '<button class="btn secondary">검색</button></form>') if search_form else ''
     controls += f'<p class="meta">{len(filtered)}개 / {number}/{pages} 페이지</p>'
-    if not filtered:
+    if not filtered and search_form:
         controls += '<p class="muted">검색 결과가 없습니다.</p>' if term else ''
     def link(target, title):
         params = [(key, value) for key, values in query.items() if key != page_key for value in values]
@@ -212,12 +220,12 @@ def home_team_controls(conn, csrf, lookup, offline, query):
     filters = [(name, query[name][0][:200]) for name in ('repo', 'importance', 'status', 'review', 'pr_q') if query.get(name, [''])[0]]
     hidden = ''.join(f'<input type="hidden" name="{esc(name)}" value="{esc(value)}">' for name, value in filters)
     clear_link = '/?' + urlencode(filters) if filters else '/'
-    body = '<section class="home-team" aria-labelledby="home-team-title"><h2 id="home-team-title">팀 저장소로 보기</h2>'
+    body = '<section class="home-team" aria-labelledby="home-team-title"><h2 id="home-team-title">팀 PR만 보기</h2>'
     if offline:
         body += '<p class="muted">오프라인에서는 팀 저장소를 조회할 수 없습니다.</p>'
     else:
         body += '<p class="muted">호스트의 소속 팀을 불러온 뒤 팀을 선택하세요.</p>'
-        body += form('/home/team', csrf, hidden + host_field(conn, '팀 조회', host) + '<button>소속 팀 불러오기</button>')
+        body += form('/home/team', csrf, hidden + host_field(conn, '팀 조회', host) + '<button>내 팀 목록 불러오기</button>')
         if mode == 'team' and loaded and teams:
             options = '<option value="">팀을 선택하세요</option>'
             options += ''.join('<option value="' + esc(team) + '"' + (' selected' if team == selected else '') + '>' + esc(team) + '</option>' for team in sorted(teams, key=str.casefold))
@@ -248,18 +256,22 @@ def listing(prs, query, csrf, heading_toolbar="", team_controls=None):
                '<p class="home-description">연결한 저장소의 열린 PR과 분석 결과를 확인하세요.</p></div>' + heading_toolbar + '</div>'
                '<section class="home-results" aria-labelledby="pr-list-title"><div class="section-heading"><div>'
                '<h2 id="pr-list-title">열린 PR</h2><p class="muted">필터와 검색으로 살펴볼 변경을 찾아보세요.</p></div></div>'
-               + (team_controls[0] if team_controls else '') + '<form class="filters" method="get">')
-    if query.get('team', [''])[0]:
-        content += f'<input type="hidden" name="team" value="{esc(query["team"][0])}">'
-    if query.get('pr_q', [''])[0]:
-        content += f'<input type="hidden" name="pr_q" value="{esc(query["pr_q"][0])}">'
-    for name, label, values in fields:
-        content += f'<label><span class="sr-only">{label}</span><select name="{name}"><option value="">{label}: 전체</option>'
+               + (team_controls[0] if team_controls else '') + '<form class="filters pr-filters" method="get">')
+    team = query.get('team', [''])[0]
+    if team:
+        content += f'<input type="hidden" name="team" value="{esc(team)}">'
+    # 검색어와 필터를 한 번에 제출해야 바꾼 선택이 검색에서 빠지지 않는다.
+    content += ('<label class="pr-search">PR 검색<input type="search" name="pr_q" value="' + esc(query.get('pr_q', [''])[0][:200])
+                + '" maxlength="200" placeholder="제목, 저장소, 작성자"></label>')
+    for name, title, values in fields:
+        content += f'<label><span class="sr-only">{title}</span><select name="{name}"><option value="">{title}: 전체</option>'
         for value in values:
             selected = ' selected' if query.get(name, [''])[0] == value else ''
-            content += f'<option value="{esc(value)}"{selected}>{esc(value)}</option>'
+            content += f'<option value="{esc(value)}"{selected}>{esc(label(value) if name != "repo" else value)}</option>'
         content += '</select></label>'
-    content += '<button class="btn secondary">필터 적용</button></form>'
+    reset = '/' + ('?' + urlencode([('team', team)]) if team else '')
+    filtering = any(query.get(name, [''])[0] for name in ('pr_q', 'repo', 'importance', 'status', 'review'))
+    content += '<button class="btn secondary">적용</button>' + (f'<a class="btn ghost" href="{esc(reset)}">초기화</a>' if filtering else '') + '</form>'
     has_prs = bool(prs)
     if team_controls and team_controls[1]:
         _, _, ready, host, items = team_controls
@@ -270,8 +282,10 @@ def listing(prs, query, csrf, heading_toolbar="", team_controls=None):
         or (key == 'status' and query[key][0] == 'stale' and pr['stale'])
         for key, value in dict(repo=repository_label(pr), importance=pr['importance'],
                                status=pr['status'], review=str(pr['review'])).items())]
-    prs, controls, navigation = list_controls(prs, query, 'pr', 'PR', lambda p: ' '.join([repository_label(p), str(p['number']), p['title'] or '', p['author'] or '', (p['analysis']['intent'] or '') if p['analysis'] else '']))
+    prs, controls, navigation = list_controls(prs, query, 'pr', 'PR', lambda p: ' '.join([repository_label(p), str(p['number']), p['title'] or '', p['author'] or '', (p['analysis']['intent'] or '') if p['analysis'] else '']), search_form=False)
     content += controls
+    if has_prs and not prs:
+        content += f'<p class="empty">조건에 맞는 PR이 없습니다. <a href="{esc(reset)}">필터 초기화</a></p>'
     collected = {pr['snapshot']['collected_at'] if pr['snapshot'] else '대기' for pr in prs}
     shared_collection = len(collected) == 1
     analyzed = {pr['analysis']['created_at'] if pr['analysis'] else '대기' for pr in prs}
@@ -286,9 +300,11 @@ def listing(prs, query, csrf, heading_toolbar="", team_controls=None):
         content += ('<article class="issue-row"><div class="row-content">' + f'<h2><a href="/pr/{pr["id"]}">{esc(pr["title"])}</a></h2>'
                     + meta(values['repo'] + ' #' + str(pr['number']), pr['author'])
                     + f'<p class="issue-intent">{esc(a["intent"] if a and a["intent"] else "의도 미분석")}</p><p class="meta">{badges(pr)}</p>'
-                    + '<p class="meta"><span class="badge">' + esc(pr['status']) + '</span></p>' + meta(*([] if shared_collection else ['수집 ' + (s['collected_at'] if s else '대기')]),
+                    + '<p class="meta"><span class="badge">' + esc(label(pr['status'])) + '</span></p>' + meta(*([] if shared_collection else ['수집 ' + (s['collected_at'] if s else '대기')]),
                            *([] if shared_analysis else ['분석 ' + (a['created_at'] if a else '대기')])) + '</div></article>')
-    return content + '</div>' + navigation + ('<p class="muted">열린 PR이 없습니다. <a href="/repos">저장소 연결</a>과 <a href="/status">상태 점검</a>, <a href="/settings">설정</a>을 확인하세요.</p>' if not has_prs else '') + '</section>'
+    return content + '</div>' + navigation + ('<div class="empty"><p><strong>아직 수집된 열린 PR이 없습니다.</strong></p>'
+                                              '<p>저장소를 연결한 뒤 수집하면 이곳에 표시됩니다.</p>'
+                                              '<p><a class="btn primary" href="/repos">저장소 연결하기</a> <a class="btn secondary" href="/status">상태 확인</a></p></div>' if not has_prs else '') + '</section>'
 
 
 def github(pr):
@@ -335,7 +351,7 @@ def detail(pr, query, config, offline=False, analysis_panel=""):
     if session:
         sid, url = session
         content += f'<p><a href="{esc(url)}" rel="noreferrer">Sessio: {esc(sid)} ↗</a></p>'
-    content += f'</header><section class="detail-overview" aria-label="PR 검토 요약"><article class="detail-insight"><p class="detail-kicker">검토의 시작</p><h2>변경 의도</h2><p class="detail-intent">{esc(a["intent"] if a and a["intent"] else "미분석: 분석 결과가 없습니다.")}</p><h3>검토 포인트</h3><p class="meta">{badges(pr)}</p></article><article class="detail-status"><p class="detail-kicker">진행 상황</p><h2>수집과 분석 상태</h2><p><span class="badge">{esc(pr["status"])}</span> {esc(a["error"] if a else "")}</p>'
+    content += f'</header><section class="detail-overview" aria-label="PR 검토 요약"><article class="detail-insight"><p class="detail-kicker">검토의 시작</p><h2>변경 의도</h2><p class="detail-intent">{esc(a["intent"] if a and a["intent"] else "미분석: 분석 결과가 없습니다.")}</p><h3>검토 포인트</h3><p class="meta">{badges(pr)}</p></article><article class="detail-status"><p class="detail-kicker">진행 상황</p><h2>수집과 분석 상태</h2><p><span class="badge">{esc(label(pr["status"]))}</span> {esc(a["error"] if a else "")}</p>'
     if a:
         content += meta('모델 ' + a['model'], 'Codex CLI ' + a['cli_version'])
     if s:
@@ -345,15 +361,18 @@ def detail(pr, query, config, offline=False, analysis_panel=""):
         content += meta('분석 ' + str(stats.get('analyzed', 0)), '제외 ' + str(stats.get('excluded', 0)), '누락 ' + str(stats.get('omitted', 0)))
         content += meta('수집 ' + s['collected_at'], '분석 ' + (a['created_at'] if a else '대기'))
     content += '</article></section>' + analysis_panel + '<section class="detail-changes"><div class="section-heading"><h2>변경 살펴보기</h2><p class="muted">중요한 변경부터 확인하거나 원래 파일 순서로 볼 수 있습니다.</p></div><nav class="toolbar segments" aria-label="변경 보기">'
-    for href, label, selected in [('?order=original', '원래 파일 순서', query.get('order', [''])[0] == 'original' and query.get('diff') != ['1']),
+    for href, title, selected in [('?order=original', '원래 파일 순서', query.get('order', [''])[0] == 'original' and query.get('diff') != ['1']),
                                   ('?order=priority', '검토 우선순위', query.get('order', [''])[0] != 'original' and query.get('diff') != ['1']),
-                                  ('?diff=1', '전체 diff 보기', query.get('diff', [''])[0] == '1')]:
+                                  ('?diff=1', '전체 diff', query.get('diff', [''])[0] == '1')]:
         params = parse_qs(href[1:])
         if query.get('unit_q', [''])[0]:
             params['unit_q'] = query['unit_q'][:1]
         href = '?' + urlencode(params, doseq=True)
-        content += f'<a class="btn ghost sm" href="{esc(href)}"' + (' aria-current="true"' if selected else '') + f'>{label}</a>'
+        content += f'<a class="btn ghost sm" href="{esc(href)}"' + (' aria-current="true"' if selected else '') + f'>{title}</a>'
     content += '</nav>'
+    # 전체 diff는 별도 보기이므로 변경 단위 목록 아래에 덧붙이지 않고 바로 보여준다.
+    if query.get('diff') == ['1']:
+        return content + '<h2 id="full-diff">전체 원본 diff</h2>' + render_diff(read_diff(config, s) or 'diff 캐시가 없습니다.') + '</section>'
     units = list(pr['units'])
     def priority(unit):
         item = pr['items'].get(unit['change_id'])
@@ -371,7 +390,7 @@ def detail(pr, query, config, offline=False, analysis_panel=""):
         item = pr['items'].get(unit['change_id'])
         flags = unit.get('candidates', [])
         opened = bool(flags) or not item or item['importance'] == 'high'
-        importance = item['importance'] if item else '미분석'
+        importance = label(item['importance']) if item else '미분석'
         content += (f'<details{" open" if opened else ""}><summary><span class="meta"><span>{esc(unit["file_path"])}</span><span>{esc(unit["change_id"])}</span><span>{esc(importance)}</span>'
                     + ('<span>규칙 기반 후보</span>' if flags else '') + '</span></summary>'
                     f'<p>{esc(item["reason"] if item else unit.get("exclusion_reason") or unit.get("omission_reason") or "분석되지 않은 변경입니다")}</p>'
@@ -387,8 +406,6 @@ def detail(pr, query, config, offline=False, analysis_panel=""):
     if not has_units:
         content += '<article>미분석: 수집된 변경 단위가 없습니다.</article>'
     content += navigation
-    if query.get('diff') == ['1']:
-        content += '<h2>전체 원본 diff</h2>' + render_diff(read_diff(config, s) or 'diff 캐시가 없습니다.')
     return content + '</section>'
 
 

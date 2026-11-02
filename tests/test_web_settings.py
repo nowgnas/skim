@@ -139,13 +139,14 @@ class SettingsTests(unittest.TestCase):
                     self.assertEqual(parser.selected, [expected])
                     target = next(i for i in parser.inputs if i.get('name') == 'target')
                     self.assertEqual(target['type'], 'hidden')
-                    self.assertLess(body.index('<button'), body.index('class="consent"'))
+                    # 동의 체크를 읽은 뒤 저장하도록 체크가 버튼보다 앞에 온다.
+                    self.assertLess(body.index('class="consent"'), body.index('<button'))
                     self.assertNotIn('btn primary', body)
 
     def test_dashboard_filter_get_without_csrf_and_single_primary(self):
         status, _, body = self.request('/?status=partial&review=1')
         self.assertEqual(status, 200)
-        filters = body.split('<form class="filters"', 1)[1].split('</form>', 1)[0]
+        filters = body.split('<form class="filters', 1)[1].split('</form>', 1)[0]
         self.assertNotIn('name="csrf"', filters)
         self.assertLess(body.index('<h1>'), body.index('지금 수집'))
         for path in ('/', '/repos', '/settings', '/status', '/pr/1'):

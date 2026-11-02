@@ -190,6 +190,13 @@ def form(action, csrf, content, variant='secondary'):
             + content + '</form>')
 
 
+def confirm_action(title, effect, confirm_form):
+    """되돌리기 어려운 작업은 펼쳐서 영향을 읽은 뒤에만 제출 버튼이 보이게 한다. 스크립트 없이 동작한다."""
+    from .web import esc
+    return (f'<details class="confirm-action"><summary class="btn danger sm">{esc(title)}</summary>'
+            f'<p>{esc(effect)}</p>' + confirm_form + '</details>')
+
+
 def source_field(target="저장소 연결"):
     from .web import esc
     return '<label>출처<select name="source" aria-label="' + esc(target) + ' 출처"><option value="responsible">담당 (responsible)</option><option value="owned">소유 (owned)</option><option value="managed">관리 (managed)</option></select></label>'
@@ -201,12 +208,14 @@ def policy_form(csrf, scope, target, host="github.com", policy="deny", action='/
     identity = host + '/' + (target or '새 조직')
     target_field = (f'<input type="hidden" name="target" value="{esc(target)}">' if target else
                     f'<label>조직 이름<input name="target" aria-label="{esc(identity)} 이름" required></label>')
+    reset_label = '조직 설정 따르기' if scope == 'repo' else '정책 삭제 (기본 거부)'
     options = ''.join(f'<option value="{value}"' + (' selected' if current == value else '') + f'>{label}</option>'
-                      for value, label in [('deny', '거부'), ('reset', '초기화 / 조직 설정 상속'), ('allow', '허용')])
+                      for value, label in [('deny', '거부'), ('reset', reset_label), ('allow', '허용')])
     return form(action, csrf,
                 f'<input type="hidden" name="host" value="{esc(host)}"><input type="hidden" name="scope" value="{scope}">' + target_field
                 + f'<label class="policy-select"><span class="sr-only">{esc(identity)} 분석 정책</span><select name="policy" aria-label="{esc(identity)} 분석 정책">{options}</select></label>'
-                + f'<button aria-label="{esc(identity)} 분석 정책 저장">저장</button><label class="consent"><input type="checkbox" name="confirm" value="yes" aria-label="{esc(identity)} 모델 서비스 전송 동의">코드가 Codex(모델 서비스)로 전송됨을 이해하고 허용합니다</label>')
+                + f'<label class="consent"><input type="checkbox" name="confirm" value="yes" aria-label="{esc(identity)} 모델 서비스 전송 동의">코드가 Codex(모델 서비스)로 전송됨을 이해하고 허용합니다</label>'
+                + f'<button aria-label="{esc(identity)} 분석 정책 저장">저장</button>')
 
 
 def policy_row(csrf, scope, target, host, policy, effective=None):
@@ -218,9 +227,17 @@ def policy_row(csrf, scope, target, host, policy, effective=None):
 
 
 RETURN_FIELDS = {
-    '/repos': {'tracked_q', 'tracked_page', 'available_q', 'available_page', 'available_team'},
+    '/repos': {'tracked_q', 'tracked_page', 'available_q', 'available_page', 'available_team', 'from_pr'},
     '/settings': {'policy_q', 'policy_page', 'org_q', 'org_page'},
 }
+
+
+def numeric(key):
+    return key.endswith('_page') or key == 'from_pr'
+
+
+def positive(value):
+    return value.isascii() and value.isdigit() and len(value) <= 9 and int(value) > 0
 
 
 def validate_return_query(action, query):
@@ -230,7 +247,7 @@ def validate_return_query(action, query):
     pairs = parse_qsl(query, keep_blank_values=True, strict_parsing=True, max_num_fields=5)
     if (len({key for key, _ in pairs}) != len(pairs)
             or any(key not in RETURN_FIELDS[destination] or len(value) > 200
-                   or (key.endswith('_page') and (not value.isascii() or not value.isdigit() or len(value) > 9))
+                   or (numeric(key) and not positive(value))
                    for key, value in pairs)):
         raise ValueError('잘못된 목록 상태')
     return urlencode(pairs)
@@ -240,7 +257,7 @@ def preserve_list_state(body, path, query):
     from .web import esc
     pairs = [(key, values[0]) for key, values in query.items()
              if key in RETURN_FIELDS[path] and values and len(values[0]) <= 200
-             and (not key.endswith('_page') or (values[0].isascii() and values[0].isdigit() and len(values[0]) <= 9))]
+             and (not numeric(key) or positive(values[0]))]
     if not pairs:
         return body
     field = f'<input type="hidden" name="return_query" value="{esc(urlencode(pairs))}">'
@@ -275,6 +292,10 @@ def render(server, conn, csrf, path, query=None):
     query = query or {}
     if path == '/repos':
         body = '<div class="page-intro"><h1>저장소</h1><p>GitHub 호스트와 조회 범위를 선택하고 리뷰할 저장소를 연결하세요.</p><p class="muted">GitHub에는 읽기 전용으로 접근합니다. 분석 실행은 저장소와 조직의 분석 허용 설정을 따릅니다.</p></div>'
+        from_pr = query.get('from_pr', [''])[0]
+        if positive(from_pr):
+            body += (f'<p class="notice">PR에서 이동했습니다. 아래에서 분석 정책을 <strong>허용</strong>으로 저장한 뒤 '
+                     f'<a href="/pr/{int(from_pr)}">PR로 돌아가 분석을 요청하세요</a>.</p>')
         lookup = getattr(server, 'repo_lookup', None)
         lookup_host, lookup_mode, truncated, loaded, items, teams, selected_team = lookup.snapshot(with_teams=True) if lookup else ('github.com', 'all', False, False, [], [], '')
         choices = '<option value="all"' + (' selected' if lookup_mode == 'all' else '') + '>접근 가능한 전체 저장소</option>'
@@ -321,7 +342,8 @@ def render(server, conn, csrf, path, query=None):
             name = row['owner'] + '/' + row['name']
             body += '<article class="list-row"><div class="row-content"><h3>' + esc(name) + '</h3>' + meta(row['host'], row['source'], '추적 중' if row['tracked'] else '연결 해제됨') + '</div><div class="toolbar row-actions">'
             if row['tracked']:
-                body += form('/repos/remove', csrf, f'<input type="hidden" name="host" value="{esc(row["host"])}"><input type="hidden" name="repository" value="{esc(name)}"><button aria-label="{esc(row["host"] + "/" + name)} 연결 해제">연결 해제</button>', variant='danger')
+                body += confirm_action('연결 해제', '추적과 수집을 멈춥니다. 분석 정책은 그대로 남아 동의가 철회되지 않으며, 리뷰 요청으로만 남은 PR이 아니면 수집 기록이 정리될 수 있습니다.',
+                                       form('/repos/remove', csrf, f'<input type="hidden" name="host" value="{esc(row["host"])}"><input type="hidden" name="repository" value="{esc(name)}"><button aria-label="{esc(row["host"] + "/" + name)} 연결 해제 확인">연결 해제 확인</button>', variant='danger'))
             body += '</div>'
             body += '<div class="repository-policy"><span class="badge">실제 분석: ' + ('허용' if analysis_allowed(conn, row['id']) else '거부') + '</span>' + policy_form(csrf, 'repo', name, row['host'], row['analysis_policy'], '/repos/policy') + '</div></article>'
         body += '</div>' + navigation + '</section><details class="repo-section host-management"><summary>GitHub 호스트 관리</summary>' + host_settings(server, conn, csrf) + '</details>'
@@ -332,7 +354,8 @@ def render(server, conn, csrf, path, query=None):
     body += '<h2>모델 설정</h2>' + meta('파일 값: ' + (model or '미설정'), '실제 적용: ' + (Config.parse_codex_model(settings) or '자동 감지'))
     if 'SKIM_CODEX_MODEL' in os.environ:
         body += '<p>SKIM_CODEX_MODEL 환경변수가 파일 설정보다 우선합니다.</p>'
-    body += '<p>다음 분석부터 적용됩니다. 모델 변경 후 격리 검증이 일치하지 않으면 분석이 차단됩니다. skim doctor --probe로 재검증하세요.</p>'
+    body += ('<p>다음 분석부터 적용됩니다. 모델 변경 후 격리 검증이 일치하지 않으면 분석이 차단됩니다. '
+             '<a href="/status#codex-setup">상태 화면의 격리 검증</a>이나 <code>skim doctor --probe</code>로 재검증하세요.</p>')
     choices = model_choices()
     if not choices:
         body += '<p class="muted">모델 목록을 불러올 수 없습니다. Codex 로그인과 모델 목록을 확인하세요.</p>'
@@ -504,7 +527,8 @@ def host_settings(server, conn, csrf):
         body += '<article class="list-row"><div class="row-content"><h3>' + esc(host) + '</h3><p class="meta"><span class="badge">' + esc(status) + '</span><span>마지막 확인: ' + esc(cached[1] if cached else '없음') + '</span></p></div><div class="toolbar row-actions">'
         body += form('/hosts/check', csrf, f'<input type="hidden" name="host" value="{esc(host)}"><button aria-label="{esc(host)} 인증 다시 확인">인증 다시 확인</button>')
         if host != 'github.com':
-            body += form('/hosts/remove', csrf, f'<input type="hidden" name="host" value="{esc(host)}"><button aria-label="{esc(host)} 호스트 삭제">호스트 삭제</button>', variant='danger')
+            body += confirm_action('호스트 삭제', '이 호스트의 저장소 추적과 분석 허용을 끄고 조직 정책을 삭제합니다. 수집 기록은 보존하지만 대시보드에서 숨겨집니다.',
+                               form('/hosts/remove', csrf, f'<input type="hidden" name="host" value="{esc(host)}"><button aria-label="{esc(host)} 호스트 삭제 확인">호스트 삭제 확인</button>', variant='danger'))
         body += '</div></article>'
     return body + '</div>' + form('/hosts/add', csrf, '<label>호스트<input name="host" aria-label="새 호스트 추가" required maxlength="253" placeholder="github.corp.example"></label><button>호스트 추가</button>')
 
