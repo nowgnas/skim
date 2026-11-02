@@ -30,31 +30,37 @@ class RepoLookup:
         self.lock = threading.Lock()
         self.items = []
         self.host = "github.com"
+        self.mode = "all"
+        self.truncated = False
         self.expires = 0
         self.gh = GitHub()
         self._host_limits = {}
 
-    def snapshot(self, with_host=False):
+    def snapshot(self, with_host=False, with_mode=False):
         with self.lock:
             items = list(self.items)
+            if with_mode:
+                return self.host, self.mode, self.truncated, self.expires > 0, items
             return (self.host, items) if with_host else items
 
-    def fresh(self, host="github.com"):
+    def fresh(self, host="github.com", mode="all"):
         with self.lock:
-            return host == self.host and self.clock() < self.expires
+            return host == self.host and mode == self.mode and self.clock() < self.expires
 
-    def run(self, parts, source, host="github.com"):
+    def run(self, parts, source, host="github.com", mode="all"):
         """워커 전용. 성공 메시지를 반환하고 실패는 예외로 알린다(이전 목록은 보존)."""
         with closing(connect(self.config)) as conn:
             host = registered(conn, host)
         self.gh.host = host
         self.gh.not_before = self._host_limits.get(host, 0)
+        self.gh.require_complete_sso = mode == 'team' and parts is None
         try:
-            return self._run(parts, source, host)
+            return self._run(parts, source, host, mode)
         finally:
             self._host_limits[host] = self.gh.not_before
+            self.gh.require_complete_sso = False
 
-    def _run(self, parts, source, host):
+    def _run(self, parts, source, host, mode="all"):
         if parts:
             payload = self.gh.get('repos/' + '/'.join(parts))
             actual = web_repository(payload['full_name'])
@@ -64,6 +70,8 @@ class RepoLookup:
                 registered(conn, host)
                 add_repository(conn, actual, source, host)
             return '저장소를 등록했습니다. 분석은 별도 허용이 필요합니다.'
+        if mode == 'team':
+            return self._team_repos(host)
         user = self.gh.get('user')
         if not isinstance(user, dict) or not isinstance(user.get('login'), str):
             raise ValueError('사용자 응답 형식 오류')
@@ -84,10 +92,74 @@ class RepoLookup:
             truncated = True
         with self.lock:
             self.host = host
+            self.mode = "all"
+            self.truncated = truncated
             self.items = sorted(items, key=str.lower)
             self.expires = self.clock() + 60
         return ('최대 1,000개까지만 표시합니다. 직접 입력도 사용할 수 있습니다.' if truncated else
                 '접근 가능한 저장소 조회 완료. 선택한 저장소만 등록합니다.')
+
+    def _team_repos(self, host):
+        teams, items = [], {}
+        requests = 0
+        truncated = False
+        for page in range(1, 11):
+            batch = self.gh.get(f'user/teams?per_page=100&page={page}')
+            requests += 1
+            if not isinstance(batch, list):
+                raise ValueError('팀 응답 형식 오류')
+            for row in batch:
+                try:
+                    org = row['organization']['login']
+                    slug = row['slug']
+                    web_repository(org + '/repo')
+                    if not isinstance(slug, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9-]{0,99}', slug):
+                        raise ValueError('팀 이름 형식 오류')
+                    teams.append((org, slug))
+                except (KeyError, TypeError, ValueError):
+                    raise ValueError('팀 응답 형식 오류') from None
+            if len(batch) < 100:
+                break
+        else:
+            truncated = True
+        teams_truncated = truncated
+        truncated = False
+        for org, slug in teams:
+            page = 1
+            while True:
+                if requests >= 50 or len(items) >= 1000:
+                    truncated = True
+                    break
+                batch = self.gh.get(f'orgs/{org}/teams/{slug}/repos?per_page=100&page={page}')
+                requests += 1
+                if not isinstance(batch, list):
+                    raise ValueError('팀 저장소 응답 형식 오류')
+                for row in batch:
+                    try:
+                        name = '/'.join(web_repository(row['full_name']))
+                        if name.split('/')[0].casefold() != org.casefold():
+                            raise ValueError('팀 조직 불일치')
+                        if name.casefold() not in items and len(items) >= 1000:
+                            truncated = True
+                            break
+                        items.setdefault(name.casefold(), name)
+                    except (KeyError, TypeError, ValueError):
+                        raise ValueError('팀 저장소 응답 형식 오류') from None
+                if truncated or len(batch) < 100:
+                    break
+                page += 1
+            if truncated:
+                break
+        truncated = truncated or teams_truncated
+        with self.lock:
+            self.host = host
+            self.mode = 'team'
+            self.truncated = truncated
+            self.items = sorted(items.values(), key=str.lower)
+            self.expires = self.clock() + 60
+        if truncated:
+            return '내 팀 저장소 조회가 한도에 도달해 일부만 표시합니다.'
+        return '내 팀 저장소 조회 완료. 선택한 저장소만 등록합니다.'
 
 
 def form(action, csrf, content, variant='secondary'):
@@ -198,15 +270,22 @@ def render(server, conn, csrf, path, query=None):
             body += '<article class="list-row"><div class="row-content"><h3>' + esc(name) + '</h3>' + meta(row['host'], row['source'], '추적 중') + '</div><div class="toolbar row-actions">'
             body += form('/repos/remove', csrf, f'<input type="hidden" name="host" value="{esc(row["host"])}"><input type="hidden" name="repository" value="{esc(name)}"><button aria-label="{esc(row["host"] + "/" + name)} 연결 해제">연결 해제</button>', variant='danger') + '</div></article>'
         body += '</div>' + navigation + '<h2>저장소 연결</h2><div class="connect-toolbar">' + form('/repos/add', csrf, host_field(conn) + '<label>owner/repo<input name="repository" required maxlength="140"></label>' + source_field() + '<button>저장소 연결</button>', variant='primary')
-        body += form('/repos/load', csrf, host_field(conn, '저장소 불러오기') + '<button>접근 가능한 저장소 불러오기</button>') + '</div>'
         lookup = getattr(server, 'repo_lookup', None)
-        lookup_host, items = lookup.snapshot(with_host=True) if lookup else ('github.com', [])
+        lookup_host, lookup_mode, truncated, loaded, items = lookup.snapshot(with_mode=True) if lookup else ('github.com', 'all', False, False, [])
+        choices = '<option value="all"' + (' selected' if lookup_mode == 'all' else '') + '>접근 가능한 전체 저장소</option>'
+        choices += '<option value="team"' + (' selected' if lookup_mode == 'team' else '') + '>내 팀 저장소</option>'
+        body += form('/repos/load', csrf, host_field(conn, '저장소 불러오기', lookup_host) + '<label>조회 범위<select name="mode">' + choices + '</select></label><button>저장소 불러오기</button>') + '</div>'
         if getattr(server, 'offline', False):
             body += '<p>오프라인 모드에서는 GitHub 저장소를 불러오거나 접근을 확인하지 않습니다.</p>'
         running = jobs.active(conn, 'repos')
         if running is not None:
             body += '<p>이미 저장소 조회 작업이 진행 중입니다. 완료 후 다시 요청하세요. 진행 중 요청은 새 작업을 만들지 않습니다.</p>'
         body += job_box(jobs.latest(conn, 'repos')) + script()
+        body += '<h2>조회 결과: ' + esc(lookup_host) + ' / ' + ('내 팀 저장소' if lookup_mode == 'team' else '전체 저장소') + '</h2>'
+        if truncated:
+            body += '<p>조회 한도에 도달해 일부 결과만 표시합니다.</p>'
+        elif loaded and not items:
+            body += '<p>조회된 저장소가 없습니다. 팀 접근 권한과 조직 SSO를 확인하세요.</p>'
         items, controls, navigation = list_controls(items, query, 'available', '조회된 저장소', lambda name: lookup_host + '/' + name)
         body += controls + '<div class="list">'
         for name in items:
@@ -276,7 +355,10 @@ def mutate(server, path, data):
             getattr(server, 'host_auth', {}).pop(host, None)
         return '/repos'
     if path in ('/repos/load', '/repos/add'):
-        d = fields(data, () if path.endswith('load') else ('repository', 'source'), ('host',))
+        d = fields(data, () if path.endswith('load') else ('repository', 'source'), ('host', 'mode') if path.endswith('load') else ('host',))
+        mode = d.get('mode', 'all')
+        if mode not in ('all', 'team'):
+            raise ValueError('조회 범위를 확인하세요')
         with closing(connect(server.config)) as conn:
             host = registered(conn, d.get('host', 'github.com'))
         parts = None
@@ -286,12 +368,15 @@ def mutate(server, path, data):
                 raise ValueError('잘못된 저장소 출처입니다')
         if getattr(server, 'offline', False):
             return '/repos'
-        if parts is None and server.repo_lookup.fresh(host):
+        if parts is None and server.repo_lookup.fresh(host, mode):
             return '/repos'
         params = dict(repository='/'.join(parts), source=d['source']) if parts else {}
         params['host'] = host
+        if parts is None:
+            params['mode'] = mode
         with closing(connect(server.config)) as conn:
-            jobs.enqueue(conn, 'repos', 0, params.get('repository', '접근 가능한 저장소 목록'), params=params)
+            target = host + '/' + params['repository'] if parts else host + ' / ' + ('내 팀 저장소' if mode == 'team' else '접근 가능한 저장소 목록')
+            jobs.enqueue(conn, 'repos', 0, target, params=params)
         return '/repos'
     if path == '/settings/model':
         d = fields(data, ('model',))
@@ -351,10 +436,10 @@ def mutate(server, path, data):
     return '/repos' if path.startswith('/repos/') else '/settings'
 
 
-def host_field(conn, purpose="저장소 연결"):
+def host_field(conn, purpose="저장소 연결", selected="github.com"):
     from .web import esc
     return '<label>호스트<select name="host" aria-label="' + esc(purpose) + ' 호스트">' + ''.join(
-        f'<option{" selected" if r[0] == "github.com" else ""}>{esc(r[0])}</option>' for r in conn.execute('SELECT host FROM github_hosts ORDER BY host')) + '</select></label>'
+        f'<option{" selected" if r[0] == selected else ""}>{esc(r[0])}</option>' for r in conn.execute('SELECT host FROM github_hosts ORDER BY host')) + '</select></label>'
 
 
 def host_settings(server, conn, csrf):
