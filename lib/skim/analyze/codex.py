@@ -119,7 +119,7 @@ class CodexAdapter:
             # 실제 CLI는 존재하지 않는 CODEX_HOME을 거부하므로 빈 디렉터리를 만든다.
             (Path(home) / 'codex').mkdir(mode=0o700)
             try:
-                result = self.runner(['codex', *args], capture_output=True, text=True, timeout=15,
+                result = self.runner([os.environ.get('SKIM_CODEX_BIN', 'codex'), *args], capture_output=True, text=True, timeout=15,
                                      cwd=work, env=self._env(home, Path(home) / 'codex'))
                 if result.returncode != 0 or not isinstance(result.stdout, str):
                     raise ValueError()
@@ -230,7 +230,7 @@ class CodexAdapter:
             schema_path.write_text(encode(provider_schema(schema)))
             schema_path.chmod(0o600)
             output = Path(control) / 'output.json'
-            command = ['codex', 'exec', *FLAGS[:4], '--sandbox', 'read-only',
+            command = [os.environ.get('SKIM_CODEX_BIN', 'codex'), 'exec', *FLAGS[:4], '--sandbox', 'read-only',
                        '--output-schema', str(schema_path), '--output-last-message', str(output),
                        '-c', 'web_search="disabled"']
             # 모델 자기보고 대신 이벤트 스트림으로 도구 호출을 객관적으로 판정한다(분석 실행 포함).

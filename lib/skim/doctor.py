@@ -49,7 +49,7 @@ def run(config, runner=None, which=None, adapter=None, probe=False, out=print):
     for label, method in (('codex-home', adapter.check_home), ('version', adapter.check_version),
                           ('flags', adapter.check_flags),
                           ('probe', adapter.probe if probe else adapter.check_probe)):
-        if label != 'codex-home' and (not ready or not which('codex')):
+        if label != 'codex-home' and (not ready or not which(os.environ.get('SKIM_CODEX_BIN', 'codex'))):
             report(False, label, 'Codex 분석 차단: 선행 검사 실패 또는 CLI 없음')
             ready = False
             continue

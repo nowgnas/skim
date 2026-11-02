@@ -549,19 +549,25 @@ class Server(ThreadingHTTPServer):
 
 
 def open_entry(url):
-    """브라우저 실행에 실패해도 출력한 진입 URL로 접속할 수 있다."""
+    """토큰 URL은 macOS 시스템 열기에만 전달한다. BROWSER에는 전달하지 않는다."""
+    import subprocess
     import webbrowser
+    if not re.fullmatch(r'http://127\.0\.0\.1:[0-9]{1,5}/entry#[A-Za-z0-9_-]+', url):
+        return False
     try:
-        opened = webbrowser.open(url)
+        if sys.platform == 'darwin':
+            return subprocess.run(['/usr/bin/open', url], stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL).returncode == 0
+        # 일반 브라우저 실행 인자에는 인증 토큰을 포함하지 않는다.
+        webbrowser.open(url.split('/entry#', 1)[0] + '/')
     except (OSError, webbrowser.Error):
-        opened = False
-    if not opened:
-        print('브라우저를 열지 못했습니다. 위 URL을 브라우저에서 여세요.', flush=True)
+        pass
+    print('터미널에서 skim web을 실행하고 위 URL을 브라우저 주소창에 직접 붙여 넣으세요.', flush=True)
+    return False
 
 
 def open_running(config):
     """실행 중인 서버의 일회용 진입 URL을 로그에 남기지 않고 연다."""
-    import webbrowser
     try:
         with socket.socket(socket.AF_UNIX) as client:
             client.settimeout(5)
@@ -569,7 +575,7 @@ def open_running(config):
             url = client.recv(4096).decode('utf-8')
         if not re.fullmatch(r'http://127\.0\.0\.1:[0-9]{1,5}/entry#[A-Za-z0-9_-]+', url):
             raise ValueError('잘못된 진입 URL')
-        if not webbrowser.open(url):
+        if not open_entry(url):
             raise OSError('브라우저 열기 실패')
         return 0
     except (OSError, UnicodeError, ValueError):

@@ -10,7 +10,7 @@ ROOT="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
 source "$ROOT/lib/python.sh"
 SKIM_CODEX_BIN_DIR="${HOME:-}/.local/share/skim-tools/node_modules/.bin"
 if [[ -n "${HOME:-}" && -x "$SKIM_CODEX_BIN_DIR/codex" ]]; then
-  export PATH="$SKIM_CODEX_BIN_DIR:$PATH"
+  export SKIM_CODEX_BIN="${SKIM_CODEX_BIN:-$SKIM_CODEX_BIN_DIR/codex}"
 fi
 PY="$(skim_find_python)" || exit 2
 export PYTHONPATH="$ROOT/lib${PYTHONPATH:+:$PYTHONPATH}"
