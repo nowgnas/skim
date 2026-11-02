@@ -544,6 +544,10 @@ class Server(ThreadingHTTPServer):
         self.origin = 'http://' + self.authority
         self.repo_lookup = RepoLookup(config)
 
+    def handle_error(self, request, client_address):
+        # 예외 메시지나 요청 원문에는 일회용 진입 토큰이 있을 수 있다.
+        print('skim 웹 요청 처리 실패. 서버 상태를 확인하세요.', file=sys.stderr)
+
     def entry_url(self):
         return self.origin + '/entry#' + self.auth.issue()
 
@@ -575,6 +579,8 @@ def open_running(config):
             url = client.recv(4096).decode('utf-8')
         if not re.fullmatch(r'http://127\.0\.0\.1:[0-9]{1,5}/entry#[A-Za-z0-9_-]+', url):
             raise ValueError('잘못된 진입 URL')
+        if not 1 <= urlsplit(url).port <= 65535:
+            raise ValueError('잘못된 포트')
         if not open_entry(url):
             raise OSError('브라우저 열기 실패')
         return 0
