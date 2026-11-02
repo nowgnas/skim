@@ -103,11 +103,12 @@ class WebTests(unittest.TestCase):
 
     def test_search_state_survives_filters_and_other_lists(self):
         body = self.request('/?pr_q=payment&importance=high')[2]
-        filter_form = body.split('<form class="filters" method="get">', 1)[1].split('</form>', 1)[0]
-        self.assertIn('type="hidden" name="pr_q" value="payment"', filter_form)
-        self.assertIn('name="importance"', filter_form)
-        search_form = body.split('<form class="filters" method="get">', 2)[2].split('</form>', 1)[0]
-        self.assertIn('type="hidden" name="importance" value="high"', search_form)
+        # 검색어와 필터는 한 폼으로 함께 제출되어 서로의 값을 잃지 않는다.
+        filter_form = body.split('<form class="filters pr-filters" method="get">', 1)[1].split('</form>', 1)[0]
+        self.assertIn('type="search" name="pr_q" value="payment"', filter_form)
+        self.assertIn('<option value="high" selected>높음</option>', filter_form)
+        self.assertEqual(body.count('type="search" name="pr_q"'), 1)
+        self.assertIn('>초기화</a>', filter_form)
         body = self.request('/repos?tracked_q=missing&available_q=other')[2]
         tracked_form = next(form.split('</form>', 1)[0] for form in body.split('<form class="filters" method="get">')[1:]
                             if 'type="search" name="tracked_q"' in form.split('</form>', 1)[0])

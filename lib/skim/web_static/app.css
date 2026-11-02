@@ -190,10 +190,9 @@ label:has(>input[type=checkbox]){flex-direction:row;align-items:center;gap:10px;
 /* 정책 */
 .policy-row{align-items:flex-start}
 .policy-row .row-content{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;padding-top:8px}
-.policy-row .action-form{margin:0;display:grid;grid-template-columns:minmax(170px,220px) auto;align-items:center;gap:8px;max-width:420px}
-.policy-row .policy-select{grid-column:1;grid-row:1}
-.policy-row button{grid-column:2;grid-row:1}
-.policy-row .consent{grid-column:1 / -1;grid-row:2;font-size:13px}
+.policy-row .action-form{margin:0;display:flex;flex-wrap:wrap;align-items:center;justify-content:flex-end;gap:8px;max-width:560px}
+.policy-row .policy-select select{min-width:170px}
+.policy-row .consent{flex-basis:auto;font-size:13px}
 @supports selector(:has(*)){
   .action-form:has(select[name=policy]) .consent{display:none}
   .action-form:has(select[name=policy] option[value=allow]:checked) .consent{display:flex}
@@ -204,7 +203,7 @@ label:has(>input[type=checkbox]){flex-direction:row;align-items:center;gap:10px;
 .repo-section .list-row:has(.repository-policy){flex-wrap:wrap}
 .repository-policy{display:flex;align-items:center;gap:12px;flex-wrap:wrap;flex-basis:100%;margin-top:4px;padding:12px 16px;border-radius:var(--radius-ctl);background:var(--surface-sub)}
 .repository-policy .action-form{margin:0;align-items:center}
-.repository-policy .consent{font-size:13px}
+.repository-policy .consent{flex-basis:auto;font-size:13px}
 
 /* PR 상세 */
 .detail-header{margin-bottom:24px}
@@ -311,7 +310,7 @@ pre:empty{display:none}
   .collect-panel{display:flex;flex-direction:column;gap:8px}
   .collect-panel>.action-form{align-self:flex-start}
   .status-actions{grid-template-columns:1fr}
-  .policy-row .action-form{width:100%;max-width:none;grid-template-columns:minmax(0,1fr) auto}
+  .policy-row .action-form{width:100%;max-width:none;justify-content:flex-start}
   .policy-row .row-content{flex-basis:100%}
   .policy-add .consent{flex-basis:100%}
   .repo-discovery>.action-form label{min-width:0;flex:1 1 100%}
@@ -320,3 +319,26 @@ pre:empty{display:none}
   .segments a,.segments .btn{flex:1}
   .btn{max-width:100%}
 }
+
+/* 사용성 보강 */
+.filters.pr-filters label:not(.pr-search){flex:0 1 auto}
+.filters.pr-filters label:not(.pr-search) select{width:auto}
+.filters.pr-filters .pr-search{flex:1 1 100%}
+.filters.pr-filters .pr-search input{width:100%}
+.empty{margin:16px 0;padding:32px 24px;border-radius:var(--radius-box);background:var(--surface-sub);text-align:center;color:var(--muted)}
+.empty strong{color:var(--text);font-size:17px}
+.empty .btn{margin:8px 4px 0}
+.notice{margin:0 0 20px;padding:14px 18px;border-radius:var(--radius-box);background:var(--accent-weak);color:var(--text-sub)}
+.collect-note{margin:0;font-size:13px;text-align:right}
+.confirm-action{margin:0;padding:0;background:transparent;box-shadow:none;border-radius:0}
+.confirm-action>summary{list-style:none}
+.confirm-action>summary::before{display:none}
+.confirm-action[open]{flex-basis:100%;padding:16px;border-radius:var(--radius-ctl);background:var(--danger-weak)}
+.confirm-action[open]>summary{margin-bottom:8px;background:transparent}
+.confirm-action>p{margin:0 0 4px;font-size:14px;color:var(--text-sub)}
+.confirm-action .action-form{margin:8px 0 0}
+.row-actions:has(.confirm-action[open]){flex-basis:100%}
+code{font:13px "SF Mono",ui-monospace,Menlo,monospace;padding:1px 6px;border-radius:6px;background:var(--fill)}
+@media(max-width:640px){.collect-note{text-align:left}}
+.confirm-action .action-form .btn.danger{background:var(--danger);color:#fff}
+.confirm-action .action-form .btn.danger:hover{background:var(--red-600)}

@@ -1,6 +1,7 @@
 """웹 작업 등록, 상태 화면. HTTP에서는 검증과 등록만 하고 실행은 워커가 맡는다."""
 import re
 import json
+from urllib.parse import urlencode
 
 from . import jobs
 from .db import analysis_allowed
@@ -78,7 +79,8 @@ def collect_panel(conn, csrf, offline, compact=False):
     from .web_settings import form
     if compact:
         action = '<p class="muted">오프라인 모드</p>' if offline else form('/jobs/collect', csrf, '<button>지금 수집</button>', variant='primary')
-        return '<div class="heading-collect">' + action + job_box(jobs.latest(conn, 'collect')) + '</div>'
+        note = '' if offline else '<p class="muted collect-note">분석이 허용된 저장소는 수집 후 자동 분석될 수 있습니다.</p>'
+        return '<div class="heading-collect">' + action + note + job_box(jobs.latest(conn, 'collect')) + '</div>'
     body = '<article class="collect-panel"><h2>수집과 새로고침</h2>'
     if offline:
         body += '<p>오프라인 모드에서는 GitHub 수집을 실행하지 않습니다.</p>'
@@ -97,8 +99,11 @@ def analysis_panel(conn, pr, csrf, offline):
     if offline:
         body += '<p>오프라인 모드에서는 모델 분석을 실행하지 않습니다.</p>'
     elif not analysis_allowed(conn, pr['repo_id']):
-        body += ('<p>이 저장소는 LLM 분석이 허용되지 않았습니다. <a href="/repos#connected-repositories">저장소 분석 설정</a>에서 켠 뒤 요청하세요. '
-                 '분석 버튼은 동의를 켜지 않습니다.</p>')
+        # 대상 저장소만 검색된 상태로 열고, 저장 후 이 PR로 돌아올 수 있게 번호를 넘긴다.
+        target = urlencode([('tracked_q', pr.get('host', 'github.com') + '/' + pr['owner'] + '/' + pr['name']), ('from_pr', str(int(pr['id'])))])
+        body += ('<p>이 저장소는 LLM 분석이 허용되지 않았습니다. 저장소 분석 설정에서 허용한 뒤 돌아와 분석을 요청하세요. '
+                 '분석 버튼은 동의를 켜지 않습니다.</p>'
+                 f'<p><a class="btn primary" href="/repos?{esc(target)}#connected-repositories">이 저장소 분석 설정 열기</a></p>')
     elif not snapshot or snapshot['head_sha'] != pr['head_sha'] or snapshot['base_sha'] != pr['base_sha']:
         body += '<p>최신 SHA의 스냅샷이 없습니다. <a href="/status">먼저 수집</a>한 뒤 분석을 요청하세요.</p>'
     else:
@@ -132,7 +137,7 @@ def status_page(conn, csrf, offline):
         body += form('/jobs/doctor', csrf, '<button>상태 점검 실행</button>', variant='primary')
     body += job_box(jobs.latest(conn, 'doctor')) + '</article>'
     body += collect_panel(conn, csrf, offline) + '</div>'
-    body += '<section class="status-section"><h2>Codex 분석 준비</h2>'
+    body += '<section id="codex-setup" class="status-section"><h2>Codex 분석 준비</h2>'
     body += '<p>초기화는 로컬 인증 링크를 준비합니다. 기존 파일은 삭제하거나 덮어쓰지 않습니다.</p>'
     body += '<p>격리 검증은 저장소 코드를 보내지 않으며 실제 모델 서비스를 호출합니다. 사용량 또는 비용이 발생할 수 있습니다.</p>'
     if offline:
