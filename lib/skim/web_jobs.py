@@ -103,13 +103,14 @@ def analysis_panel(conn, pr, csrf, offline):
     else:
         body += '<p><strong>' + WARNING + '</strong></p>'
         body += '<p class="muted">하루 20회 모델 호출 예산과 격리 검사는 수동 요청에도 적용됩니다.' + (' draft PR도 같은 동의, 예산을 따릅니다.' if pr['draft'] else '') + '</p>'
-        if not pr['analysis'] or not pr['analysis']['intent']:
-            body += '<p>의도가 분석되지 않았습니다. 분석 가능한 변경이 있으면 다시 시도할 수 있습니다.</p>'
-            if pr['analysis'] and not any(not u.get('excluded') and not u.get('omission_reason') for u in pr['units']):
-                body += '<p>분석 가능한 변경 단위가 없습니다. 수집 결과와 제외 사유를 확인하세요.</p>'
+        current_analysis = pr['analysis'] if pr['analysis'] and pr['analysis']['snapshot_id'] == snapshot['id'] else None
+        if current_analysis and not current_analysis['intent']:
+            body += '<p>의도가 분석되지 않았습니다. 수집 결과와 제외 사유를 확인한 뒤 다시 분석할 수 있습니다.</p>'
+        elif not current_analysis:
+            body += '<p>현재 스냅샷의 분석 결과가 없습니다.</p>'
         body += form('/jobs/analyze', csrf,
                      f'<input type="hidden" name="host" value="{esc(pr.get("host", "github.com"))}"><input type="hidden" name="repository" value="{esc(pr["owner"] + "/" + pr["name"])}">'
-                     f'<input type="hidden" name="number" value="{int(pr["number"])}"><button>{"다시 분석" if pr["analysis"] and not pr["analysis"]["intent"] else "이 PR 분석"}</button>', variant='primary')
+                     f'<input type="hidden" name="number" value="{int(pr["number"])}"><button>{"다시 분석" if current_analysis and not current_analysis["intent"] else "이 PR 분석"}</button>', variant='primary')
     running = jobs.active(conn, 'analyze')
     if running is not None and running['target_id'] != pr['id']:
         body += ('<p>다른 분석 작업(' + esc(running['target'] or '자동 분석') + ')이 '

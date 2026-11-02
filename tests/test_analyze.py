@@ -109,6 +109,24 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(self.conn.execute('SELECT calls FROM analysis_budget').fetchone()[0], 2)
         self.assertEqual(self.conn.execute('SELECT COUNT(*) FROM analysis_items').fetchone()[0], 3)
 
+    def test_manual_cache_recovery_displays_success_after_failure(self):
+        from skim.web import load_prs
+        self.analyzer.run()
+        original_items = self.conn.execute('SELECT count(*) FROM analysis_items').fetchone()[0]
+        def fail():
+            raise IsolationError('probe 만료')
+        self.fake.verify = fail
+        self.assertEqual(self.analyzer.run()[0]['status'], 'blocked')
+        self.fake.verify = lambda: None
+        self.assertEqual(self.analyzer.run(snapshot_id=1)[0]['status'], 'completed')
+        displayed = load_prs(self.conn, self.config)[0]['analysis']
+        self.assertEqual(displayed['status'], 'completed')
+        self.assertTrue(displayed['intent'])
+        self.assertEqual(self.conn.execute('SELECT count(*) FROM analysis_items WHERE analysis_id=?', (displayed['id'],)).fetchone()[0], original_items)
+        count = self.conn.execute('SELECT count(*) FROM analyses').fetchone()[0]
+        self.analyzer.run(snapshot_id=1)
+        self.assertEqual(self.conn.execute('SELECT count(*) FROM analyses').fetchone()[0], count)
+
     def test_missing_intent_cache_is_retried(self):
         self.analyzer.run()
         with self.conn:

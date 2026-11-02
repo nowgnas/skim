@@ -158,10 +158,17 @@ class Analyzer:
                                  'blocked' if isinstance(exc, IsolationError) else 'failed')
         key = (row['id'], input_hash, adapter.provider, adapter.model, adapter.cli_version, PROMPT_VERSION, SCHEMA_VERSION)
         if adapter.model != 'unknown':
-            cached = self.conn.execute("SELECT output_json FROM analyses WHERE snapshot_id=? AND input_hash=? AND provider=? AND model=? AND cli_version=? AND prompt_version=? AND schema_version=? AND status IN ('completed','partial') ORDER BY id DESC LIMIT 1", key).fetchone()
+            cached = self.conn.execute("SELECT id,output_json FROM analyses WHERE snapshot_id=? AND input_hash=? AND provider=? AND model=? AND cli_version=? AND prompt_version=? AND schema_version=? AND status IN ('completed','partial') ORDER BY id DESC LIMIT 1", key).fetchone()
             if cached:
                 cached_result = json.loads(cached['output_json'])
                 if cached_result.get('intent') or not chunks or not retry_missing_intent:
+                    if retry_missing_intent:
+                        with self.conn:
+                            self.conn.execute('BEGIN IMMEDIATE')
+                            latest = self.conn.execute('SELECT id,status FROM analyses WHERE snapshot_id=? ORDER BY id DESC LIMIT 1', (row['id'],)).fetchone()
+                            if latest and latest['id'] != cached['id'] and latest['status'] not in ('completed', 'partial'):
+                                copied = self.conn.execute('INSERT INTO analyses(snapshot_id,input_hash,provider,model,cli_version,prompt_version,schema_version,status,intent,output_json,error) SELECT snapshot_id,input_hash,provider,model,cli_version,prompt_version,schema_version,status,intent,output_json,error FROM analyses WHERE id=?', (cached['id'],))
+                                self.conn.execute('INSERT INTO analysis_items SELECT ?,change_id,importance,reason,risk_flags FROM analysis_items WHERE analysis_id=?', (copied.lastrowid, cached['id']))
                     return cached_result
         coverage = dict(total=len(units), analyzed=0, excluded=sum(u['excluded'] for u in units),
                         omitted=sum(bool(u.get('omission_reason')) for u in units),

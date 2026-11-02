@@ -150,6 +150,22 @@ class JobTests(unittest.TestCase):
                 if expected == 'deferred':
                     self.assertIn('예산', data['error'])
 
+    def test_analysis_prompt_distinguishes_first_and_stale_failure(self):
+        with closing(connect(self.config)) as conn, conn:
+            conn.execute('DELETE FROM analyses WHERE snapshot_id IN (SELECT id FROM snapshots WHERE pr_id=1)')
+        body = self.request('/pr/1')[2]
+        self.assertIn('현재 스냅샷의 분석 결과가 없습니다', body)
+        self.assertNotIn('다시 분석</button>', body)
+        with closing(connect(self.config)) as conn, conn:
+            snapshot = conn.execute('SELECT * FROM snapshots WHERE pr_id=1 ORDER BY id DESC LIMIT 1').fetchone()
+            conn.execute('INSERT INTO analyses(snapshot_id,input_hash,provider,model,cli_version,prompt_version,schema_version,status) VALUES(?,?,?,?,?,?,?,?)',
+                         (snapshot['id'], 'x', 'codex', 'model', 'v', 'p', 's', 'failed'))
+            conn.execute('INSERT INTO snapshots(pr_id,base_sha,head_sha,diff_hash,input_hash,diff_path,coverage) VALUES(?,?,?,?,?,?,?)',
+                         (1, snapshot['base_sha'], snapshot['head_sha'], 'new', 'new', snapshot['diff_path'], snapshot['coverage']))
+        body = self.request('/pr/1')[2]
+        self.assertIn('현재 스냅샷의 분석 결과가 없습니다', body)
+        self.assertNotIn('다시 분석</button>', body)
+
     def test_status_polls_recent_and_older_active_jobs(self):
         with closing(connect(self.config)) as conn:
             active, _ = jobs.enqueue(conn, 'analyze')

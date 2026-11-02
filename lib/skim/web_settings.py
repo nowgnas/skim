@@ -7,6 +7,7 @@ import re
 import tempfile
 import threading
 import time
+from urllib.parse import parse_qsl, urlencode
 
 from .collect import Collector, GitHub
 from .config import Config, valid_model
@@ -128,6 +129,36 @@ def policy_row(csrf, scope, target, host, policy, effective=None):
             + policy_form(csrf, scope, target, host, policy) + '</article>')
 
 
+RETURN_FIELDS = {
+    '/repos': {'tracked_q', 'tracked_page', 'available_q', 'available_page'},
+    '/settings': {'policy_q', 'policy_page', 'org_q', 'org_page'},
+}
+
+
+def validate_return_query(action, query):
+    destination = '/repos' if action.startswith(('/repos/', '/hosts/')) else '/settings' if action.startswith('/settings/') else ''
+    if len(query) > 6000 or not destination:
+        raise ValueError('잘못된 목록 상태')
+    pairs = parse_qsl(query, keep_blank_values=True, strict_parsing=True, max_num_fields=4)
+    if (len({key for key, _ in pairs}) != len(pairs)
+            or any(key not in RETURN_FIELDS[destination] or len(value) > 200
+                   or (key.endswith('_page') and (not value.isascii() or not value.isdigit() or len(value) > 9))
+                   for key, value in pairs)):
+        raise ValueError('잘못된 목록 상태')
+    return urlencode(pairs)
+
+
+def preserve_list_state(body, path, query):
+    from .web import esc
+    pairs = [(key, values[0]) for key, values in query.items()
+             if key in RETURN_FIELDS[path] and values and len(values[0]) <= 200
+             and (not key.endswith('_page') or (values[0].isascii() and values[0].isdigit() and len(values[0]) <= 9))]
+    if not pairs:
+        return body
+    field = f'<input type="hidden" name="return_query" value="{esc(urlencode(pairs))}">'
+    return re.sub(r'(<form class="action-form"[^>]*>)', lambda m: m[1] + field, body)
+
+
 def render(server, conn, csrf, path, query=None):
     from .web import esc, meta, list_controls
     query = query or {}
@@ -156,7 +187,7 @@ def render(server, conn, csrf, path, query=None):
         body += controls + '<div class="list">'
         for name in items:
             body += '<article class="list-row"><span class="row-content">' + esc(lookup_host + '/' + name) + '</span>' + form('/repos/add', csrf, f'<input type="hidden" name="host" value="{esc(lookup_host)}"><input type="hidden" name="repository" value="{esc(name)}">' + source_field(lookup_host + '/' + name) + f'<button aria-label="{esc(lookup_host + "/" + name)} 선택하여 연결">선택하여 연결</button>') + '</article>'
-        return body + '</div>' + navigation
+        return preserve_list_state(body + '</div>' + navigation, path, query)
     settings = json.loads((server.config.config_dir / 'config.json').read_text())
     model = settings.get('codex_model', '')
     body = '<h1>설정과 분석 허용</h1><p>' + WARNING + '</p><p>기본 꺼짐. 저장소의 명시적 허용, 거부는 조직 정책보다 우선합니다. 조직 허용은 해당 조직의 모든 저장소에 적용됩니다.</p>'
@@ -177,7 +208,7 @@ def render(server, conn, csrf, path, query=None):
         body += '<p>SKIM_CODEX_MODEL 환경변수가 파일 설정보다 우선합니다.</p>'
     body += '<p>다음 분석부터 적용됩니다. 모델 변경 후 격리 검증이 일치하지 않으면 분석이 차단됩니다. skim doctor --probe로 재검증하세요.</p>'
     body += form('/settings/model', csrf, '<label>codex_model<input name="model" maxlength="64" value="' + esc(model) + '" required></label><button>모델 저장</button>', variant='primary')
-    return body
+    return preserve_list_state(body, path, query)
 
 
 def fields(data, required, optional=()):

@@ -136,6 +136,12 @@ class WebTests(unittest.TestCase):
         self.assertIn('paging/repo-24', body)
         self.assertIn('type="hidden" name="available_page" value="2"', body)
 
+    def test_null_pr_title_does_not_break_listing(self):
+        with closing(connect(self.config)) as conn, conn:
+            conn.execute('UPDATE pull_requests SET title=NULL WHERE id=1')
+        self.assertEqual(self.request('/')[0], 200)
+        self.assertEqual(self.request('/?pr_q=checkout')[0], 200)
+
     def test_analysis_time_shared_once_when_identical(self):
         with closing(connect(self.config)) as conn, conn:
             conn.execute("UPDATE analyses SET created_at='same-analysis'")

@@ -219,7 +219,7 @@ def listing(prs, query, csrf, heading_toolbar=""):
         or (key == 'status' and query[key][0] == 'stale' and pr['stale'])
         for key, value in dict(repo=repository_label(pr), importance=pr['importance'],
                                status=pr['status'], review=str(pr['review'])).items())]
-    prs, controls, navigation = list_controls(prs, query, 'pr', 'PR', lambda p: ' '.join([repository_label(p), str(p['number']), p['title'], p['author'] or '', (p['analysis']['intent'] or '') if p['analysis'] else '']))
+    prs, controls, navigation = list_controls(prs, query, 'pr', 'PR', lambda p: ' '.join([repository_label(p), str(p['number']), p['title'] or '', p['author'] or '', (p['analysis']['intent'] or '') if p['analysis'] else '']))
     content += controls
     collected = {pr['snapshot']['collected_at'] if pr['snapshot'] else '대기' for pr in prs}
     shared_collection = len(collected) == 1
@@ -423,7 +423,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self.check(mutation=True):
             return
         lengths = self.headers.get_all('Content-Length') or []
-        if len(lengths) != 1 or not lengths[0].isascii() or not lengths[0].isdigit() or int(lengths[0]) > 4096 or self.headers.get('Transfer-Encoding'):
+        if len(lengths) != 1 or not lengths[0].isascii() or not lengths[0].isdigit() or int(lengths[0]) > 16384 or self.headers.get('Transfer-Encoding'):
             return self.reply(400, '잘못된 요청 크기')
         if self.headers.get_content_type() != 'application/x-www-form-urlencoded':
             return self.reply(415, '폼 요청만 허용합니다')
@@ -451,6 +451,13 @@ class Handler(BaseHTTPRequestHandler):
         if not self.server.auth.allow_post(csrf):
             return self.reply(429, '요청이 많습니다. 60초 후 다시 시도하세요', extra=[('Retry-After', '60')])
         try:
+            return_values = data.pop('return_query', [])
+            if len(return_values) > 1:
+                raise ValueError('잘못된 목록 상태')
+            return_query = return_values[0] if return_values else ''
+            if return_query:
+                from .web_settings import validate_return_query
+                return_query = validate_return_query(self.path, return_query)
             if self.path in web_jobs.JOB_PATHS:
                 with closing(connect(self.server.config)) as conn:
                     location = web_jobs.mutate(self.server, conn, self.path, data)
@@ -460,6 +467,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(exc.status, page('요청 거부', f'<p>{esc(exc)}</p><p><a href="/status">상태</a> <a href="/">PR 목록</a></p>'))
         except (OSError, ValueError, sqlite3.Error):
             return self.reply(400, '입력과 설정을 확인하세요. 허용하려면 모델 서비스 전송 확인 체크가 필요합니다.')
+        if return_query and location in ('/repos', '/settings'):
+            location += '?' + return_query
         self.reply(303, extra=[('Location', location)])
 
     def do_PUT(self):
