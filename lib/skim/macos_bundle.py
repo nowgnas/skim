@@ -7,6 +7,7 @@ import plistlib
 import re
 import shlex
 import shutil
+import stat
 import socket
 import subprocess
 import sys
@@ -15,6 +16,52 @@ import time
 
 SOL_LOCAL = 0
 LOCAL_PEERPID = 2
+
+
+APP_NAME = 'skim PR.app'
+
+
+def environment_settings():
+    environment = {'HOME': str(Path.home()), 'PATH': os.pathsep.join(
+        os.path.normpath(p) for p in os.environ.get('PATH', '/usr/bin:/bin:/usr/sbin:/sbin').split(os.pathsep)
+        if os.path.isabs(p))}
+    for name in ('SKIM_HOME', 'CODEX_HOME', 'SKIM_CODEX_MODEL', 'SKIM_PYTHON', 'SESSIO_HOME', 'GH_CONFIG_DIR', 'SKIM_CODEX_BIN'):
+        if os.environ.get(name):
+            value = os.environ[name]
+            environment[name] = value if name == 'SKIM_CODEX_MODEL' else os.path.abspath(os.path.expanduser(value))
+    return environment
+
+
+def trusted(path, directory=False, private=False):
+    info = path.lstat()
+    kind = stat.S_ISDIR if directory else stat.S_ISREG
+    if info.st_uid != os.getuid() or not kind(info.st_mode) or info.st_mode & 0o022 or (private and stat.S_IMODE(info.st_mode) != 0o600):
+        raise ValueError(f'소유자·권한·종류가 안전하지 않습니다: {path}')
+
+
+def validate_existing(app, agent, root, config, check_environment=True):
+    expected = {'root': str(root), 'data_dir': str(config.data_dir.resolve()),
+                'environment': environment_settings()}
+    if app.exists() or app.is_symlink():
+        trusted(app, directory=True)
+        marker = app / 'Contents/Resources/skim-managed.plist'
+        if not marker.exists():
+            raise ValueError(f'관리 마커 없는 기존 앱은 덮어쓰거나 제거하지 않습니다: {app}')
+        for parent in (app / 'Contents', app / 'Contents/Resources'):
+            trusted(parent, directory=True)
+        trusted(marker)
+        with marker.open('rb') as stream:
+            saved = plistlib.load(stream)
+        if any(saved.get(k) != expected[k] for k in ('root', 'data_dir')) or (check_environment and saved.get('environment') != expected['environment']):
+            raise ValueError('기존 앱의 마커 또는 환경이 현재 설치와 다릅니다.')
+    if agent.exists() or agent.is_symlink():
+        trusted(agent, private=True)
+        with agent.open('rb') as stream:
+            saved = plistlib.load(stream)
+        if saved.get('Label') != 'com.skim.web' or saved.get('ProgramArguments') != [str(root / 'bin/skim'), 'web', '--no-browser']:
+            raise ValueError('기존 LaunchAgent는 다른 설치에 속합니다.')
+        if check_environment and saved.get('EnvironmentVariables') != expected['environment']:
+            raise ValueError('기존 LaunchAgent와 현재 환경이 다릅니다. 같은 환경에서 실행하세요.')
 
 
 def main(argv=None, quiet=False):
@@ -28,22 +75,17 @@ def main(argv=None, quiet=False):
     binary = (args.root.resolve() / 'bin/skim')
     output = args.output.resolve()
     agent = output / 'com.skim.web.plist'
-    app = output / 'Skim.app'
+    app = output / APP_NAME
     if not binary.is_file() or agent.exists() or agent.is_symlink() or app.exists() or app.is_symlink():
         print('실행 파일을 확인하세요. 기존 준비 파일은 덮어쓰지 않습니다.', file=sys.stderr)
         return 1
     output.mkdir(mode=0o700, parents=True, exist_ok=True)
-    path = os.environ.get('PATH', '/usr/bin:/bin:/usr/sbin:/sbin')
-    environment = {'HOME': str(Path.home()), 'PATH': os.pathsep.join(os.path.abspath(p or '.') for p in path.split(os.pathsep))}
-    for name in ('SKIM_HOME', 'CODEX_HOME', 'SKIM_CODEX_MODEL', 'SKIM_PYTHON', 'SESSIO_HOME', 'GH_CONFIG_DIR'):
-        if os.environ.get(name):
-            value = os.environ[name]
-            environment[name] = value if name == 'SKIM_CODEX_MODEL' else os.path.abspath(os.path.expanduser(value))
+    environment = environment_settings()
     data_dir = str((Path(environment['SKIM_HOME']) / 'data' if 'SKIM_HOME' in environment else Path.home() / '.local/share/skim').resolve())
     plist = {'Label': 'com.skim.web', 'ProgramArguments': [str(binary), 'web', '--no-browser'],
              'EnvironmentVariables': environment, 'RunAtLoad': True,
              'KeepAlive': {'SuccessfulExit': False}, 'ThrottleInterval': 10,
-             'StandardOutPath': '/dev/null', 'StandardErrorPath': '/dev/null'}
+             'StandardOutPath': '/dev/null', 'StandardErrorPath': str(Path(data_dir) / 'launchagent.stderr.log')}
     command = ' '.join(shlex.quote(part) for part in ['/usr/bin/env'] +
                        [name + '=' + value for name, value in environment.items()] + [str(binary), 'open'])
     literal = command.replace('\\', '\\\\').replace('"', '\\"')
@@ -51,14 +93,24 @@ def main(argv=None, quiet=False):
               'on error\ndisplay dialog "skim 서버가 실행 중인지 확인해 주세요." buttons {"확인"} default button 1\n'
               'end try\nend run')
     try:
+        Path(data_dir).mkdir(parents=True, exist_ok=True, mode=0o700)
+        log = Path(plist['StandardErrorPath'])
+        if log.exists() or log.is_symlink():
+            trusted(log, private=True)
+        fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        os.close(fd)
         subprocess.run(['/usr/bin/osacompile', '-o', str(app), '-e', source], check=True, capture_output=True)
         marker = app / 'Contents/Resources/skim-managed.plist'
         with marker.open('wb') as stream:
-            plistlib.dump({'root': str(args.root.resolve()), 'data_dir': data_dir}, stream)
+            plistlib.dump({'root': str(args.root.resolve()), 'data_dir': data_dir, 'environment': environment}, stream)
+        if sys.platform == 'darwin' and shutil.which('codesign'):
+            if subprocess.run(['codesign', '--verify', str(app)], capture_output=True).returncode:
+                subprocess.run(['codesign', '-f', '-s', '-', str(app)], check=True, capture_output=True)
+                subprocess.run(['codesign', '--verify', str(app)], check=True, capture_output=True)
         fd = os.open(agent, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, 'wb') as stream:
             plistlib.dump(plist, stream)
-    except (OSError, subprocess.CalledProcessError):
+    except (OSError, ValueError, subprocess.CalledProcessError):
         print('macOS 실행 파일을 준비하지 못했습니다. 준비 폴더를 확인하세요.', file=sys.stderr)
         return 1
     if not quiet:
@@ -74,29 +126,12 @@ def install_app(config):
         return 1
     root = Path(__file__).resolve().parents[2]
     home = Path.home()
-    app = home / 'Applications/Skim.app'
+    app = home / 'Applications' / APP_NAME
     agent = home / 'Library/LaunchAgents/com.skim.web.plist'
     marker = app / 'Contents/Resources/skim-managed.plist'
     label = f'gui/{os.getuid()}/com.skim.web'
     try:
-        if app.is_symlink() or agent.is_symlink():
-            raise ValueError('기존 앱 또는 설정이 심볼릭 링크입니다. 직접 확인하세요.')
-        if app.exists():
-            with marker.open('rb') as stream:
-                app_settings = plistlib.load(stream)
-                if app_settings.get('root') != str(root):
-                    raise ValueError('기존 Skim.app은 다른 설치에 속합니다.')
-                if app_settings.get('data_dir') != str(config.data_dir.resolve()):
-                    raise ValueError('기존 앱과 현재 SKIM_HOME이 다릅니다. 같은 환경에서 실행하세요.')
-        if agent.exists():
-            with agent.open('rb') as stream:
-                saved = plistlib.load(stream)
-            if saved.get('Label') != 'com.skim.web' or saved.get('ProgramArguments') != [str(root / 'bin/skim'), 'web', '--no-browser']:
-                raise ValueError('기존 LaunchAgent는 다른 설치에 속합니다.')
-            saved_env = saved.get('EnvironmentVariables', {})
-            saved_data = (Path(saved_env['SKIM_HOME']) / 'data' if saved_env.get('SKIM_HOME') else Path(saved_env.get('HOME', str(home))) / '.local/share/skim').resolve()
-            if saved_data != config.data_dir.resolve():
-                raise ValueError('자동 시작 설정과 현재 SKIM_HOME이 다릅니다. 같은 환경에서 실행하세요.')
+        validate_existing(app, agent, root, config)
         status = subprocess.run(['/bin/launchctl', 'print', label], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
         if status == 0:
             if not agent.exists():
@@ -120,8 +155,8 @@ def install_app(config):
                 agent.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
                 if not app.exists():
                     with tempfile.TemporaryDirectory(prefix='.skim-app-', dir=app.parent) as staging:
-                        staged_app = Path(staging) / 'Skim.app'
-                        shutil.copytree(Path(temporary) / 'Skim.app', staged_app)
+                        staged_app = Path(staging) / APP_NAME
+                        shutil.copytree(Path(temporary) / APP_NAME, staged_app)
                         os.rename(staged_app, app)
                 if not agent.exists():
                     fd = os.open(agent, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -153,7 +188,7 @@ def install_app(config):
             status_check = subprocess.run(['/bin/launchctl', 'print', label], capture_output=True, text=True)
             if status_check.returncode or not re.search(r'\bpid\s*=\s*' + re.escape(server_pid) + r'\b', status_check.stdout):
                 raise ValueError('자동 시작 서버가 실행 중이 아닙니다. 기존 수동 서버를 종료한 뒤 다시 실행하세요.')
-            print('Skim.app과 로그인 시 자동 시작이 준비되었습니다. Applications에서 Dock에 추가할 수 있습니다.')
+            print('skim PR.app과 로그인 시 자동 시작이 준비되었습니다. Applications에서 Dock에 추가할 수 있습니다.')
             return open_running(config)
         raise ValueError('서버가 아직 시작되지 않았습니다. 로그인 세션을 확인한 뒤 skim app을 다시 실행하세요.')
     except (OSError, ValueError, plistlib.InvalidFileException) as exc:
