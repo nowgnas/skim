@@ -565,10 +565,9 @@ class SettingsTests(unittest.TestCase):
         with closing(connect(self.config)) as conn:
             self.assertEqual(conn.execute("SELECT count(*) FROM repositories WHERE analysis_policy='allow'").fetchone()[0], 0)
 
-    def test_home_team_rejects_invalid_name_and_concurrent_lookup(self):
-        self.assertEqual(self.post('/home/team', host='github.com', team='demo/../bad')[0], 400)
-        self.assertEqual(self.post('/home/team', host='github.com', team='demo/frontend')[0], 303)
-        self.assertEqual(self.post('/home/team', host='github.com', team='demo/backend')[0], 409)
+    def test_home_team_endpoint_removed(self):
+        # 팀 보기는 저장소 화면의 '내 팀 저장소' 조회로만 남는다.
+        self.assertEqual(self.post('/home/team', host='github.com', team='demo/frontend')[0], 405)
 
     def test_browser_failure_shows_terminal_fallback(self):
         from skim.web import open_entry

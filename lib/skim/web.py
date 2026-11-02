@@ -275,97 +275,40 @@ def list_controls(items, query, prefix, label, text, search_form=True):
     return filtered[(number - 1) * 20:number * 20], controls, navigation
 
 
-def home_team_controls(conn, csrf, lookup, offline, query):
-    from .web_settings import form, host_field
-    host, mode, truncated, loaded, items, teams, selected = lookup.snapshot(with_teams=True) if lookup else ('github.com', 'all', False, False, [], [], '')
-    requested = query.get('team', [''])[0]
-    key = host + '|' + selected if mode == 'team' and selected else ''
-    requested_target = requested.replace('|', ' / ', 1)
-    requested_job = conn.execute("SELECT * FROM jobs WHERE type='repos' AND target=? ORDER BY id DESC LIMIT 1", (requested_target,)).fetchone() if requested else None
-    ready = bool(requested and loaded and requested == key and requested_job and requested_job['status'] == 'completed')
-    filters = [(name, query[name][0][:200]) for name in ('repo', 'importance', 'status', 'review', 'pr_q') if query.get(name, [''])[0]]
-    hidden = ''.join(f'<input type="hidden" name="{esc(name)}" value="{esc(value)}">' for name, value in filters)
-    clear_link = '/?' + urlencode(filters) if filters else '/'
-    body = '<section class="home-team" aria-labelledby="home-team-title"><h2 id="home-team-title">팀 PR만 보기</h2>'
-    if offline:
-        body += '<p class="muted">오프라인에서는 팀 저장소를 조회할 수 없습니다.</p>'
-    else:
-        body += '<p class="muted">호스트의 소속 팀을 불러온 뒤 팀을 선택하세요.</p>'
-        body += form('/home/team', csrf, hidden + host_field(conn, '팀 조회', host) + '<button>내 팀 목록 불러오기</button>')
-        if mode == 'team' and loaded and teams:
-            options = '<option value="">팀을 선택하세요</option>'
-            options += ''.join('<option value="' + esc(team) + '"' + (' selected' if team == selected else '') + '>' + esc(team) + '</option>' for team in sorted(teams, key=str.casefold))
-            body += form('/home/team', csrf, hidden + '<input type="hidden" name="host" value="' + esc(host) + '"><label>소속 팀<select name="team" required>' + options + '</select></label><button>선택한 팀 보기</button>')
-    latest_job = web_jobs.jobs.latest(conn, 'repos')
-    body += web_jobs.job_box(requested_job or latest_job)
-    if not requested and mode == 'team' and loaded and latest_job and latest_job['status'] != 'completed':
-        body += '<p class="muted">표시된 팀 목록은 이전 조회 결과일 수 있습니다. 작업 결과를 확인하세요.</p>'
-    if requested:
-        if ready:
-            body += '<p>적용 중: ' + esc(host + ' / ' + selected) + ' <a href="' + esc(clear_link) + '">팀 필터 해제</a></p>'
-            if truncated:
-                body += '<p>조회 한도에 도달하여 일부 저장소만 표시합니다.</p>'
-        else:
-            message = ('선택한 팀 조회가 실패했거나 중단되었습니다. 다시 조회하세요.' if requested_job and requested_job['status'] not in ('pending', 'running', 'completed') else '선택한 팀의 조회 결과가 없습니다. 조회가 완료되면 화면을 새로고침하세요.')
-            body += '<p>' + message + '</p><p><a href="' + esc(clear_link) + '">팀 필터 해제</a></p>'
-    elif mode == 'team' and loaded and not teams:
-        body += '<p class="muted">조회된 소속 팀이 없습니다. 팀 접근 권한과 조직 SSO를 확인하세요.</p>'
-    return body + '</section>', requested, ready, host, {name.casefold() for name in items}
+# 메인 탭: 지금 볼 PR을 고르는 수치이자 필터. 탭마다 하나의 조건만 건다.
+TABS = [('', '전체', lambda pr: True),
+        ('review', '리뷰 요청', lambda pr: bool(pr['review'])),
+        ('high', '높음 파일 있음', lambda pr: pr['importance'] == 'high'),
+        ('pending', '분석 전', lambda pr: pr['status'] == 'unanalyzed' or not pr['allowed'])]
 
 
-def home_metrics(prs):
-    """연결한 저장소 PR의 검토 부담을 숫자로 보여준다. 각 수치는 해당 필터로 이어진다."""
-    totals = {'high': 0, 'mid': 0, 'low': 0, 'unanalyzed': 0}
-    for pr in prs:
-        for key, value in file_counts(file_rows(pr)).items():
-            totals[key] += value
-    tiles = [('열린 PR', len(prs), '/'),
-             ('높음 파일이 있는 PR', sum(pr['importance'] == 'high' for pr in prs), '/?importance=high'),
-             ('나에게 리뷰 요청', sum(bool(pr['review']) for pr in prs), '/?review=1'),
-             ('분석 전 PR', sum(pr['status'] == 'unanalyzed' for pr in prs), '/?status=unanalyzed')]
-    body = '<section class="metrics" aria-label="검토 현황">' + ''.join(
-        f'<a class="metric" href="{href}"><span class="metric-value">{value}</span><span class="metric-label">{name}</span></a>'
-        for name, value, href in tiles)
-    body += ('<div class="metric metric-files"><span class="metric-label">변경 파일 중요도</span><p>'
-             + ''.join(f'<span class="badge {key}">{label(key)} {totals[key]}</span>' for key in ('high', 'mid', 'low', 'unanalyzed'))
-             + '</p></div></section>')
-    return body
-
-
-def listing(prs, query, csrf, heading_toolbar="", team_controls=None):
+def listing(prs, query, csrf, heading_toolbar=""):
     # 메인은 내가 연결(관리)한 저장소의 PR만 다룬다. 다른 저장소의 리뷰 요청은 상세 링크로만 열린다.
     prs = sorted((pr for pr in prs if pr.get('tracked', 1)), key=lambda pr: not pr['review'])
-    fields = [('repo', '저장소', sorted({repository_label(p) for p in prs})),
-              ('importance', '중요도', ['high', 'mid', 'low', 'unanalyzed']),
-              ('status', '상태', ['completed', 'partial', 'failed', 'blocked', 'deferred', 'unanalyzed', 'stale']),
-              ('review', '리뷰 요청', ['1'])]
-    content = ('<div class="heading home-heading"><div><p class="eyebrow">PULL REQUESTS</p><h1>PR 리뷰</h1>'
-               '<p class="home-description">관리하는 저장소에 올라온 PR과 먼저 볼 파일입니다.</p></div>' + heading_toolbar + '</div>'
-               + home_metrics(prs) +
-               '<section class="home-results" aria-labelledby="pr-list-title"><div class="section-heading"><div>'
-               '<h2 id="pr-list-title">열린 PR</h2><p class="muted">PR마다 중요도가 높은 파일을 먼저 보여줍니다. 파일을 누르면 해당 변경으로 이동합니다.</p></div></div>'
-               + ('<details class="team-filter-box"' + (' open' if query.get('team', [''])[0] else '') + '><summary>팀으로 거르기</summary>' + team_controls[0] + '</details>' if team_controls else '')
-               + '<form class="filters pr-filters" method="get">')
-    team = query.get('team', [''])[0]
-    if team:
-        content += f'<input type="hidden" name="team" value="{esc(team)}">'
-    # 검색어와 필터를 한 번에 제출해야 바꾼 선택이 검색에서 빠지지 않는다.
-    content += ('<label class="pr-search">PR 검색<input type="search" name="pr_q" value="' + esc(query.get('pr_q', [''])[0][:200])
-                + '" maxlength="200" placeholder="제목, 저장소, 작성자"></label>')
-    for name, title, values in fields:
-        content += f'<label><span class="sr-only">{title}</span><select name="{name}"><option value="">{title}: 전체</option>'
-        for value in values:
-            selected = ' selected' if query.get(name, [''])[0] == value else ''
-            content += f'<option value="{esc(value)}"{selected}>{esc(label(value) if name != "repo" else value)}</option>'
-        content += '</select></label>'
-    reset = '/' + ('?' + urlencode([('team', team)]) if team else '')
-    filtering = any(query.get(name, [''])[0] for name in ('pr_q', 'repo', 'importance', 'status', 'review'))
-    content += '<button class="btn secondary">적용</button>' + (f'<a class="btn ghost" href="{esc(reset)}">초기화</a>' if filtering else '') + '</form>'
     has_prs = bool(prs)
-    if team_controls and team_controls[1]:
-        _, _, ready, host, items = team_controls
-        prs = [pr for pr in prs if ready and pr.get('host', 'github.com').casefold() == host.casefold()
-               and (pr['owner'] + '/' + pr['name']).casefold() in items]
+    repos = sorted({repository_label(p) for p in prs})
+    content = ('<div class="heading home-heading"><div><h1>PR 리뷰</h1>'
+               '<p class="home-description">관리하는 저장소에 올라온 PR에서 먼저 볼 파일을 보여줍니다.</p></div>' + heading_toolbar + '</div>'
+               '<section class="home-results" aria-labelledby="pr-list-title"><h2 id="pr-list-title" class="sr-only">열린 PR</h2>')
+    # 검색어와 저장소는 한 폼으로 제출하고, 탭 선택은 숨은 값으로 유지한다.
+    tab = query.get('tab', [''])[0] if query.get('tab', [''])[0] in {key for key, _, _ in TABS} else ''
+    content += '<form class="filters pr-filters" method="get">' + (f'<input type="hidden" name="tab" value="{tab}">' if tab else '')
+    content += ('<label class="pr-search"><span class="sr-only">PR 검색</span><input type="search" name="pr_q" value="' + esc(query.get('pr_q', [''])[0][:200])
+                + '" maxlength="200" placeholder="제목, 저장소, 작성자로 검색"></label>')
+    if len(repos) > 1:
+        content += '<label><span class="sr-only">저장소</span><select name="repo"><option value="">모든 저장소</option>' + ''.join(
+            f'<option value="{esc(r)}"' + (' selected' if query.get('repo', [''])[0] == r else '') + f'>{esc(r)}</option>' for r in repos) + '</select></label>'
+    filtering = any(query.get(name, [''])[0] for name in ('pr_q', 'repo', 'importance', 'status', 'review', 'tab'))
+    content += '<button class="btn secondary">검색</button>' + ('<a class="btn ghost" href="/">초기화</a>' if filtering else '') + '</form>'
+    # 탭 수치는 검색·저장소 조건을 반영한 뒤 센다.
+    term = query.get('pr_q', [''])[0][:200].casefold()
+    base = [pr for pr in prs if (not query.get('repo', [''])[0] or repository_label(pr) == query['repo'][0])
+            and (not term or term in ' '.join([repository_label(pr), str(pr['number']), pr['title'] or '', pr['author'] or '']).casefold())]
+    keep = [(k, query[k][0]) for k in ('pr_q', 'repo') if query.get(k, [''])[0]]
+    content += '<nav class="pr-tabs" aria-label="PR 보기">' + ''.join(
+        f'<a href="/?{esc(urlencode(keep + ([("tab", key)] if key else [])))}"' + (' aria-current="page"' if key == tab else '')
+        + f'><span>{title}</span><strong>{sum(map(test, base))}</strong></a>' for key, title, test in TABS) + '</nav>'
+    prs = [pr for pr in prs if next(test for key, _, test in TABS if key == tab)(pr)]
     prs = [pr for pr in prs if all(
         not query.get(key, [''])[0] or query[key][0] == value
         or (key == 'status' and query[key][0] == 'stale' and pr['stale'])
@@ -374,7 +317,7 @@ def listing(prs, query, csrf, heading_toolbar="", team_controls=None):
     prs, controls, navigation = list_controls(prs, query, 'pr', 'PR', lambda p: ' '.join([repository_label(p), str(p['number']), p['title'] or '', p['author'] or '', (p['analysis']['intent'] or '') if p['analysis'] else '']), search_form=False)
     content += controls
     if has_prs and not prs:
-        content += f'<p class="empty">조건에 맞는 PR이 없습니다. <a href="{esc(reset)}">필터 초기화</a></p>'
+        content += '<p class="empty">조건에 맞는 PR이 없습니다. <a href="/">전체 보기</a></p>'
     collected = {pr['snapshot']['collected_at'] if pr['snapshot'] else '대기' for pr in prs}
     shared_collection = len(collected) == 1
     analyzed = {pr['analysis']['created_at'] if pr['analysis'] else '대기' for pr in prs}
@@ -581,8 +524,7 @@ class Handler(BaseHTTPRequestHandler):
                 prs = load_prs(conn, self.server.config)
                 if url.path == '/':
                     query = parse_qs(url.query)
-                    team_controls = home_team_controls(conn, csrf, getattr(self.server, 'repo_lookup', None), offline, query)
-                    body = listing(prs, query, csrf, web_jobs.collect_panel(conn, csrf, offline, compact=True), team_controls) + web_jobs.script()
+                    body = listing(prs, query, csrf, web_jobs.collect_panel(conn, csrf, offline, compact=True)) + web_jobs.script()
                 else:
                     match = re.fullmatch(r'/pr/([1-9][0-9]*)', url.path)
                     pr = next((p for p in prs if match and p['id'] == int(match[1])), None)

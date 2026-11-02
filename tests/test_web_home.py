@@ -40,15 +40,17 @@ class HomeTests(unittest.TestCase):
         self.assertNotIn('남의 저장소 PR', self.request('/')[2])
         self.assertEqual(self.request(f'/pr/{pr}')[0], 200)
 
-    def test_metrics_count_prs_and_files(self):
+    def test_tabs_show_counts_and_filter(self):
         body = self.request('/')[2]
-        metrics = body.split('class="metrics"', 1)[1].split('</section>', 1)[0]
-        values = dict((label, int(value)) for value, label in re.findall(
-            r'<span class="metric-value">(\d+)</span><span class="metric-label">([^<]+)</span>', metrics))
-        self.assertEqual(values['열린 PR'], body.count('<article class="issue-row">'))
-        self.assertGreaterEqual(values['높음 파일이 있는 PR'], 1)
-        self.assertIn('href="/?importance=high"', metrics)
-        self.assertRegex(metrics, r'<span class="badge high">높음 \d+</span>')
+        tabs = dict(re.findall(r'<span>([^<]+)</span><strong>(\d+)</strong>', body.split('class="pr-tabs"', 1)[1].split('</nav>', 1)[0]))
+        self.assertEqual(int(tabs['전체']), body.count('<article class="issue-row">'))
+        for key, name in [('review', '리뷰 요청'), ('high', '높음 파일 있음'), ('pending', '분석 전')]:
+            with self.subTest(tab=key):
+                filtered = self.request('/?tab=' + key)[2]
+                self.assertEqual(filtered.count('<article class="issue-row">'), int(tabs[name]))
+                self.assertIn('aria-current="page"><span>' + name, filtered)
+        self.assertEqual(self.request('/?tab=bogus')[0], 200)
+        self.assertNotIn('팀', self.request('/')[2].split('<main', 1)[1])
 
     def test_top_three_files_and_low_only_counted(self):
         base = self.set_items(2, {})[0]
