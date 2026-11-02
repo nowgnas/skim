@@ -104,6 +104,23 @@ class ConsentTests(unittest.TestCase):
         self.assertEqual(runner.collector.collect.call_count, 2)
         self.assertTrue(fake.calls)
 
+    def test_enterprise_consent_does_not_change_same_named_public_repo(self):
+        with closing(connect(self.config)) as conn, conn:
+            conn.execute("INSERT INTO repositories(host,owner,name) VALUES('github.corp.example','demo','checkout')")
+        self.assertEqual(self.consent(host='github.corp.example')[0], 303)
+        with closing(connect(self.config)) as conn:
+            policies = conn.execute("SELECT host,analysis_policy FROM repositories WHERE owner='demo' AND name='checkout'").fetchall()
+            self.assertEqual({r['host']: r['analysis_policy'] for r in policies},
+                             {'github.com': 'inherit', 'github.corp.example': 'allow'})
+        self.assertFalse(self.allowed())
+
+    def test_org_allow_and_repo_inherit_show_analysis_button(self):
+        with closing(connect(self.config)) as conn, conn:
+            conn.execute("INSERT INTO organization_policies VALUES('demo','allow')")
+        body = self.request('/pr/1')[2]
+        self.assertIn('action="/jobs/analyze"', body)
+        self.assertNotIn('action="/settings/analysis"', body)
+
     def test_consent_requires_confirm(self):
         self.assertEqual(self.consent(confirm=None)[0], 400)
         self.assertFalse(self.allowed())
@@ -150,6 +167,39 @@ class PagingTests(unittest.TestCase):
         self.assertIn('href="/?repo=a+b&amp;page=1"', nav)
         self.assertIn('href="/?repo=a+b&amp;page=3"', nav)
         self.assertEqual(paginate(list(range(5)), {}, '/')[1], '')
+
+    def test_paginate_excludes_csrf_from_links(self):
+        shown, nav = paginate(list(range(45)),
+                              {'csrf': ['secret', 'second'], 'repo': ['a b'], 'page': ['2']}, '/')
+        self.assertEqual(shown, list(range(20, 40)))
+        self.assertNotIn('csrf', nav)
+        self.assertNotIn('secret', nav)
+        self.assertNotIn('second', nav)
+        self.assertIn('repo=a+b&amp;page=3', nav)
+
+    def test_page_boundaries_and_duplicate_use_first_value(self):
+        for query, first, page in [({'page': ['999999999']}, 40, 3),
+                                   ({'page': ['1000000000']}, 0, 1),
+                                   ({'page': ['9' * 5000]}, 0, 1),
+                                   ({'page': ['２']}, 0, 1),
+                                   ({'page': ['2', '3']}, 20, 2),
+                                   ({'page': ['bad', '2']}, 0, 1)]:
+            with self.subTest(query=query):
+                shown, nav = paginate(list(range(45)), query, '/')
+                self.assertEqual(shown[0], first)
+                self.assertIn(f'{page} / 3', nav)
+                self.assertTrue(all(link.count('page=') == 1 for link in re.findall(r'href="([^"]+)"', nav)))
+        self.add_prs(40)
+        for query, page in [('page=1000000000', 1), ('page=%EF%BC%92', 1), ('page=2&page=3', 2)]:
+            with self.subTest(query=query):
+                self.assertIn(f'{page} / 3', self.request('/?' + query)[2])
+
+    def test_settings_search_get_form_has_no_csrf(self):
+        body = self.request('/settings')[2]
+        form = re.search(r'<form[^>]*method="get"[^>]*action="/settings">.*?</form>', body).group(0)
+        self.assertIn('name="q"', form)
+        self.assertNotIn('name="csrf"', form)
+        self.assertNotIn(self.csrf, form)
 
     def test_pr_list_pages(self):
         self.add_prs(40)
