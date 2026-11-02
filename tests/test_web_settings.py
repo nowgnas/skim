@@ -529,6 +529,17 @@ class SettingsTests(unittest.TestCase):
         with closing(connect(self.config)) as conn:
             self.assertEqual(conn.execute("SELECT model FROM jobs WHERE type='analyze'").fetchone()[0], 'new')
 
+    def test_repo_policy_rejects_missing_confirmation_org_and_unknown_repository(self):
+        for data in [dict(scope='repo', target='demo/checkout', policy='allow'),
+                     dict(scope='org', target='demo', policy='deny'),
+                     dict(scope='repo', target='demo/unregistered', policy='deny')]:
+            self.assertEqual(self.post('/repos/policy', **data)[0], 400)
+
+    def test_home_team_rejects_invalid_name_and_concurrent_lookup(self):
+        self.assertEqual(self.post('/home/team', host='github.com', team='demo/../bad')[0], 400)
+        self.assertEqual(self.post('/home/team', host='github.com', team='demo/frontend')[0], 303)
+        self.assertEqual(self.post('/home/team', host='github.com', team='demo/backend')[0], 409)
+
     def test_browser_failure_shows_terminal_fallback(self):
         from skim.web import open_entry
         for outcome in [False, OSError('사용 불가')]:

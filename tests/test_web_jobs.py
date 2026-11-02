@@ -83,6 +83,12 @@ class JobTests(unittest.TestCase):
         self.server.offline = True
         self.assertEqual(self.post('/jobs/doctor', action='probe', confirm='yes')[0], 409)
 
+    def test_probe_requires_explicit_paid_model_confirmation(self):
+        for data in ({}, {'confirm': 'no'}):
+            self.assertEqual(self.post('/jobs/doctor', action='probe', **data)[0], 400)
+        self.assertEqual(self.rows(), [])
+        self.assertIn('name="confirm" value="yes" required', self.request('/status')[2])
+
     def test_setup_preserves_existing_files_and_probe_failure_is_visible(self):
         source = Path(self.temp.name) / 'codex-source'
         source.mkdir()
