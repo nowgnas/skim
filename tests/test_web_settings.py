@@ -91,20 +91,61 @@ class SettingsTests(unittest.TestCase):
             def handle_starttag(self, tag, attrs):
                 attrs = dict(attrs)
                 if tag == 'form':
-                    self.forms.append([])
+                    self.forms.append((attrs.get('method', 'get'), []))
                 if tag == 'input' and self.forms:
-                    self.forms[-1].append(attrs)
+                    self.forms[-1][1].append(attrs)
         for path in ['/', '/repos', '/settings']:
             body = self.request(path)[2]
             parser = Forms()
             parser.feed(body)
-            for form in parser.forms:
+            for method, form in parser.forms:
+                if method.lower() == 'get':
+                    self.assertFalse(any(i.get('name') == 'csrf' for i in form))
+                    continue
                 self.assertTrue(any(i.get('type') == 'hidden' and i.get('name') == 'csrf' and i.get('value') == self.csrf for i in form))
             self.assertIn('href="/repos"', body)
         with closing(connect(self.config)) as conn, conn:
             conn.execute("INSERT INTO jobs(type,target_id,status,last_error) VALUES('repos',0,'failed','<script>bad</script>')")
         self.assertIn('&lt;script&gt;', self.request('/repos')[2])
         self.assertNotIn('<script>bad', self.request('/repos')[2])
+
+    def test_policy_current_value_and_fixed_target(self):
+        from skim.web_settings import policy_form
+        class PolicyFields(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.inputs, self.selected = [], []
+            def handle_starttag(self, tag, attrs):
+                attrs = dict(attrs)
+                if tag == 'input':
+                    self.inputs.append(attrs)
+                if tag == 'option' and 'selected' in attrs:
+                    self.selected.append(attrs['value'])
+        for scope in ('repo', 'org'):
+            for policy, expected in [('allow', 'allow'), ('deny', 'deny'), ('inherit', 'reset')]:
+                with self.subTest(scope=scope, policy=policy):
+                    body = policy_form(self.csrf, scope, 'demo/checkout' if scope == 'repo' else 'demo', policy=policy)
+                    parser = PolicyFields()
+                    parser.feed(body)
+                    self.assertEqual(parser.selected, [expected])
+                    target = next(i for i in parser.inputs if i.get('name') == 'target')
+                    self.assertEqual(target['type'], 'hidden')
+                    self.assertLess(body.index('<button'), body.index('class="consent"'))
+                    self.assertNotIn('btn primary', body)
+
+    def test_dashboard_filter_get_without_csrf_and_single_primary(self):
+        status, _, body = self.request('/?status=partial&review=1')
+        self.assertEqual(status, 200)
+        filters = body.split('<form class="filters"', 1)[1].split('</form>', 1)[0]
+        self.assertNotIn('name="csrf"', filters)
+        self.assertLess(body.index('<h1>'), body.index('지금 수집'))
+        for path in ('/', '/repos', '/settings', '/status', '/pr/1'):
+            body = self.request(path)[2]
+            self.assertLessEqual(body.count('class="btn primary'), 1, path)
+        for query in ('?diff=1', '?order=original', '?order=priority', '?diff=1&order=original'):
+            body = self.request('/pr/1' + query)[2]
+            segment = body.split('aria-label="변경 보기"', 1)[1].split('</nav>', 1)[0]
+            self.assertEqual(segment.count('aria-current='), 1)
 
     def test_add_validates_input_and_source_before_external_call(self):
         for name in ['a/..', 'a/a..b', 'a/.', 'a/b/c', '-a/b', 'a/b?x', 'a/b;sh', 'a/b c', 'a'*40+'/b', 'a/'+'b'*101]:

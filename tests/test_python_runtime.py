@@ -1,5 +1,6 @@
 """래퍼의 인터프리터 선택과 최소 버전 상수의 일치를 검증한다."""
 from pathlib import Path
+import os
 import re
 import shutil
 import subprocess
@@ -37,7 +38,7 @@ class PythonRuntimeTests(unittest.TestCase):
         # PATH를 임시 디렉터리로 한정해 개발자 환경의 python에 영향받지 않게 한다.
         bash = shutil.which('bash')
         env = {'PATH': str(self.bin), **env}
-        return subprocess.run([bash, '-c', f'source "{ROOT}/lib/python.sh" && skim_find_python'],
+        return subprocess.run([bash, '-c', f'set -euo pipefail; source "{ROOT}/lib/python.sh"; skim_find_python'],
                               env=env, capture_output=True, text=True)
 
     def test_min_version_matches_shell(self):
@@ -74,16 +75,64 @@ class PythonRuntimeTests(unittest.TestCase):
         result = self.find(SKIM_PYTHON=sys.executable)
         self.assertEqual(result.stdout.strip(), sys.executable)
 
-    def test_wrapper_exits_2_without_python(self):
-        self.fake('python3', 1)
-        # 시스템 python이 끼어들지 않도록 bin/skim이 쓰는 명령만 PATH에 둔다.
+    def wrappers(self, **env):
         for tool in ('dirname', 'readlink'):
-            (self.bin / tool).symlink_to(shutil.which(tool))
-        env = {'PATH': str(self.bin), 'HOME': str(self.bin)}
-        result = subprocess.run([shutil.which('bash'), str(ROOT / 'bin/skim'), '--help'],
-                                env=env, capture_output=True, text=True)
-        self.assertEqual(result.returncode, 2)
-        self.assertIn('이상을 찾지 못했습니다', result.stderr)
+            path = self.bin / tool
+            if not path.exists():
+                path.symlink_to(shutil.which(tool))
+        for script in ('bin/skim', 'setup.sh'):
+            with self.subTest(script=script):
+                yield subprocess.run(
+                    [shutil.which('bash'), str(ROOT / script), '--help'],
+                    env={'PATH': str(self.bin), 'HOME': str(self.bin), **env},
+                    capture_output=True, text=True)
+
+    def test_wrappers_exit_2_without_python(self):
+        for result in self.wrappers():
+            self.assertEqual(result.returncode, 2)
+            self.assertIn('이상을 찾지 못했습니다', result.stderr)
+            self.assertIn('python3: 없음', result.stderr)
+
+    def test_failed_discovery_reports_candidates_and_versions(self):
+        old = self.bin / 'python3'
+        old.write_text('#!/bin/sh\necho "Python 3.10.0"\nexit 1\n')
+        old.chmod(0o755)
+        for result in self.wrappers():
+            self.assertEqual(result.returncode, 2)
+            self.assertIn('이상을 찾지 못했습니다', result.stderr)
+            self.assertIn('python3 (', result.stderr)
+            self.assertIn('Python 3.10.0', result.stderr)
+            self.assertIn('python3.11: 없음', result.stderr)
+
+    def test_explicit_missing_or_non_executable_python(self):
+        missing = self.bin / 'missing-python'
+        blocked = self.bin / 'blocked-python'
+        blocked.write_text('#!/bin/sh\nexit 0\n')
+        blocked.chmod(0o644)
+        for path, message in ((missing, '존재하지 않습니다'),
+                              (blocked, '실행할 수 없습니다')):
+            result = self.find(SKIM_PYTHON=str(path))
+            self.assertEqual(result.returncode, 1)
+            self.assertIn(message, result.stderr)
+            self.assertIn(str(path), result.stderr)
+            for result in self.wrappers(SKIM_PYTHON=str(path)):
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(message, result.stderr)
+                self.assertIn(str(path), result.stderr)
+
+    def test_wrappers_do_not_import_skim_from_cwd(self):
+        package = self.bin / 'skim'
+        package.mkdir()
+        (package / '__init__.py').write_text('raise RuntimeError("cwd hijack")\n')
+        env = dict(os.environ, SKIM_PYTHON=sys.executable, HOME=str(self.bin))
+        env.pop('PYTHONPATH', None)
+        for script in ('bin/skim', 'setup.sh'):
+            with self.subTest(script=script):
+                result = subprocess.run([str(ROOT / script), '--help'], cwd=self.bin,
+                                        env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn('usage:', result.stdout)
+                self.assertNotIn('cwd hijack', result.stderr)
 
 
 if __name__ == '__main__':

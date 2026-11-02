@@ -36,11 +36,13 @@ class ConsentTests(unittest.TestCase):
 
     def test_detail_offers_repo_consent_form_when_not_allowed(self):
         body = self.request('/pr/1')[2]
-        form = re.search(r'<form method="post" action="/settings/analysis">.*?</form>', body).group(0)
+        form = re.search(r'<form class="action-form" method="post" action="/settings/analysis">.*?</form>', body).group(0)
         self.assertIn('name="next" value="/pr/1"', form)
         self.assertIn('name="target" value="demo/checkout"', form)
         self.assertIn('name="scope" value="repo"', form)
         self.assertIn('name="confirm"', form)
+        self.assertIn('class="consent"', form)
+        self.assertIn('class="btn primary"', form)
         # 조직 허용은 상세 화면에서 열지 않는다.
         self.assertNotIn('value="org"', form)
         self.assertNotIn('action="/jobs/analyze"', body)
@@ -132,13 +134,13 @@ class PagingTests(unittest.TestCase):
     def test_settings_pages_prioritizes_relevant_and_searches(self):
         self.add_repos(60)
         body = self.request('/settings')[2]
-        repos = re.findall(r'<article><h2>([^<]+)</h2>', body)
+        repos = re.findall(r'<article class="list-row policy-row"><div class="row-content"><h3>([^<]+/[^<]+/[^<]+)</h3>', body)
         self.assertEqual(len(repos), PAGE_SIZE)
         # 추적 중인 데모 저장소가 첫 페이지 앞쪽에 온다.
         self.assertEqual(repos[0], 'github.com/demo/checkout')
         self.assertTrue(any('/settings?page=2' in link for link in re.findall(r'href="([^"]+)"', body)))
         found = self.request('/settings?q=r05')[2]
-        self.assertEqual(re.findall(r'<article><h2>([^<]+)</h2>', found),
+        self.assertEqual(re.findall(r'<article class="list-row policy-row"><div class="row-content"><h3>([^<]+/[^<]+/[^<]+)</h3>', found),
                          [f'github.com/zz-other/r05{i}' for i in range(10)])
         self.assertIn('name="q" value="r05"', found)
 
@@ -151,7 +153,7 @@ class PagingTests(unittest.TestCase):
                 conn.execute("INSERT INTO repositories(owner,name,tracked,analysis_policy) VALUES('aaa',?,?,?)", (name, tracked, policy))
             repo = conn.execute("SELECT id FROM repositories WHERE name='b-open'").fetchone()[0]
             conn.execute("INSERT INTO pull_requests(repo_id,number,state) VALUES(?,1,'open')", (repo,))
-        names = [n for n in re.findall(r'<article><h2>github.com/aaa/([^<]+)</h2>', self.request('/settings?q=aaa/')[2])]
+        names = [n for n in re.findall(r'<article class="list-row policy-row"><div class="row-content"><h3>github.com/aaa/([^<]+)</h3>', self.request('/settings?q=aaa/')[2])]
         self.assertEqual(names, ['d-tracked', 'c-policy', 'b-open', 'a-plain'])
 
     def test_search_value_is_escaped(self):
@@ -167,7 +169,7 @@ class PagingTests(unittest.TestCase):
             for index in range(25):
                 conn.execute("INSERT INTO repositories(owner,name,tracked) VALUES('t',?,1)", (f'n{index:02d}',))
         body = self.request('/repos?page=2&found=2')[2]
-        self.assertEqual(body.count('<button>선택하여 연결</button>'), 10)
+        self.assertEqual(len(re.findall(r'<button[^>]*>선택하여 연결</button>', body)), 10)
         self.assertIn('href="/repos?page=2&amp;found=1"', body)
         self.assertIn('href="/repos?found=2&amp;page=1"', body)
 
@@ -177,8 +179,8 @@ class PagingTests(unittest.TestCase):
             for index in range(25):
                 conn.execute("INSERT INTO repositories(owner,name,tracked) VALUES('t',?,1)", (f'n{index:02d}',))
         body = self.request('/repos')[2]
-        self.assertEqual(body.count('<button>연결 해제</button>'), PAGE_SIZE)
-        self.assertEqual(self.request('/repos?page=2')[2].count('<button>연결 해제</button>'), 5)
+        self.assertEqual(len(re.findall(r'<button[^>]*>연결 해제</button>', body)), PAGE_SIZE)
+        self.assertEqual(len(re.findall(r'<button[^>]*>연결 해제</button>', self.request('/repos?page=2')[2])), 5)
 
 
 class SkipReasonTests(unittest.TestCase):
