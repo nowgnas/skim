@@ -60,6 +60,7 @@ class CodexAdapter:
             raise ValueError('Codex 모델 식별자 형식을 확인하세요.')
         self.model = model if model is not None else 'unknown'
         self._detected_model = None
+        self.prerelease_version = None
         self.disabled = []
         self.unknown_enabled = []
 
@@ -118,7 +119,7 @@ class CodexAdapter:
             # 실제 CLI는 존재하지 않는 CODEX_HOME을 거부하므로 빈 디렉터리를 만든다.
             (Path(home) / 'codex').mkdir(mode=0o700)
             try:
-                result = self.runner(['codex', *args], capture_output=True, text=True, timeout=15,
+                result = self.runner([os.environ.get('SKIM_CODEX_BIN', 'codex'), *args], capture_output=True, text=True, timeout=15,
                                      cwd=work, env=self._env(home, Path(home) / 'codex'))
                 if result.returncode != 0 or not isinstance(result.stdout, str):
                     raise ValueError()
@@ -130,7 +131,11 @@ class CodexAdapter:
         return {'PATH': os.environ.get('PATH', ''), 'HOME': home, 'CODEX_HOME': str(codex_home)}
 
     def check_version(self):
+        self.prerelease_version = None
         output = self._inspect(['--version']).strip()
+        prerelease = re.fullmatch(r'codex(?:-cli)? (\d{1,6}\.\d{1,6}\.\d{1,6}-(?:alpha|beta|rc)(?:[.-][0-9A-Za-z]{1,20}){0,5})', output)
+        if prerelease:
+            self.prerelease_version = prerelease.group(1)
         match = re.fullmatch(r'codex(?:-cli)? (\d+)\.(\d+)\.(\d+)', output)
         if not match or tuple(map(int, match.groups())) < (0, 165, 0):
             raise IsolationError('Codex 분석 차단: 검증된 최소 버전 0.165.0 이상이 필요합니다.')
@@ -225,7 +230,7 @@ class CodexAdapter:
             schema_path.write_text(encode(provider_schema(schema)))
             schema_path.chmod(0o600)
             output = Path(control) / 'output.json'
-            command = ['codex', 'exec', *FLAGS[:4], '--sandbox', 'read-only',
+            command = [os.environ.get('SKIM_CODEX_BIN', 'codex'), 'exec', *FLAGS[:4], '--sandbox', 'read-only',
                        '--output-schema', str(schema_path), '--output-last-message', str(output),
                        '-c', 'web_search="disabled"']
             # 모델 자기보고 대신 이벤트 스트림으로 도구 호출을 객관적으로 판정한다(분석 실행 포함).

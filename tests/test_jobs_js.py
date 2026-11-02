@@ -17,8 +17,16 @@ const queue = [];
 const field = { replaceChildren(...items) { this.items = items; } };
 const label = { textContent: '대기 중' };
 const progress = { hidden: true, removeAttribute(key) { delete this[key]; } };
+const result = {hidden: true};
+const resultText = {textContent: ''};
+const refresh = {hidden: true};
 const box = { dataset: { jobId: '1' }, querySelector(selector) {
-  return selector.includes('summary') ? field : selector.includes('label') ? label : progress;
+  if (selector.includes('summary')) return field;
+  if (selector.includes('progress-label')) return label;
+  if (selector.includes('result-text')) return resultText;
+  if (selector.includes('result]')) return result;
+  if (selector.includes('refresh')) return refresh;
+  return progress;
 }};
 let job = {active: true, status: 'running', processed: 2, total: 5, summary_parts: ['실행 중']};
 const listeners = {};
@@ -41,13 +49,13 @@ const tick = async () => { queue.shift()(); await new Promise(resolve => setImme
   await tick();
   assert.equal(label.textContent, '대기 중');
   assert.equal(progress.hidden, true);
-  listeners.input({target: {closest: () => true}});
-  const added = [];
-  box.append = node => added.push(node);
-  job = {active: false, status: 'completed', summary_parts: ['완료']};
+  job = {active: false, status: 'failed', status_label: '실패', error: '<unsafe>', result: '검증 결과', summary_parts: ['실패']};
   await tick();
-  assert.equal(label.textContent, '작업 종료');
-  assert.equal(added[0].textContent, '결과 새로고침');
+  assert.equal(label.textContent, '실패');
+  assert.equal(resultText.textContent, '<unsafe>\n검증 결과');
+  assert.equal(result.hidden, false);
+  assert.equal(refresh.hidden, false);
+  assert.equal(box.dataset.jobActive, '0');
 })().catch(err => { console.error(err); process.exitCode = 1; });
 '''
         subprocess.run(['node', '-e', harness, str(script)], check=True, capture_output=True, text=True)

@@ -109,14 +109,15 @@ class WebTests(unittest.TestCase):
         search_form = body.split('<form class="filters" method="get">', 2)[2].split('</form>', 1)[0]
         self.assertIn('type="hidden" name="importance" value="high"', search_form)
         body = self.request('/repos?tracked_q=missing&available_q=other')[2]
-        tracked_form = body.split('<form class="filters" method="get">', 1)[1].split('</form>', 1)[0]
+        tracked_form = next(form.split('</form>', 1)[0] for form in body.split('<form class="filters" method="get">')[1:]
+                            if 'type="search" name="tracked_q"' in form.split('</form>', 1)[0])
         self.assertIn('type="hidden" name="available_q" value="other"', tracked_form)
         self.assertIn('name="tracked_q" value="missing"', tracked_form)
         self.assertIn('검색 결과가 없습니다', body)
         body = self.request('/settings?policy_q=missing&org_q=other')[2]
-        policy_form = body.split('<form class="filters" method="get">', 1)[1].split('</form>', 1)[0]
-        self.assertIn('type="hidden" name="org_q" value="other"', policy_form)
-        self.assertIn('name="policy_q" value="missing"', policy_form)
+        org_form = body.split('<form class="filters" method="get">', 1)[1].split('</form>', 1)[0]
+        self.assertIn('type="hidden" name="policy_q" value="missing"', org_form)
+        self.assertIn('name="org_q" value="other"', org_form)
         body = self.request('/pr/1?unit_q=payment&order=original')[2]
         self.assertIn('unit_q=payment', body)
         self.assertIn('name="order" value="original"', body)

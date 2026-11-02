@@ -8,6 +8,7 @@ import re
 import secrets
 import socket
 import sqlite3
+import sys
 import threading
 import time
 from contextlib import closing
@@ -44,7 +45,7 @@ def meta(*values):
 
 
 def page(title, content, active=None):
-    links = [('/', '변경'), ('/repos', '저장소'), ('/status', '상태'), ('/settings', '설정')]
+    links = [('/', 'PR 리뷰'), ('/repos', '저장소'), ('/status', '상태'), ('/settings', '설정')]
     nav = ''.join(f'<a href="{href}"' + (' aria-current="page"' if active == href else '')
                   + f'>{label}</a>' for href, label in links)
     return ('<!doctype html><html lang="ko"><head><meta charset="utf-8">'
@@ -52,8 +53,9 @@ def page(title, content, active=None):
             f'<title>{esc(title)} | skim</title><link rel="stylesheet" href="/static/app.css"></head><body>'
             '<a class="skip-link" href="#main">본문으로 건너뛰기</a>'
             '<header class="app-header"><a class="brand" href="/" aria-label="skim 홈">'
-            '<svg viewBox="0 0 20 20" width="20" height="20" fill="none" aria-hidden="true">'
-            '<path d="M4 5h12M4 10h8M4 15h4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>'
+            '<span class="brand-mark"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" aria-hidden="true">'
+            '<path d="M5 6.5h10M5 10h7M5 13.5h5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>'
+            '<path d="m13 16 2.1 2.1L19.5 13" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg></span>'
             'skim</a><span class="workspace-label">PR 검토</span><nav aria-label="주 메뉴">'
             + nav + '</nav></header><main id="main">' + content + '</main></body></html>')
 
@@ -199,12 +201,56 @@ def list_controls(items, query, prefix, label, text):
     return filtered[(number - 1) * 20:number * 20], controls, navigation
 
 
-def listing(prs, query, csrf, heading_toolbar=""):
+def home_team_controls(conn, csrf, lookup, offline, query):
+    from .web_settings import form, host_field
+    host, mode, truncated, loaded, items, teams, selected = lookup.snapshot(with_teams=True) if lookup else ('github.com', 'all', False, False, [], [], '')
+    requested = query.get('team', [''])[0]
+    key = host + '|' + selected if mode == 'team' and selected else ''
+    requested_target = requested.replace('|', ' / ', 1)
+    requested_job = conn.execute("SELECT * FROM jobs WHERE type='repos' AND target=? ORDER BY id DESC LIMIT 1", (requested_target,)).fetchone() if requested else None
+    ready = bool(requested and loaded and requested == key and requested_job and requested_job['status'] == 'completed')
+    filters = [(name, query[name][0][:200]) for name in ('repo', 'importance', 'status', 'review', 'pr_q') if query.get(name, [''])[0]]
+    hidden = ''.join(f'<input type="hidden" name="{esc(name)}" value="{esc(value)}">' for name, value in filters)
+    clear_link = '/?' + urlencode(filters) if filters else '/'
+    body = '<section class="home-team" aria-labelledby="home-team-title"><h2 id="home-team-title">팀 저장소로 보기</h2>'
+    if offline:
+        body += '<p class="muted">오프라인에서는 팀 저장소를 조회할 수 없습니다.</p>'
+    else:
+        body += '<p class="muted">호스트의 소속 팀을 불러온 뒤 팀을 선택하세요.</p>'
+        body += form('/home/team', csrf, hidden + host_field(conn, '팀 조회', host) + '<button>소속 팀 불러오기</button>')
+        if mode == 'team' and loaded and teams:
+            options = '<option value="">팀을 선택하세요</option>'
+            options += ''.join('<option value="' + esc(team) + '"' + (' selected' if team == selected else '') + '>' + esc(team) + '</option>' for team in sorted(teams, key=str.casefold))
+            body += form('/home/team', csrf, hidden + '<input type="hidden" name="host" value="' + esc(host) + '"><label>소속 팀<select name="team" required>' + options + '</select></label><button>선택한 팀 보기</button>')
+    latest_job = web_jobs.jobs.latest(conn, 'repos')
+    body += web_jobs.job_box(requested_job or latest_job)
+    if not requested and mode == 'team' and loaded and latest_job and latest_job['status'] != 'completed':
+        body += '<p class="muted">표시된 팀 목록은 이전 조회 결과일 수 있습니다. 작업 결과를 확인하세요.</p>'
+    if requested:
+        if ready:
+            body += '<p>적용 중: ' + esc(host + ' / ' + selected) + ' <a href="' + esc(clear_link) + '">팀 필터 해제</a></p>'
+            if truncated:
+                body += '<p>조회 한도에 도달하여 일부 저장소만 표시합니다.</p>'
+        else:
+            message = ('선택한 팀 조회가 실패했거나 중단되었습니다. 다시 조회하세요.' if requested_job and requested_job['status'] not in ('pending', 'running', 'completed') else '선택한 팀의 조회 결과가 없습니다. 조회가 완료되면 화면을 새로고침하세요.')
+            body += '<p>' + message + '</p><p><a href="' + esc(clear_link) + '">팀 필터 해제</a></p>'
+    elif mode == 'team' and loaded and not teams:
+        body += '<p class="muted">조회된 소속 팀이 없습니다. 팀 접근 권한과 조직 SSO를 확인하세요.</p>'
+    return body + '</section>', requested, ready, host, {name.casefold() for name in items}
+
+
+def listing(prs, query, csrf, heading_toolbar="", team_controls=None):
     fields = [('repo', '저장소', sorted({repository_label(p) for p in prs})),
               ('importance', '중요도', ['high', 'mid', 'low', 'unanalyzed']),
               ('status', '상태', ['completed', 'partial', 'failed', 'blocked', 'deferred', 'unanalyzed', 'stale']),
               ('review', '리뷰 요청', ['1'])]
-    content = '<div class="heading"><h1>먼저 볼 변경</h1>' + heading_toolbar + '</div><form class="filters" method="get">'
+    content = ('<div class="heading home-heading"><div><p class="eyebrow">PULL REQUESTS</p><h1>PR 리뷰</h1>'
+               '<p class="home-description">연결한 저장소의 열린 PR과 분석 결과를 확인하세요.</p></div>' + heading_toolbar + '</div>'
+               '<section class="home-results" aria-labelledby="pr-list-title"><div class="section-heading"><div>'
+               '<h2 id="pr-list-title">열린 PR</h2><p class="muted">필터와 검색으로 살펴볼 변경을 찾아보세요.</p></div></div>'
+               + (team_controls[0] if team_controls else '') + '<form class="filters" method="get">')
+    if query.get('team', [''])[0]:
+        content += f'<input type="hidden" name="team" value="{esc(query["team"][0])}">'
     if query.get('pr_q', [''])[0]:
         content += f'<input type="hidden" name="pr_q" value="{esc(query["pr_q"][0])}">'
     for name, label, values in fields:
@@ -215,6 +261,10 @@ def listing(prs, query, csrf, heading_toolbar=""):
         content += '</select></label>'
     content += '<button class="btn secondary">필터 적용</button></form>'
     has_prs = bool(prs)
+    if team_controls and team_controls[1]:
+        _, _, ready, host, items = team_controls
+        prs = [pr for pr in prs if ready and pr.get('host', 'github.com').casefold() == host.casefold()
+               and (pr['owner'] + '/' + pr['name']).casefold() in items]
     prs = [pr for pr in prs if all(
         not query.get(key, [''])[0] or query[key][0] == value
         or (key == 'status' and query[key][0] == 'stale' and pr['stale'])
@@ -238,7 +288,7 @@ def listing(prs, query, csrf, heading_toolbar=""):
                     + f'<p class="issue-intent">{esc(a["intent"] if a and a["intent"] else "의도 미분석")}</p><p class="meta">{badges(pr)}</p>'
                     + '<p class="meta"><span class="badge">' + esc(pr['status']) + '</span></p>' + meta(*([] if shared_collection else ['수집 ' + (s['collected_at'] if s else '대기')]),
                            *([] if shared_analysis else ['분석 ' + (a['created_at'] if a else '대기')])) + '</div></article>')
-    return content + '</div>' + navigation + ('<p class="muted">열린 PR이 없습니다. <a href="/repos">저장소 연결</a>과 <a href="/status">상태 점검</a>, <a href="/settings">설정</a>을 확인하세요.</p>' if not has_prs else '')
+    return content + '</div>' + navigation + ('<p class="muted">열린 PR이 없습니다. <a href="/repos">저장소 연결</a>과 <a href="/status">상태 점검</a>, <a href="/settings">설정</a>을 확인하세요.</p>' if not has_prs else '') + '</section>'
 
 
 def github(pr):
@@ -276,7 +326,8 @@ def render_diff(diff):
 
 def detail(pr, query, config, offline=False, analysis_panel=""):
     a, s = pr['analysis'], pr['snapshot']
-    content = f'<p><a href="/">← PR 목록</a></p><h1>{esc(pr["title"])}</h1>'
+    content = f'<p><a href="/">← PR 목록</a></p><header class="detail-header"><p class="eyebrow">PR REVIEW</p><h1>{esc(pr["title"])}</h1>'
+    content += meta(repository_label(pr) + ' #' + str(pr['number']), pr['author'])
     link = github(pr)
     if link:
         content += f'<p><a href="{esc(link)}" rel="noreferrer">GitHub 원문 ↗</a></p>'
@@ -284,7 +335,7 @@ def detail(pr, query, config, offline=False, analysis_panel=""):
     if session:
         sid, url = session
         content += f'<p><a href="{esc(url)}" rel="noreferrer">Sessio: {esc(sid)} ↗</a></p>'
-    content += f'<article><h2>의도</h2><p>{esc(a["intent"] if a and a["intent"] else "미분석: 분석 결과가 없습니다.")}</p><h2>위험 요약</h2><p class="meta">{badges(pr)}</p><p><span class="badge">{esc(pr["status"])}</span> {esc(a["error"] if a else "")}</p>'
+    content += f'</header><section class="detail-overview" aria-label="PR 검토 요약"><article class="detail-insight"><p class="detail-kicker">검토의 시작</p><h2>변경 의도</h2><p class="detail-intent">{esc(a["intent"] if a and a["intent"] else "미분석: 분석 결과가 없습니다.")}</p><h3>검토 포인트</h3><p class="meta">{badges(pr)}</p></article><article class="detail-status"><p class="detail-kicker">진행 상황</p><h2>수집과 분석 상태</h2><p><span class="badge">{esc(pr["status"])}</span> {esc(a["error"] if a else "")}</p>'
     if a:
         content += meta('모델 ' + a['model'], 'Codex CLI ' + a['cli_version'])
     if s:
@@ -293,7 +344,7 @@ def detail(pr, query, config, offline=False, analysis_panel=""):
         content += meta('수집 상태: ' + coverage.get('status', '대기'), coverage.get('collection_error', ''))
         content += meta('분석 ' + str(stats.get('analyzed', 0)), '제외 ' + str(stats.get('excluded', 0)), '누락 ' + str(stats.get('omitted', 0)))
         content += meta('수집 ' + s['collected_at'], '분석 ' + (a['created_at'] if a else '대기'))
-    content += '</article>' + analysis_panel + '<nav class="toolbar segments" aria-label="변경 보기">'
+    content += '</article></section>' + analysis_panel + '<section class="detail-changes"><div class="section-heading"><h2>변경 살펴보기</h2><p class="muted">중요한 변경부터 확인하거나 원래 파일 순서로 볼 수 있습니다.</p></div><nav class="toolbar segments" aria-label="변경 보기">'
     for href, label, selected in [('?order=original', '원래 파일 순서', query.get('order', [''])[0] == 'original' and query.get('diff') != ['1']),
                                   ('?order=priority', '검토 우선순위', query.get('order', [''])[0] != 'original' and query.get('diff') != ['1']),
                                   ('?diff=1', '전체 diff 보기', query.get('diff', [''])[0] == '1')]:
@@ -338,7 +389,7 @@ def detail(pr, query, config, offline=False, analysis_panel=""):
     content += navigation
     if query.get('diff') == ['1']:
         content += '<h2>전체 원본 diff</h2>' + render_diff(read_diff(config, s) or 'diff 캐시가 없습니다.')
-    return content
+    return content + '</section>'
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -409,7 +460,9 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 prs = load_prs(conn, self.server.config)
                 if url.path == '/':
-                    body = listing(prs, parse_qs(url.query), csrf, web_jobs.collect_panel(conn, csrf, offline, compact=True)) + web_jobs.script()
+                    query = parse_qs(url.query)
+                    team_controls = home_team_controls(conn, csrf, getattr(self.server, 'repo_lookup', None), offline, query)
+                    body = listing(prs, query, csrf, web_jobs.collect_panel(conn, csrf, offline, compact=True), team_controls) + web_jobs.script()
                 else:
                     match = re.fullmatch(r'/pr/([1-9][0-9]*)', url.path)
                     pr = next((p for p in prs if match and p['id'] == int(match[1])), None)
@@ -491,19 +544,54 @@ class Server(ThreadingHTTPServer):
         self.origin = 'http://' + self.authority
         self.repo_lookup = RepoLookup(config)
 
+    def handle_error(self, request, client_address):
+        # 예외 메시지나 요청 원문에는 일회용 진입 토큰이 있을 수 있다.
+        print('skim 웹 요청 처리 실패. 서버 상태를 확인하세요.', file=sys.stderr)
+
     def entry_url(self):
         return self.origin + '/entry#' + self.auth.issue()
 
 
 def open_entry(url):
-    """브라우저 실행에 실패해도 출력한 진입 URL로 접속할 수 있다."""
+    """토큰 URL은 macOS 시스템 열기에만 전달한다. BROWSER에는 전달하지 않는다."""
+    import subprocess
     import webbrowser
+    if not re.fullmatch(r'http://127\.0\.0\.1:[0-9]{1,5}/entry#[A-Za-z0-9_-]+', url):
+        return False
     try:
-        opened = webbrowser.open(url)
+        if sys.platform == 'darwin':
+            if subprocess.run(['/usr/bin/open', url], stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL).returncode == 0:
+                return True
+        else:
+            # 일반 브라우저 실행 인자에는 인증 토큰을 포함하지 않는다.
+            webbrowser.open(url.split('/entry#', 1)[0] + '/')
     except (OSError, webbrowser.Error):
-        opened = False
-    if not opened:
-        print('브라우저를 열지 못했습니다. 위 URL을 브라우저에서 여세요.', flush=True)
+        pass
+    if sys.platform == 'darwin':
+        print('토큰 URL의 시스템 열기에 실패했습니다. 터미널에서 skim web을 다시 실행하세요.', flush=True)
+        return False
+    print('토큰 없는 기본 주소의 브라우저 열기를 시도했습니다. 진입 URL은 출력하지 않습니다. 새 진입 URL이 필요하면 터미널에서 skim web을 다시 실행하세요.', flush=True)
+    return False
+
+
+def open_running(config):
+    """실행 중인 서버의 일회용 진입 URL을 로그에 남기지 않고 연다."""
+    try:
+        with socket.socket(socket.AF_UNIX) as client:
+            client.settimeout(5)
+            client.connect(str(config.data_dir / 'web.sock'))
+            url = client.recv(4096).decode('utf-8')
+        if not re.fullmatch(r'http://127\.0\.0\.1:[0-9]{1,5}/entry#[A-Za-z0-9_-]+', url):
+            raise ValueError('잘못된 진입 URL')
+        if not 1 <= urlsplit(url).port <= 65535:
+            raise ValueError('잘못된 포트')
+        if not open_entry(url):
+            raise OSError('브라우저 열기 실패')
+        return 0
+    except (OSError, UnicodeError, ValueError):
+        print('실행 중인 skim 서버 또는 브라우저를 확인하세요.', file=sys.stderr)
+        return 1
 
 
 def serve(config, port=0, open_browser=True, offline=False):

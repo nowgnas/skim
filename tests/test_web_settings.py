@@ -423,8 +423,9 @@ class SettingsTests(unittest.TestCase):
         self.post('/settings/analysis', scope='org', target='neworg', policy='deny')
         self.assertTrue(allowed())
         body = self.request('/settings')[2]
-        for text in ['PR 코드, diff', '모델 서비스로 전송', 'Codex(모델 서비스)', '저장소의 명시적', '실제 적용: 허용']:
+        for text in ['PR 코드, diff', '모델 서비스로 전송', 'Codex(모델 서비스)', '저장소의 명시적']:
             self.assertIn(text, body)
+        self.assertIn('실제 분석: 허용', self.request('/repos')[2])
 
     def test_invalid_policy_targets_and_extra_fields(self):
         for data in [dict(scope='org', target='../evil', policy='deny'), dict(scope='repo', target='no/repo', policy='deny'),
@@ -528,12 +529,25 @@ class SettingsTests(unittest.TestCase):
         with closing(connect(self.config)) as conn:
             self.assertEqual(conn.execute("SELECT model FROM jobs WHERE type='analyze'").fetchone()[0], 'new')
 
+    def test_repo_policy_rejects_missing_confirmation_org_and_unknown_repository(self):
+        for data in [dict(scope='repo', target='demo/checkout', policy='allow'),
+                     dict(scope='org', target='demo', policy='deny'),
+                     dict(scope='repo', target='demo/unregistered', policy='deny')]:
+            self.assertEqual(self.post('/repos/policy', **data)[0], 400)
+
+    def test_home_team_rejects_invalid_name_and_concurrent_lookup(self):
+        self.assertEqual(self.post('/home/team', host='github.com', team='demo/../bad')[0], 400)
+        self.assertEqual(self.post('/home/team', host='github.com', team='demo/frontend')[0], 303)
+        self.assertEqual(self.post('/home/team', host='github.com', team='demo/backend')[0], 409)
+
     def test_browser_failure_shows_terminal_fallback(self):
         from skim.web import open_entry
         for outcome in [False, OSError('사용 불가')]:
-            with patch('webbrowser.open', side_effect=outcome if isinstance(outcome, Exception) else None, return_value=False), redirect_stdout(io.StringIO()) as output:
+            with patch('sys.platform', 'linux'), patch('webbrowser.open', side_effect=outcome if isinstance(outcome, Exception) else None, return_value=False), redirect_stdout(io.StringIO()) as output:
                 open_entry('http://127.0.0.1:8123/entry#fixture')
-                self.assertIn('위 URL', output.getvalue())
+                self.assertIn('skim web을 다시 실행', output.getvalue())
+                self.assertNotIn('위 URL', output.getvalue())
+                self.assertNotIn('fixture', output.getvalue())
 
     def test_rate_limit_rejects_excess_and_recovers(self):
         for _ in range(30):
