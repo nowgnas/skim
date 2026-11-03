@@ -14,6 +14,7 @@ from .collect import Collector, GitHub
 from .config import Config, valid_model
 from .db import SCOPES, analysis_allowed, analysis_scope, connect
 from . import jobs
+from .timefmt import human_time
 from .hosts import hostname, registered, authenticated
 from .web_jobs import JOB_PATHS, job_box, script
 from .repos import web_repository, add_repository, remove_repository
@@ -580,7 +581,7 @@ def host_settings(server, conn, csrf):
         host = row[0]
         cached = getattr(server, 'host_auth', {}).get(host)
         status = ('로그인됨' if cached[0] else '로그인 안 됨') if cached else '미확인'
-        body += '<article class="list-row"><div class="row-content"><h3>' + esc(host) + '</h3><p class="meta"><span class="badge">' + esc(status) + '</span><span>마지막 확인: ' + esc(cached[1] if cached else '없음') + '</span></p></div><div class="toolbar row-actions">'
+        body += '<article class="list-row"><div class="row-content"><h3>' + esc(host) + '</h3><p class="meta"><span class="badge">' + esc(status) + '</span><span>마지막 확인: ' + esc(human_time(cached[1]) if cached else '없음') + '</span></p></div><div class="toolbar row-actions">'
         body += form('/hosts/check', csrf, f'<input type="hidden" name="host" value="{esc(host)}"><button aria-label="{esc(host)} 인증 다시 확인">인증 다시 확인</button>')
         if host != 'github.com':
             body += confirm_action('호스트 삭제', '이 호스트의 저장소 추적과 분석 허용을 끕니다. 수집 기록은 보존하지만 대시보드에서 숨겨집니다.',

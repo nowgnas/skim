@@ -4,6 +4,7 @@ import json
 from urllib.parse import urlencode
 
 from . import jobs
+from .timefmt import human_time
 from .db import analysis_allowed
 from .repos import web_repository
 from .hosts import registered
@@ -36,7 +37,7 @@ def summary_parts(row):
     for key, label in [('target', '대상'), ('model', '모델'), ('started_at', '시작'),
                        ('finished_at', '종료'), ('retry_at', '재시도 가능')]:
         if d[key] and (key != 'finished_at' or not d['active']):
-            parts.append(label + ' ' + d[key])
+            parts.append(label + ' ' + (human_time(d[key]) if key.endswith('_at') else d[key]))
     if d['followup']:
         parts.append('완료 후 1회 다시 수집 예정')
     return parts
@@ -59,9 +60,9 @@ def collection_summary_parts(d):
     if d['total'] is not None and d['processed'] is not None:
         parts.append(f'처리한 항목: {d["processed"]}/{d["total"]}')
     if d['retry_at']:
-        parts.append('다시 시도할 시각: ' + d['retry_at'])
+        parts.append('다시 시도할 시각: ' + human_time(d['retry_at']))
     if d['finished_at'] and not d['active']:
-        parts.append('수집 종료 시각: ' + d['finished_at'])
+        parts.append('수집 종료 시각: ' + human_time(d['finished_at']))
     if d['followup']:
         parts.append('현재 작업 후 한 번 더 수집 예정')
     return parts
@@ -167,7 +168,7 @@ def analysis_panel(conn, pr, csrf, offline):
         stats = json.loads(snapshot['coverage']).get('analysis', {}) if snapshot else {}
         body += ('<p class="analysis-summary"><span class="badge">' + esc(label(pr['status'])) + '</span>'
                  + f'<span>분석 {int(stats.get("analyzed", 0))}개</span><span>제외 {int(stats.get("excluded", 0))}개</span>'
-                 + '<span>' + esc(pr['analysis']['created_at']) + '</span></p>')
+                 + '<span>' + esc(human_time(pr['analysis']['created_at'])) + '</span></p>')
     body += '</div><div class="analysis-job-status">'
     running = jobs.active(conn, 'analyze')
     if running is not None and running['target_id'] != pr['id']:
@@ -177,35 +178,101 @@ def analysis_panel(conn, pr, csrf, offline):
     return body + '</div></article>'
 
 
+CHECK_LABELS = {'python': 'Python', 'codex-home': 'Codex 전용 홈', 'version': 'Codex 버전', 'flags': 'Codex 격리 옵션',
+                'probe': '격리 검증', 'model': '분석 모델', '로컬 권한': '로컬 권한'}
+CODEX_CHECKS = {'codex-home', 'version', 'flags', 'probe', 'model'}
+
+
+def doctor_checks(row):
+    """상태 점검 작업 결과의 '정상/실패/경고: 항목 — 내용' 줄을 항목별로 나눈다."""
+    checks = []
+    for line in '\n'.join(filter(None, [row['result'], row['last_error']])).splitlines() if row else []:
+        match = re.match(r'(정상|실패|경고): (.+?) — (.*)', line)
+        if not match:
+            continue
+        state, name, detail = match.groups()
+        key = 'gh' if name.startswith('gh ') else name
+        title = f'GitHub 인증 ({name[3:]})' if key == 'gh' else CHECK_LABELS.get(name, name)
+        checks.append(dict(state={'정상': 'ok', '실패': 'bad', '경고': 'warn'}[state], key=key, title=title, detail=detail))
+    return checks
+
+
+def recovery_for(key):
+    return next((text for name, text in RECOVERY if key in [part.strip() for part in name.split(',')]), '')
+
+
+def codex_setup(csrf, offline, conn, opened):
+    from .web_settings import form
+    body = ('<details id="codex-setup" class="status-section codex-setup"' + (' open' if opened else '') + '><summary>Codex 분석 준비</summary>'
+            '<p>초기화는 로컬 인증 링크를 준비합니다. 기존 파일은 삭제하거나 덮어쓰지 않습니다.</p>'
+            '<p>격리 검증은 저장소 코드를 보내지 않으며 실제 모델 서비스를 호출합니다. 사용량 또는 비용이 발생할 수 있습니다.</p>')
+    if offline:
+        return body + '<p>오프라인 모드에서는 초기화와 격리 검증을 실행하지 않습니다.</p></details>'
+    body += '<div class="toolbar">' + form('/jobs/doctor', csrf, '<input type="hidden" name="action" value="init"><button>분석 준비 초기화</button>')
+    body += form('/jobs/doctor', csrf, '<input type="hidden" name="action" value="probe"><label><input type="checkbox" name="confirm" value="yes" required>실제 유료 모델 호출에 동의합니다</label><button>격리 검증 실행</button>') + '</div>'
+    if jobs.active(conn, 'doctor'):
+        body += '<p>상태 점검 또는 분석 준비 작업이 진행 중입니다. 완료 후 다른 작업을 요청하세요.</p>'
+    return body + '</details>'
+
+
 def status_page(conn, csrf, offline):
+    """맨 위에 '지금 문제가 있는가'를, 그 아래에 작업 기록 한 목록을 둔다."""
     from .web import esc
     from .web_settings import form
-    body = '<h1>상태와 작업</h1><div class="status-actions"><article class="status-card"><h2>상태 점검 (doctor)</h2>'
-    body += '<p class="muted">gh 인증, Codex 설치, 전용 홈, 캐시된 격리 probe, 모델, 로컬 권한을 점검합니다. 실제 모델 호출(--probe)과 인증, 권한 수정은 하지 않습니다.</p>'
+    latest_doctor = jobs.latest(conn, 'doctor')
+    finished = conn.execute("SELECT * FROM jobs WHERE type='doctor' AND status NOT IN ('pending','running') ORDER BY id DESC LIMIT 1").fetchone()
+    checks = doctor_checks(finished)
+    problems = [c for c in checks if c['state'] != 'ok']
+    action = '' if offline else form('/jobs/doctor', csrf, '<button>상태 점검 실행</button>', variant='primary')
+    body = ('<div class="heading"><div><h1>상태</h1><p class="muted">PR을 수집하고 분석할 준비가 되었는지, 최근 작업이 어떻게 끝났는지 확인합니다.</p></div>'
+            + action + '</div>')
     if offline:
         body += '<p>오프라인 모드에서는 gh, Codex를 실행하는 상태 점검을 하지 않습니다.</p>'
-    else:
-        body += form('/jobs/doctor', csrf, '<button>상태 점검 실행</button>', variant='primary')
-    body += job_box(jobs.latest(conn, 'doctor')) + '</article>'
-    body += collect_panel(conn, csrf, offline) + '</div>'
-    body += '<section id="codex-setup" class="status-section"><h2>Codex 분석 준비</h2>'
-    body += '<p>초기화는 로컬 인증 링크를 준비합니다. 기존 파일은 삭제하거나 덮어쓰지 않습니다.</p>'
-    body += '<p>격리 검증은 저장소 코드를 보내지 않으며 실제 모델 서비스를 호출합니다. 사용량 또는 비용이 발생할 수 있습니다.</p>'
-    if offline:
-        body += '<p>오프라인 모드에서는 초기화와 격리 검증을 실행하지 않습니다.</p>'
-    else:
-        body += '<div class="toolbar">' + form('/jobs/doctor', csrf, '<input type="hidden" name="action" value="init"><button>분석 준비 초기화</button>')
-        body += form('/jobs/doctor', csrf, '<input type="hidden" name="action" value="probe"><label><input type="checkbox" name="confirm" value="yes" required>실제 유료 모델 호출에 동의합니다</label><button>격리 검증 실행</button>') + '</div>'
-        active = jobs.active(conn, 'doctor')
-        if active:
-            body += '<p>상태 점검 또는 분석 준비 작업이 진행 중입니다. 완료 후 다른 작업을 요청하세요.</p>'
+    body += '<section class="status-section status-health"><div class="section-heading"><h2>점검 결과</h2>'
+    if finished:
+        body += ('<p class="meta"><span class="badge ' + ('high' if problems else 'ok') + '">' + (f'확인 필요 {len(problems)}개' if problems else '모두 정상')
+                 + '</span><span>점검 ' + esc(human_time(finished['finished_at'])) + '</span></p>')
+    body += '</div>'
+    if latest_doctor and latest_doctor['status'] in ('pending', 'running'):
+        body += job_box(latest_doctor)
+    if not finished:
+        body += '<p class="empty">아직 상태 점검을 하지 않았습니다. 위의 <strong>상태 점검 실행</strong>으로 gh 인증, Codex 준비, 로컬 권한을 확인하세요.</p>'
+    elif not checks:
+        body += job_box(finished)
+    linked = False
+    for check in problems:
+        hint = recovery_for(check['key'])
+        fix = ''
+        # Codex 항목이 여럿 실패해도 해결 위치는 하나이므로 버튼은 첫 항목에만 둔다.
+        if check['key'] in CODEX_CHECKS and not linked:
+            fix, linked = '<a class="btn secondary sm" href="#codex-setup">Codex 분석 준비 열기</a>', True
+        body += (f'<div class="check-row"><span class="badge {"high" if check["state"] == "bad" else "mid"}">' + ('실패' if check['state'] == 'bad' else '경고') + '</span>'
+                 f'<div class="check-main"><strong>{esc(check["title"])}</strong><p>{esc(check["detail"])}</p>'
+                 + (f'<p class="check-hint">{esc(hint)}</p>' if hint else '') + '</div>' + fix + '</div>')
+    healthy = [c for c in checks if c['state'] == 'ok']
+    if healthy:
+        body += (f'<details class="check-ok"><summary>정상 {len(healthy)}개</summary>' + ''.join(
+            f'<div class="check-row"><span class="badge ok">정상</span><div class="check-main"><strong>{esc(c["title"])}</strong><p>{esc(c["detail"])}</p></div></div>'
+            for c in healthy) + '</details>')
+    if finished and checks:
+        body += '<details class="check-raw"><summary>점검 원문과 작업 정보</summary>' + job_box(finished, poll=False) + '</details>'
     body += '</section>'
-    body += '<section class="status-section"><h2>활성 작업</h2>'
+    body += codex_setup(csrf, offline, conn, any(c['key'] in CODEX_CHECKS for c in problems))
+    # 진행 중인 작업을 먼저, 이어서 최근 작업을 한 목록으로 보여준다.
     active_rows = conn.execute("SELECT * FROM jobs WHERE status IN ('pending','running') ORDER BY id").fetchall()
-    body += '<div class="list">' + (''.join('<article class="job-row">' + job_box(row) + '</article>' for row in active_rows) or '<p class="muted">활성 작업이 없습니다.</p>') + '</div></section>'
-    body += '<section class="status-section"><h2>최근 작업</h2>'
-    rows = jobs.recent(conn)
-    body += '<div class="list">' + (''.join('<article class="job-row">' + job_box(row) + '</article>' for row in rows) or '<p class="muted">작업 기록이 없습니다.</p>') + '</div></section>'
+    seen = {row['id'] for row in active_rows}
+    rows = list(active_rows) + [row for row in jobs.recent(conn) if row['id'] not in seen]
+    collect = '' if offline else form('/jobs/collect', csrf, '<button>지금 수집</button>')
+    body += ('<section class="status-section"><div class="section-heading job-heading"><div><h2>작업 기록</h2>'
+             '<p class="muted">수집, 분석, 저장소 조회, 상태 점검 작업입니다. 진행 중인 작업이 위에 옵니다.</p></div>' + collect + '</div>')
+    def record(row):
+        failed = row['status'] in ('failed', 'blocked')
+        # 실패 이유 첫 줄은 펼치지 않아도 보이게 한다. 전체 내용은 결과 상세에 남는다.
+        reason = (row['last_error'] or '').strip().splitlines()[:1] if failed else []
+        return ('<article class="job-row' + (' job-failed' if failed else '') + '">' + job_box(row)
+                + ''.join(f'<p class="job-error">{esc(line)}</p>' for line in reason) + '</article>')
+    body += '<div class="list">' + (''.join(record(row) for row in rows)
+                                    or '<p class="muted">작업 기록이 없습니다.</p>') + '</div></section>'
     body += '<details class="status-recovery"><summary>복구 안내</summary><ul>' + ''.join(f'<li><strong>{esc(name)}</strong>: {esc(text)}</li>' for name, text in RECOVERY) + '</ul></details>'
     return body + script()
 
