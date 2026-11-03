@@ -233,7 +233,7 @@ class JobTests(unittest.TestCase):
         self.assertIn(f'data-job-id="{active["id"]}" data-job-active="1"', body)
         self.post('/jobs/doctor')
         body = self.request('/status')[2]
-        recent = body.split('<h2>최근 작업</h2>', 1)[1]
+        recent = body.split('<h2>작업 기록</h2>', 1)[1]
         self.assertIn('data-job-active="1"', recent)
         self.assertIn('data-job-active="0"', recent)
         self.assertIn('<script src="/static/jobs.js" defer></script>', body)
@@ -243,9 +243,10 @@ class JobTests(unittest.TestCase):
         with closing(connect(self.config)) as conn:
             row, _ = jobs.enqueue(conn, 'doctor')
             pending = self.request('/status')[2]
-            self.assertIn('<div class="status-actions">', pending)
-            self.assertIn('<section class="status-section"><h2>활성 작업</h2>', pending)
-            self.assertIn('<section class="status-section"><h2>최근 작업</h2>', pending)
+            self.assertIn('<h2>점검 결과</h2>', pending)
+            self.assertIn('<h2>작업 기록</h2>', pending)
+            # 진행 중인 작업은 작업 기록 맨 위에 한 번만 나온다.
+            self.assertEqual(pending.split('<h2>작업 기록</h2>', 1)[1].count(f'data-job-id="{row["id"]}"'), 1)
             self.assertIn('<details class="status-recovery"><summary>복구 안내</summary>', pending)
             self.assertIn('data-job-progress-label>대기 중</span>', pending)
             self.assertIn('aria-label="작업 진행" hidden', pending)
