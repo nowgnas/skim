@@ -206,54 +206,140 @@ SCOPE_LABELS = {'none': '분석 안 함', 'all': '모든 저장소', 'selected':
 
 
 def scope_candidates(conn, host, query):
-    """선택 목록 후보: 선택됨·추적 중·열린 PR이 있는 저장소. 화면과 저장이 같은 페이지를 계산한다."""
+    """호스트의 연결한 저장소와(연결을 끊었어도) 분석에 선택된 저장소. 화면과 저장이 같은 목록을 쓴다."""
     from .web import list_controls
-    rows = conn.execute("SELECT r.*, EXISTS(SELECT 1 FROM pull_requests p WHERE p.repo_id=r.id AND p.state='open') AS has_open "
-                        "FROM repositories r WHERE r.host=? AND (r.tracked=1 OR r.analysis_policy='allow' OR has_open) "
-                        "ORDER BY r.analysis_policy='allow' DESC, r.tracked DESC, r.owner, r.name", (host,)).fetchall()
-    return list_controls(rows, query, 'select', '저장소', lambda r: r['owner'] + '/' + r['name'])
+    rows = conn.execute("SELECT r.*, (SELECT count(*) FROM pull_requests p WHERE p.repo_id=r.id AND p.state='open') AS open_prs "
+                        "FROM repositories r WHERE r.host=? AND (r.tracked=1 OR r.analysis_policy='allow') "
+                        "ORDER BY r.tracked DESC, r.owner, r.name", (host,)).fetchall()
+    # 예전 링크의 select_q도 같은 검색으로 받는다.
+    if not query.get('tracked_q') and query.get('select_q'):
+        query = dict(query, tracked_q=query['select_q'])
+    return list_controls(rows, query, 'tracked', '저장소', lambda r: r['owner'] + '/' + r['name'])
 
 
-def scope_section(conn, csrf, query):
+def add_panel(server, conn, csrf, query, host):
+    """카드 안에서 펼치는 저장소 추가. 조회와 직접 연결 모두 현재 호스트로 한다."""
+    from .web import esc, list_controls
+    lookup = getattr(server, 'repo_lookup', None)
+    lookup_host, lookup_mode, truncated, loaded, items, teams, selected_team = lookup.snapshot(with_teams=True) if lookup else ('github.com', 'all', False, False, [], [], '')
+    mine = lookup_host == host
+    running = jobs.active(conn, 'repos')
+    # 이 호스트를 불러왔거나 조회 중이거나 검색 중이면 펼친 채로 보여준다.
+    opened = (mine and (loaded or truncated)) or running is not None or bool(query.get('available_q')) or query.get('add', [''])[0] == '1'
+    choices = '<option value="all"' + (' selected' if lookup_mode == 'all' or not mine else '') + '>접근 가능한 전체 저장소</option>'
+    choices += '<option value="team"' + (' selected' if mine and lookup_mode == 'team' else '') + '>내 팀 저장소</option>'
+    body = ('<details class="repo-add" id="add-repository"' + (' open' if opened else '') + '><summary class="btn secondary sm">+ 저장소 추가</summary>'
+            '<div class="repo-add-body"><p class="muted">내 계정이 접근할 수 있는 저장소나 내 팀 저장소를 불러와 연결합니다.</p>')
+    hidden_host = f'<input type="hidden" name="host" value="{esc(host)}">'
+    body += form('/repos/load', csrf, hidden_host + '<label>조회 범위<select name="mode">' + choices + '</select></label><button>불러오기</button>')
+    if getattr(server, 'offline', False):
+        body += '<p>오프라인 모드에서는 GitHub 저장소를 불러오거나 접근을 확인하지 않습니다.</p>'
+    if running is not None and not pending_row(conn, host):
+        body += '<p>이미 저장소 조회 작업이 진행 중입니다. 완료 후 다시 요청하세요. 진행 중 요청은 새 작업을 만들지 않습니다.</p>'
+    # 연결 확인 중인 저장소는 목록 행에서 진행을 보여주므로 여기서는 같은 작업을 반복하지 않는다.
+    if not pending_row(conn, host):
+        body += job_box(jobs.latest(conn, 'repos')) + script()
+    if mine and (loaded or truncated or items):
+        if truncated:
+            body += '<p>조회 한도에 도달해 일부 결과만 표시합니다.</p>'
+        elif loaded and not items:
+            body += '<p>조회된 저장소가 없습니다. 팀 접근 권한과 조직 SSO를 확인하세요.</p>'
+        if lookup_mode == 'team' and loaded:
+            options = '<option value=""' + (' selected' if not selected_team else '') + '>모든 소속 팀</option>'
+            options += ''.join(f'<option value="{esc(team)}"' + (' selected' if team == selected_team else '') + f'>{esc(team)}</option>' for team in sorted(teams, key=str.casefold))
+            body += form('/repos/load', csrf, hidden_host + '<input type="hidden" name="mode" value="team"><label>소속 팀<select name="team">' + options + '</select></label><button>선택한 팀 조회</button>')
+        tracked = {(row['owner'] + '/' + row['name']).casefold() for row in conn.execute('SELECT owner,name FROM repositories WHERE tracked=1 AND host=?', (host,))}
+        items, controls, navigation = list_controls(items, query, 'available', '불러온 저장소', lambda name: name)
+        body += controls + '<div class="list">'
+        for name in items:
+            body += '<article class="list-row"><span class="row-content">' + esc(name) + '</span>'
+            if name.casefold() in tracked:
+                body += '<span class="badge">연결됨</span>'
+            else:
+                body += form('/repos/add', csrf, hidden_host + f'<input type="hidden" name="repository" value="{esc(name)}">' + source_field(host + '/' + name) + f'<button aria-label="{esc(host + "/" + name)} 연결">연결</button>')
+            body += '</article>'
+        body += '</div>' + navigation
+    body += ('<details class="direct-connect"><summary>목록에 없는 저장소를 주소로 연결</summary><div class="connect-toolbar">'
+             + form('/repos/add', csrf, hidden_host + '<label>owner/repo<input name="repository" required maxlength="140"></label>' + source_field() + '<button>저장소 연결</button>')
+             + '</div></details></div></details>')
+    return body
+
+
+def pending_row(conn, host):
+    """연결을 누른 저장소는 확인이 끝나기 전에도 목록 맨 위에 '연결 확인 중'으로 보여준다."""
     from .web import esc
-    hosts = [r[0] for r in conn.execute('SELECT host FROM github_hosts ORDER BY host')]
+    row = jobs.active(conn, 'repos')
+    params = json.loads(row['params'] or '{}') if row else {}
+    if not row or not params.get('repository') or params.get('host', 'github.com') != host:
+        return ''
+    return ('<div class="repo-row repo-pending"><span class="pending-mark" aria-hidden="true">⟳</span><div class="repo-row-main">'
+            f'<strong>{esc(params["repository"])}</strong><p class="meta"><span>연결 확인 중</span></p>'
+            # 확인이 성공하면 페이지를 다시 읽어 일반 행으로 바꾼다. 실패하면 이 행에 이유가 남는다.
+            + job_box(row).replace('<div class="job"', '<div class="job" data-job-reload="1"', 1) + '</div></div>')
+
+
+def repository_card(server, conn, csrf, query, hosts):
+    """호스트 하나의 연결 저장소와 분석 허용 범위를 한 목록에서 관리한다(GitHub 앱 설치 화면과 같은 구성)."""
+    from .web import esc
     wanted = query.get('scope_host', [''])[0]
     host = wanted if wanted in hosts else 'github.com'
     scope = analysis_scope(conn, host)
-    body = ('<section id="analysis-scope" class="repo-section"><h2>분석 허용 범위</h2>'
-            '<p class="muted">GitHub 앱 설치처럼 호스트마다 코드를 분석에 보낼 범위를 정합니다. 기본은 분석 안 함입니다.</p>'
-            f'<p>{esc(WARNING)}</p>')
+    body = '<section id="analysis-scope" class="repo-section repo-card"><span id="connected-repositories" class="anchor"></span>'
     if len(hosts) > 1:
-        keep = ''.join(f'<input type="hidden" name="{k}" value="{esc(query[k][0])}">' for k in ('from_pr',) if query.get(k))
-        body += ('<form class="filters" method="get" action="/repos#analysis-scope">' + keep + '<label>호스트<select name="scope_host">'
-                 + ''.join(f'<option{" selected" if h == host else ""}>{esc(h)}</option>' for h in hosts)
-                 + '</select></label><button class="btn secondary">호스트 보기</button></form>')
+        keep = [(k, query[k][0]) for k in ('from_pr',) if query.get(k)]
+        body += '<nav class="pr-tabs host-tabs" aria-label="호스트">' + ''.join(
+            f'<a href="/repos?{esc(urlencode(keep + [("scope_host", h)]))}#analysis-scope"' + (' aria-current="page"' if h == host else '')
+            + f'><span>{esc(h)}</span></a>' for h in hosts) + '</nav>'
+    body += (f'<div class="section-heading repo-card-heading"><div><h2>{esc(host)} 저장소</h2>'
+             '<p class="muted">리뷰할 저장소와, 그중 코드를 분석에 보낼 범위를 정합니다. 기본은 분석 안 함입니다.</p></div></div>'
+             + add_panel(server, conn, csrf, query, host))
     rows, controls, navigation = scope_candidates(conn, host, query)
     radios = ''.join(f'<label class="scope-option"><input type="radio" name="scope" value="{value}"' + (' checked' if value == scope else '')
                      + f'><span><strong>{label}</strong><small>{hint}</small></span></label>'
-                     for value, label, hint in [('none', SCOPE_LABELS['none'], '이 호스트의 코드는 모델 서비스로 보내지 않습니다.'),
-                                                ('all', SCOPE_LABELS['all'], '앞으로 연결하거나 리뷰 요청을 받는 저장소도 포함합니다.'),
-                                                ('selected', SCOPE_LABELS['selected'], '아래에서 체크한 저장소만 허용합니다.')])
-    checks = ''.join(f'<label class="scope-repo"><input type="checkbox" name="repository" value="{esc(r["owner"] + "/" + r["name"])}"'
-                     + (' checked' if r['analysis_policy'] == 'allow' else '') + f'><span>{esc(r["owner"] + "/" + r["name"])}</span>'
-                     + ('<small>추적 중</small>' if r['tracked'] else '') + ('<small>열린 PR</small>' if r['has_open'] else '') + '</label>'
-                     for r in rows)
+                     for value, label, hint in [('none', SCOPE_LABELS['none'], '코드를 모델 서비스로 보내지 않습니다.'),
+                                                ('all', SCOPE_LABELS['all'], '앞으로 연결하는 저장소도 포함합니다.'),
+                                                ('selected', SCOPE_LABELS['selected'], '아래에서 체크한 저장소만 분석합니다.')])
+    items = ''
+    removals = ''
+    for r in rows:
+        name = r['owner'] + '/' + r['name']
+        allowed = scope == 'all' or (scope == 'selected' and r['analysis_policy'] == 'allow')
+        items += ('<div class="repo-row"><label class="scope-repo"><input type="checkbox" name="repository" value="' + esc(name) + '"'
+                  + (' checked' if r['analysis_policy'] == 'allow' else '') + f' aria-label="{esc(name)} 분석 선택"></label>'
+                  + f'<div class="repo-row-main"><strong>{esc(name)}</strong><p class="meta"><span>{esc(r["source"])}</span>'
+                  + (f'<span>열린 PR {int(r["open_prs"])}개</span>' if r['open_prs'] else '')
+                  + ('' if r['tracked'] else '<span>연결 해제됨</span>') + '</p></div>'
+                  + f'<span class="badge {"ok" if allowed else ""}">' + ('분석 허용' if allowed else '분석 안 함') + '</span>')
+        if r['tracked']:
+            form_id = f'remove-{int(r["id"])}'
+            # 연결 해제는 범위 저장 폼 안에 둘 수 없으므로 별도 폼을 form 속성으로 연결한다.
+            items += ('<details class="confirm-action"><summary class="btn danger sm">연결 해제</summary>'
+                      '<p>추적과 수집을 멈춥니다. 분석 선택은 그대로 남습니다.</p>'
+                      f'<button class="btn danger sm" form="{form_id}" aria-label="{esc(host + "/" + name)} 연결 해제 확인">연결 해제 확인</button></details>')
+            removals += (f'<form class="action-form" id="{form_id}" method="post" action="/repos/remove" hidden>'
+                         f'<input type="hidden" name="csrf" value="{esc(csrf)}"><input type="hidden" name="host" value="{esc(host)}">'
+                         f'<input type="hidden" name="repository" value="{esc(name)}"></form>')
+        items += '</div>'
     # 저장은 이 화면에 실제로 보여준 저장소만 바꾼다. 페이지를 다시 계산하면 그 사이 순서가 바뀌어 보지 못한 선택이 풀릴 수 있다.
-    paging = ''.join(f'<input type="hidden" name="shown" value="{int(r["id"])}">' for r in rows)
-    body += (f'<p class="meta"><span class="badge">{esc(host)}</span><span>현재: {SCOPE_LABELS[scope]}</span></p>'
-             + controls
-             + form('/repos/scope', csrf, f'<input type="hidden" name="host" value="{esc(host)}">' + paging
-                    + '<fieldset class="scope-choices"><legend class="sr-only">분석 범위</legend>' + radios + '</fieldset>'
-                    + '<fieldset class="scope-repos"><legend>선택할 저장소</legend>'
-                    + (checks or '<p class="muted">연결했거나 열린 PR이 있는 저장소가 없습니다. 먼저 저장소를 연결하세요.</p>') + '</fieldset>'
-                    + '<label class="consent"><input type="checkbox" name="confirm" value="yes">허용 범위의 코드가 Codex(모델 서비스)로 전송됨을 이해하고 허용합니다</label>'
-                    + f'<button aria-label="{esc(host)} 분석 허용 범위 저장">범위 저장</button>')
-             + navigation + '</section>')
+    shown = ''.join(f'<input type="hidden" name="shown" value="{int(r["id"])}">' for r in rows)
+    empty = '<p class="empty">연결한 저장소가 없습니다. 위의 <strong>+ 저장소 추가</strong>에서 연결하세요.</p>'
+    # 저장소가 한 페이지에 다 보이면 검색창은 오히려 첫 행동(범위 선택)을 가린다.
+    searching = 'href' in navigation or query.get('tracked_q') or query.get('select_q')
+    body += ((controls if searching else '')
+             # form()은 안의 모든 버튼에 클래스를 덧씌우므로 연결 해제 버튼이 섞인 이 폼은 직접 만든다.
+             + '<form class="action-form scope-form" method="post" action="/repos/scope">'
+             + f'<input type="hidden" name="csrf" value="{esc(csrf)}"><input type="hidden" name="host" value="{esc(host)}">' + shown
+             + '<fieldset class="scope-choices"><legend>분석 허용 범위</legend>' + radios + '</fieldset>'
+             + '<fieldset class="scope-repos repo-list"><legend class="sr-only">저장소</legend>' + pending_row(conn, host) + (items or empty) + '</fieldset>'
+             + f'<p class="consent-note">{esc(WARNING)}</p>'
+             + '<label class="consent"><input type="checkbox" name="confirm" value="yes">허용 범위의 코드가 Codex(모델 서비스)로 전송됨을 이해하고 허용합니다</label>'
+             + f'<button class="btn secondary" aria-label="{esc(host)} 분석 허용 범위 저장">저장</button></form>'
+             + removals + navigation + '</section>')
     return body
 
 
 RETURN_FIELDS = {
-    '/repos': {'tracked_q', 'tracked_page', 'available_q', 'available_page', 'available_team', 'from_pr',
+    '/repos': {'tracked_q', 'tracked_page', 'available_q', 'available_page', 'available_team', 'from_pr', 'add',
                'scope_host', 'select_q', 'select_page'},
     '/settings': set(),
 }
@@ -318,61 +404,15 @@ def render(server, conn, csrf, path, query=None):
     from .web import esc, meta, list_controls
     query = query or {}
     if path == '/repos':
-        body = '<div class="page-intro"><h1>저장소</h1><p>GitHub 호스트와 조회 범위를 선택하고 리뷰할 저장소를 연결하세요.</p><p class="muted">GitHub에는 읽기 전용으로 접근합니다. 분석 실행은 아래 호스트별 분석 허용 범위를 따릅니다.</p></div>'
+        hosts = [r[0] for r in conn.execute('SELECT host FROM github_hosts ORDER BY host')]
+        body = ('<div class="page-intro"><h1>저장소</h1><p>리뷰할 저장소를 연결하고, 호스트마다 분석에 보낼 저장소를 고릅니다.</p>'
+                '<p class="muted">GitHub에는 읽기 전용으로 접근합니다.</p></div>')
         from_pr = query.get('from_pr', [''])[0]
         if positive(from_pr):
-            body += (f'<p class="notice">PR에서 이동했습니다. <a href="#analysis-scope">분석 허용 범위</a>에서 이 저장소를 허용한 뒤 '
+            body += (f'<p class="notice">PR에서 이동했습니다. 아래 <a href="#analysis-scope">분석 허용 범위</a>에서 이 저장소를 허용한 뒤 '
                      f'<a href="/pr/{int(from_pr)}">PR로 돌아가 분석을 요청하세요</a>.</p>')
-        lookup = getattr(server, 'repo_lookup', None)
-        lookup_host, lookup_mode, truncated, loaded, items, teams, selected_team = lookup.snapshot(with_teams=True) if lookup else ('github.com', 'all', False, False, [], [], '')
-        choices = '<option value="all"' + (' selected' if lookup_mode == 'all' else '') + '>접근 가능한 전체 저장소</option>'
-        choices += '<option value="team"' + (' selected' if lookup_mode == 'team' else '') + '>내 팀 저장소</option>'
-        body += '<section class="repo-section repo-discovery"><h2>저장소 찾기</h2><p class="muted">팀 저장소만 보려면 조회 범위에서 내 팀 저장소를 선택하세요.</p>'
-        body += form('/repos/load', csrf, host_field(conn, '저장소 불러오기', lookup_host) + '<label>조회 범위<select name="mode">' + choices + '</select></label><button>저장소 불러오기</button>', variant='primary')
-        if getattr(server, 'offline', False):
-            body += '<p>오프라인 모드에서는 GitHub 저장소를 불러오거나 접근을 확인하지 않습니다.</p>'
-        running = jobs.active(conn, 'repos')
-        if running is not None:
-            body += '<p>이미 저장소 조회 작업이 진행 중입니다. 완료 후 다시 요청하세요. 진행 중 요청은 새 작업을 만들지 않습니다.</p>'
-        body += job_box(jobs.latest(conn, 'repos')) + script()
-        body += '<h2>조회 결과: ' + esc(lookup_host) + ' / ' + (esc(selected_team) if selected_team else '내 팀 저장소' if lookup_mode == 'team' else '전체 저장소') + '</h2>'
-        if truncated:
-            body += '<p>조회 한도에 도달해 일부 결과만 표시합니다.</p>'
-        elif loaded and not items:
-            body += '<p>조회된 저장소가 없습니다. 팀 접근 권한과 조직 SSO를 확인하세요.</p>'
-        if lookup_mode == 'team' and loaded:
-            options = '<option value=""' + (' selected' if not selected_team else '') + '>모든 소속 팀</option>'
-            options += ''.join(f'<option value="{esc(team)}"' + (' selected' if team == selected_team else '') + f'>{esc(team)}</option>' for team in sorted(teams, key=str.casefold))
-            body += form('/repos/load', csrf, '<input type="hidden" name="host" value="' + esc(lookup_host) + '"><input type="hidden" name="mode" value="team"><label>소속 팀<select name="team">' + options + '</select></label><button>선택한 팀 조회</button>')
-        elif not loaded:
-            body += '<p class="muted">팀을 선택하려면 조회 범위에서 내 팀 저장소를 선택하고 불러오세요.</p>'
-        tracked = {(row['host'].casefold(), (row['owner'] + '/' + row['name']).casefold()): row for row in conn.execute('SELECT * FROM repositories WHERE tracked=1')}
-        items, controls, navigation = list_controls(items, query, 'available', '조회된 저장소', lambda name: lookup_host + '/' + name)
-        body += controls + '<div class="list">'
-        for name in items:
-            row = tracked.get((lookup_host.casefold(), name.casefold()))
-            body += '<article class="list-row"><span class="row-content">' + esc(lookup_host + '/' + name) + '</span>'
-            if row:
-                params = [(key, value) for key, values in query.items() if key in RETURN_FIELDS['/repos'] and key not in ('tracked_q', 'tracked_page') for value in values[:1]]
-                params.append(('tracked_q', lookup_host + '/' + name))
-                body += '<span class="badge">연결됨 · 분석 ' + ('허용' if analysis_allowed(conn, row['id']) else '안 함') + '</span><a class="btn secondary sm" href="?' + esc(urlencode(params)) + '#connected-repositories">관리</a>'
-            else:
-                body += form('/repos/add', csrf, f'<input type="hidden" name="host" value="{esc(lookup_host)}"><input type="hidden" name="repository" value="{esc(name)}">' + source_field(lookup_host + '/' + name) + f'<button aria-label="{esc(lookup_host + "/" + name)} 선택하여 연결">선택하여 연결</button>')
-            body += '</article>'
-        body += '</div>' + navigation + '</section>'
-        body += '<section class="repo-section"><h2>직접 연결</h2><p class="muted">목록에서 찾지 못한 저장소는 주소를 입력해 연결할 수 있습니다.</p>'
-        body += '<div class="connect-toolbar">' + form('/repos/add', csrf, host_field(conn, selected=lookup_host) + '<label>owner/repo<input name="repository" required maxlength="140"></label>' + source_field() + '<button>저장소 연결</button>') + '</div></section>'
-        rows = list(conn.execute('SELECT * FROM repositories ORDER BY tracked DESC,owner,name'))
-        rows, controls, navigation = list_controls(rows, query, 'tracked', '연결된 저장소', lambda r: r['host'] + '/' + r['owner'] + '/' + r['name'])
-        body += '<section id="connected-repositories" class="repo-section"><h2>연결된 저장소</h2><p class="muted">이전에 연결한 저장소도 표시합니다. 연결 해제는 로컬 추적만 중단하며 분석 허용 범위는 그대로입니다.</p>' + controls + '<div class="list">'
-        for row in rows:
-            name = row['owner'] + '/' + row['name']
-            body += '<article class="list-row"><div class="row-content"><h3>' + esc(name) + '</h3>' + meta(row['host'], row['source'], '추적 중' if row['tracked'] else '연결 해제됨') + '</div><div class="toolbar row-actions">'
-            if row['tracked']:
-                body += confirm_action('연결 해제', '추적과 수집을 멈춥니다. 분석 허용 범위는 그대로 남아 동의가 철회되지 않으며, 리뷰 요청으로만 남은 PR이 아니면 수집 기록이 정리될 수 있습니다.',
-                                       form('/repos/remove', csrf, f'<input type="hidden" name="host" value="{esc(row["host"])}"><input type="hidden" name="repository" value="{esc(name)}"><button aria-label="{esc(row["host"] + "/" + name)} 연결 해제 확인">연결 해제 확인</button>', variant='danger'))
-            body += '<span class="badge">분석 ' + ('허용' if analysis_allowed(conn, row['id']) else '안 함') + '</span></div></article>'
-        body += '</div>' + navigation + '</section>' + scope_section(conn, csrf, query) + '<details class="repo-section host-management"><summary>GitHub 호스트 관리</summary>' + host_settings(server, conn, csrf) + '</details>'
+        body += repository_card(server, conn, csrf, query, hosts)
+        body += '<details class="repo-section host-management"><summary>GitHub 호스트 관리</summary>' + host_settings(server, conn, csrf) + '</details>'
         return preserve_list_state(body, path, query)
     settings = json.loads((server.config.config_dir / 'config.json').read_text())
     model = settings.get('codex_model', '')

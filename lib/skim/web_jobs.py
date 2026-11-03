@@ -150,7 +150,7 @@ def analysis_panel(conn, pr, csrf, offline):
         body += '<p class="analysis-note">오프라인 모드에서는 분석할 수 없습니다.</p>'
     elif not analysis_allowed(conn, pr['repo_id']):
         # 대상 저장소만 검색된 상태로 열고, 저장 후 이 PR로 돌아올 수 있게 번호를 넘긴다.
-        target = urlencode([('scope_host', pr.get('host', 'github.com')), ('select_q', pr['owner'] + '/' + pr['name']),
+        target = urlencode([('scope_host', pr.get('host', 'github.com')), ('tracked_q', pr['owner'] + '/' + pr['name']),
                             ('from_pr', str(int(pr['id'])))])
         body += (f'<a class="btn primary" href="/repos?{esc(target)}#analysis-scope">분석 허용 범위 열기</a>'
                  '<p class="analysis-note">이 저장소는 분석이 허용되지 않았습니다.</p>')

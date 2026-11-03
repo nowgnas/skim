@@ -156,7 +156,7 @@ class JobTests(unittest.TestCase):
             conn.execute("UPDATE repositories SET analysis_policy='inherit' WHERE owner='demo'")
         body = self.request('/pr/1')[2]
         self.assertNotIn('action="/jobs/analyze"', body)
-        self.assertIn('href="/repos?scope_host=github.com&amp;select_q=demo%2Fcheckout&amp;from_pr=1#analysis-scope"', body)
+        self.assertIn('href="/repos?scope_host=github.com&amp;tracked_q=demo%2Fcheckout&amp;from_pr=1#analysis-scope"', body)
         self.assertIn('분석 허용 범위 열기', body)
         self.assertNotIn('action="/jobs/analyze"', self.request('/pr/5')[2])
 
@@ -285,7 +285,9 @@ class JobTests(unittest.TestCase):
         success = script.split('.then(job => {', 1)[1].split('.catch', 1)[0]
         self.assertIn('retryDelay = 2000', success)
         self.assertIn('if (job.active) setTimeout(tick, 2000)', success)
-        self.assertNotIn('location.reload()', success)
+        # 새로고침은 '연결 확인 중' 행처럼 명시적으로 요청한 상자가 성공했을 때만 한다.
+        self.assertEqual(success.count('location.reload()'), 1)
+        self.assertIn("if (box.dataset.jobReload === '1' && job.status === 'completed') location.reload()", success)
         self.assertIn('resultText.textContent = text', success)
         self.assertNotIn('innerHTML', script)
 

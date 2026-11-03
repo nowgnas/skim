@@ -130,7 +130,9 @@ class SettingsTests(unittest.TestCase):
         self.assertIn('name="repository" value="demo/checkout" checked', section)
         self.assertIn('name="repository" value="demo-org/library">', section)
         # 동의 체크를 읽은 뒤 저장하도록 체크가 버튼보다 앞에 온다.
-        self.assertLess(section.index('class="consent"'), section.index('범위 저장</button>'))
+        self.assertLess(section.index('class="consent"'), section.index('분석 허용 범위 저장">저장</button>'))
+        # 연결 해제 버튼은 범위 저장 폼과 따로 제출된다.
+        self.assertRegex(section, r'<button class="btn danger sm" form="remove-\d+"')
         self.assertNotIn('btn primary', section)
         self.assertNotIn('demo-org/intranet', section)  # 다른 호스트 저장소는 섞이지 않는다
         other = self.request('/repos?scope_host=github.corp.example')[2].split('id="analysis-scope"', 1)[1].split('</section>', 1)[0]
