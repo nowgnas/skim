@@ -147,6 +147,19 @@ class WebTests(unittest.TestCase):
         self.assertEqual(self.request('/')[0], 200)
         self.assertEqual(self.request('/?pr_q=checkout')[0], 200)
 
+    def test_detail_shows_partial_context_coverage(self):
+        with closing(connect(self.config)) as conn, conn:
+            row = conn.execute('SELECT id,coverage FROM snapshots WHERE pr_id=1 ORDER BY id DESC LIMIT 1').fetchone()
+            coverage = json.loads(row['coverage'])
+            coverage['analysis'] = dict(analyzed=5, excluded=0, omitted=0, redacted=1,
+                                        overview_missing=2, overview_sampled=3, overview_eligible=5,
+                                        synthesis_omitted=4, synthesis_uncertainties_omitted=1)
+            conn.execute('UPDATE snapshots SET coverage=? WHERE id=?', (json.dumps(coverage), row['id']))
+        body = self.request('/pr/1')[2]
+        for value in ('민감 정보 정제 1', '개요 없이 분석한 변경 2', '전체 맥락 발췌 3/5',
+                      '결과 요약에서 빠진 변경 4', '결과 요약에서 빠진 불확실성 1'):
+            self.assertIn(value, body)
+
     def test_detail_analysis_action_precedes_change_units(self):
         body = self.request('/pr/1')[2]
         self.assertLess(body.index('PR 분석 요청'), body.index('aria-label="변경 보기"'))
@@ -278,10 +291,10 @@ class WebTests(unittest.TestCase):
             analysis = conn.execute('SELECT model, cli_version FROM analyses WHERE snapshot_id=1 ORDER BY id DESC LIMIT 1').fetchone()
         self.assertIn('모델 ' + analysis['model'], body)
         self.assertIn('Codex CLI ' + analysis['cli_version'], body)
-        self.assertIn('<details open><summary><span class="meta"><span>auth/session.py', body)
-        self.assertIn('<details open><summary><span class="meta"><span>.env', body)
-        self.assertIn('<details><summary><span class="meta"><span>README.md', body)
-        self.assertIn('규칙 기반 후보', body)
+        self.assertIn('data-file-path="auth/session.py"', body)
+        self.assertIn('data-file-path=".env"', body)
+        self.assertIn('data-file-path="README.md"', body)
+        self.assertIn('직접 확인이 필요한 범위', body)
         self.assertIn('미분석', body)
         self.assertIn('https://github.com/demo/checkout/pull/1', body)
         self.assertIn('전체 원본 diff', self.request('/pr/1?diff=1')[2])
@@ -302,18 +315,15 @@ class WebTests(unittest.TestCase):
             item['risk_flags'] = ['config']
             conn.execute('UPDATE analyses SET output_json=? WHERE id=?', (json.dumps(result), row['id']))
         body = self.request('/pr/1')[2]
-        hunk = next(part.split('</details>')[0] for part in body.split('<details')
-                    if '<span>' + unit['change_id'] + '</span>' in part)
-        self.assertIn('<p>규칙 후보: logic_without_tests, 설치 스크립트</p>', hunk)
-        self.assertIn('<p>모델 판단: config</p>', hunk)
-        for page in (body.split('<details')[0], self.request()[2]):
-            self.assertIn('설치 스크립트', page)
-            self.assertIn('규칙 후보: ', page)
-            self.assertIn('모델 판단: ', page)
+        panel = next(part.split('</section>')[0] for part in body.split('<section class="detail-file"')
+                     if 'data-file-path="' + unit['file_path'] + '"' in part)
+        self.assertIn('<p>규칙 후보: 테스트 변경 없음, 설치 스크립트</p>', panel)
+        self.assertIn('<p>모델 판단: 설정</p>', panel)
+        self.assertIn('분석 근거 더보기', panel)
 
     def test_unanalyzed_model_label_and_empty_badges(self):
         body = self.request('/pr/1')[2]
-        self.assertIn('<p>모델 판단: 미분석</p>', body)
+        self.assertIn('제외되었거나 분석하지 못한 파일', body)
         base = dict(importance='low', rule_flags=[], model_flags=[],
                     unanalysed=False, items={'h1': {}}, stale=False, draft=False)
         self.assertNotIn('규칙 후보:', badges(base))
@@ -330,8 +340,8 @@ class WebTests(unittest.TestCase):
         self.assertIn('<span class="diff-add">+&lt;script&gt;\n</span>', rendered)
         self.assertIn('<span class="diff-add">+++ content\n</span>', rendered)
         self.assertIn('<span class="diff-context"> context\n</span>', rendered)
-        self.assertIn('class="diff-add"', self.request('/pr/1')[2])
-        self.assertIn('class="diff-hunk"', self.request('/pr/1?diff=1')[2])
+        self.assertIn('class="diff-add diff-line"', self.request('/pr/1')[2])
+        self.assertIn('class="diff-hunk diff-line"', self.request('/pr/1?diff=1')[2])
 
     def test_untrusted_content_and_cache_paths(self):
         with closing(connect(self.config)) as conn, conn:
@@ -355,8 +365,8 @@ class WebTests(unittest.TestCase):
             conn.execute("INSERT INTO snapshots(pr_id,base_sha,head_sha,diff_hash,input_hash,diff_path,coverage) VALUES(1,'base','new','d','i',?,?)", (row['diff_path'], row['coverage']))
         body = self.request('/pr/1')[2]
         self.assertIn('이전 SHA 결과', body)
-        self.assertIn('README.md</span><span>h', body)
-        self.assertNotIn('<details><summary><span class="meta"><span>README.md', body)
+        self.assertIn('data-file-path="README.md"', body)
+        self.assertNotIn('변경 동작과 테스트를 확인하세요.', body)
 
     def test_single_instance_reissues_url_and_private_socket_cleanup(self):
         url = self.server.origin + '/entry#fixture-token'

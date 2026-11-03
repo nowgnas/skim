@@ -19,6 +19,7 @@ from skim.analyze.protocol import PROMPT_VERSION, SCHEMA_VERSION, SYSTEM
 from skim.analyze.units import parse_diff, SECRET_VALUE, SECRET_ASSIGNMENT, sanitize
 from skim.config import Config, private_dir, private_file
 from skim.db import connect
+from skim.web import file_rows, top_file_rows
 
 
 def sha256(value):
@@ -88,7 +89,16 @@ def assess(case, result, requests, diff):
         present = any(f['file_path'] == watch['file'] and
                       watch['model_flag_absent'] in f['risk_flags'] for f in files)
         expectations['watch'] = dict(watch, model_flag_present=present, met=not present)
-    return dict(displayed=dict(result, files=files), captured=captured,
+    rows = file_rows(dict(units=units, items=items, result=result))
+    top3 = [row['path'] for row in top_file_rows(rows)]
+    expected = set(case['high_files'])
+    matched = len(expected.intersection(top3))
+    metrics = dict(model_high_files=sorted(f['file_path'] for f in files if f.get('importance') == 'high'),
+                   rule_candidate_files=sorted(f['file_path'] for f in files if f.get('candidates')),
+                   top3=top3, top3_precision=matched / len(top3) if top3 else None,
+                   top3_recall=matched / len(expected) if expected else None,
+                   intent=result.get('intent'), intent_review='human_review_required')
+    return dict(displayed=dict(result, files=files), metrics=metrics, captured=captured,
                 misses=[p for p, ok in captured.items() if not ok],
                 hidden_unanalysed=hidden, expectations=expectations)
 
@@ -201,7 +211,7 @@ def main():
         parser.error('--home is required for model evaluation')
     corpus = ROOT / 'eval' / PROMPT_VERSION
     manifest = json.loads((corpus / 'manifest.json').read_text())
-    if PROMPT_VERSION != 'skim-ko-3' or manifest['prompt_version'] != PROMPT_VERSION:
+    if PROMPT_VERSION not in ('skim-ko-3', 'skim-ko-4', 'skim-ko-5') or manifest['prompt_version'] != PROMPT_VERSION:
         parser.error('unsupported release prompt version')
     if args.rescore:
         try:

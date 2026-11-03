@@ -73,9 +73,19 @@ main>h1{margin-top:0}
 .heading{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:12px}
 .heading h1{margin:0}
 .home-heading{padding:4px 0 28px;gap:24px}
-.heading-collect{display:flex;flex-direction:column;align-items:flex-end;gap:6px;max-width:60%}
-.heading-collect>.action-form{margin:0;justify-content:flex-end}
-.heading-collect .job{font-size:13px;border:0;padding:0;margin:0;text-align:right}
+.heading-collect{display:flex;flex-direction:column;align-items:stretch;gap:8px;width:390px;max-width:60%;padding:16px;border:1px solid var(--line);border-radius:var(--radius-box);background:var(--surface)}
+.collect-heading{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.collect-heading h2{margin:0;font-size:15px}
+.collect-heading .action-form{width:auto;flex:none;margin:0}
+.collect-description{margin:0;color:var(--muted);font-size:13px}
+.heading-collect .job{font-size:13px;border:0;padding:0;margin:0;text-align:left}
+.heading-collect .job [data-job-field=summary]{height:72px;display:flex;flex-direction:column;align-items:flex-start;gap:4px}
+.heading-collect .job [data-job-field=summary] span:nth-child(2){padding:0;background:none;color:var(--muted);font-weight:400}
+.heading-collect .job-result-slot{margin-top:4px;min-height:36px}
+.heading-collect .job-result-slot details{padding:0;background:transparent}
+.heading-collect .job-result-slot summary{display:inline-flex;align-items:center;min-height:34px;padding:5px 10px;border:1px solid var(--line);border-radius:var(--radius-chip);color:var(--accent-text);font-size:13px}
+.heading-collect .job-result-slot details[open]>summary{margin-bottom:8px}
+.heading-collect .job-result-slot summary::before{border-color:currentColor}
 .section-heading h2,.repo-section h2{margin:0 0 4px}
 .section-heading p,.repo-section>p{margin:0 0 16px;color:var(--muted);font-size:14px}
 
@@ -210,8 +220,19 @@ label:has(>input[type=checkbox]){flex-direction:row;align-items:center;gap:10px;
 .detail-insight h3{margin:20px 0 8px;font-size:15px;color:var(--text-sub)}
 .detail-intent{font-size:18px;font-weight:600;line-height:1.55;color:var(--text);letter-spacing:-.02em}
 .detail-status .meta{color:var(--muted)}
-.detail-action{margin-top:12px;background:var(--accent-weak);box-shadow:none}
+.detail-action{display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px;margin-top:12px;padding:12px 16px;border:1px solid var(--line);border-radius:var(--radius-ctl);background:var(--surface);box-shadow:none}
 .detail-action strong{font-weight:600;color:var(--text)}
+.analysis-controls{display:flex;align-items:center;flex-wrap:wrap;gap:8px 12px}
+.analysis-controls .action-form{width:auto;margin:0}
+.analysis-note{margin:0;color:var(--muted);font-size:13px}
+.analysis-job-status{flex:1 1 240px;min-width:0}
+.detail-action .job{display:flex;flex-wrap:wrap;align-items:center;gap:4px 12px;margin:0}
+.detail-action .job [data-job-field=summary]{height:auto;overflow:visible;margin:0}
+.detail-action .job-progress{min-height:0;margin:0}
+.detail-action .job-progress progress{width:100px}
+.detail-action .job-result-slot{align-items:center;min-height:0;margin:0}
+.analysis-result{max-height:4.5em;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;margin:0;font-size:13px;color:var(--text-sub)}
+.analysis-result[hidden]{display:none}
 .detail-changes{margin-top:36px}
 .detail-changes>.section-heading h2{margin-bottom:4px}
 .detail-changes>.section-heading p{margin-top:0}
@@ -224,6 +245,9 @@ details[open]>summary{margin-bottom:12px}
 details>p{color:var(--text-sub);font-size:14px}
 pre{white-space:pre-wrap;overflow-wrap:anywhere;font:13px/1.7 "SF Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;border:0;background:var(--surface-sub);color:var(--text);padding:16px;border-radius:var(--radius-ctl);max-width:100%}
 pre:empty{display:none}
+.detail-changes summary .badge{flex:none}
+.diff{padding:12px 0;overflow-x:auto}
+.diff>span{display:block;min-height:1.7em;padding:0 16px}
 .diff .diff-add{background:#e5f8ee;color:#0b5e3a}
 .diff .diff-delete{background:#ffecee;color:#a5202c}
 .diff .diff-hunk{background:var(--blue-50);color:var(--blue-700)}
@@ -323,7 +347,7 @@ pre:empty{display:none}
 .empty strong{color:var(--text);font-size:17px}
 .empty .btn{margin:8px 4px 0}
 .notice{margin:0 0 20px;padding:14px 18px;border-radius:var(--radius-box);background:var(--accent-weak);color:var(--text-sub)}
-.collect-note{margin:0;font-size:13px;text-align:right}
+.collect-note{margin:0;font-size:12px;text-align:left}
 .confirm-action{margin:0;padding:0;background:transparent;box-shadow:none;border-radius:0}
 .confirm-action>summary{list-style:none}
 .confirm-action>summary::before{display:none}
@@ -355,7 +379,22 @@ code{font:13px "SF Mono",ui-monospace,Menlo,monospace;padding:1px 6px;border-rad
 @supports selector(:has(*)){.action-form:not(:has(input[name=scope][value=selected]:checked)) .scope-repos{display:none}}
 
 /* 메인: 검토 현황 수치와 PR별 먼저 볼 파일 */
-.home-results .issue-row{align-items:flex-start}
+.home-summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:0 0 28px}
+.home-summary>div{display:flex;flex-direction:column;gap:6px;padding:16px 18px;border:1px solid var(--line);border-radius:var(--radius-ctl);background:var(--surface)}
+.home-summary span,.home-list-heading p{color:var(--muted);font-size:13px}
+.home-summary strong{font-size:24px;line-height:1.2}
+.home-list-heading{margin:0 0 16px}
+.home-list-heading h2{margin:0 0 4px;font-size:19px}
+.home-list-heading p{margin:0}
+.home-pr-badges{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0}
+.issue-intent strong{margin-right:6px;font-size:13px;color:var(--text-sub)}
+@media(max-width:640px){.home-summary{gap:8px}.home-summary>div{padding:12px 10px}.home-summary strong{font-size:20px}}
+.home-results>.list{gap:14px}
+.home-results .issue-row{align-items:flex-start;padding:20px;border:1px solid var(--line);background:var(--surface);box-shadow:var(--shadow)}
+.home-results .issue-row:hover,.home-results .issue-row:focus-within{border-color:color-mix(in srgb,var(--accent) 40%,var(--line));background:var(--surface)}
+.home-results .issue-row h2{margin-bottom:6px}
+.home-results .issue-row .issue-intent{margin:12px 0;color:var(--text-sub)}
+@media(max-width:640px){.home-results>.list{gap:12px}.home-results .issue-row{padding:16px}}
 .badge.review{background:var(--accent-weak);color:var(--accent-text)}
 .pr-state{display:flex;gap:10px;margin:6px 0;font-size:13px;color:var(--warn)}
 .file-note{display:flex;gap:10px}
@@ -390,3 +429,88 @@ code{font:13px "SF Mono",ui-monospace,Menlo,monospace;padding:1px 6px;border-rad
 .filters.pr-filters .pr-search{flex:1 1 auto}
 @media(max-width:640px){.filters.pr-filters{flex-wrap:wrap}.pr-tabs{width:100%}.pr-tabs a{flex:1;justify-content:center;padding:0 8px}}
 .filters.pr-filters input[type=search]{appearance:none;-webkit-appearance:none;background-color:var(--fill)}
+
+/* PR 상세: 목적, 검토할 파일, 코드 순서로 읽는다. */
+.detail-overview{display:block}
+.detail-description,.detail-diagnostics{margin:12px 0 0;padding:12px 0;background:transparent;border-radius:0}
+.detail-description p{white-space:pre-wrap;color:var(--text-sub)}
+.detail-warning,.detail-caution{padding:16px 20px;margin:16px 0;border:1px solid var(--warn);border-radius:var(--radius-card);background:var(--warn-weak);color:var(--text)}
+.detail-warning p,.detail-caution p{font-size:14px;color:var(--text-sub)}
+.detail-focus{margin-top:28px}
+.focus-list{display:grid;gap:8px}
+.focus-file{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:start;gap:12px;padding:14px 16px;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius-ctl);color:var(--text)}
+.focus-file:hover{border-color:var(--accent);text-decoration:none}
+.focus-file strong,.focus-file strong+span{display:block;overflow-wrap:anywhere}
+.focus-file strong+span{margin-top:2px;color:var(--text-sub);font-size:13px;font-weight:400}
+.caution-files{display:flex;flex-wrap:wrap;gap:4px 12px;font-size:14px}
+.detail-diagnostics{padding:12px 16px;margin:16px 0;background:var(--surface-sub);border:1px solid var(--line);border-radius:var(--radius-ctl)}
+.detail-diagnostics .meta{margin:6px 0}
+.detail-file-layout{display:grid;grid-template-columns:minmax(160px,220px) minmax(0,1fr);gap:16px;align-items:start}
+.detail-file-nav{position:sticky;top:76px;display:flex;flex-direction:column;gap:6px;max-height:calc(100vh - 100px);overflow:auto;padding:14px;background:var(--surface);border-radius:var(--radius-ctl);font-size:13px}
+.detail-file-nav a{overflow-wrap:anywhere;font-weight:400}
+.detail-file-list{min-width:0}
+.detail-file{margin:0 0 12px;padding:18px;min-width:0}
+.detail-file>summary{display:flex;align-items:center;flex-wrap:wrap;gap:8px}
+.detail-file>summary::before{flex:none;margin:0 3px 2px 2px}
+.detail-file .file-title{flex:1 1 240px;min-width:0;overflow-wrap:anywhere;color:var(--text)}
+.file-count{font-size:12px;color:var(--muted);font-weight:400}
+.file-focus-reason,.change-reason{font-size:14px;color:var(--text-sub)}
+.file-change{margin-top:16px;min-width:0}
+.file-change+.file-change{padding-top:12px;border-top:1px solid var(--line)}
+.diff.numbered{white-space:pre;overflow:auto;overflow-wrap:normal;padding:12px 0}
+.diff.numbered>.diff-line{display:grid;grid-template-columns:48px 48px minmax(max-content,1fr);min-width:max-content;width:100%;padding:0}
+.diff-number{padding:0 8px;text-align:right;color:var(--muted);user-select:none}
+.diff-code{padding:0 16px;white-space:pre}
+@media(max-width:700px){.detail-file-layout{grid-template-columns:1fr}.detail-file-nav{position:static;max-height:200px}.detail-file{padding:14px}.diff.numbered>.diff-line{grid-template-columns:36px 36px minmax(max-content,1fr)}}
+
+.change-details{margin:8px 0 0;padding:8px 0;background:transparent;border-radius:0;font-size:13px}
+.change-details p{font-size:13px;color:var(--muted)}
+
+/* 파일을 바꿔도 목록이 유지되는 검토 영역 */
+.detail-file-layout{scroll-margin-top:76px}
+.file-nav-links{display:flex;flex-direction:column;gap:4px}
+.file-nav-links a{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px;border-radius:8px;color:var(--text-sub)}
+.file-nav-links a>span:first-child{min-width:0;overflow-wrap:anywhere}
+.file-nav-links a[aria-current]{background:var(--accent-weak);color:var(--accent-text);font-weight:600}
+.file-nav-links a:hover{text-decoration:none;background:var(--fill)}
+.file-nav-links .badge{flex:none;font-size:11px}
+.detail-file-heading{display:flex;align-items:center;flex-wrap:wrap;gap:8px}
+.detail-file-heading .file-title{flex:1 1 240px;margin:0;font-size:15px}
+.mobile-file-select{display:none}
+.mobile-file-select select{width:100%;max-width:100%;min-width:0}
+.focus-file[aria-current]{border-color:var(--accent);background:var(--accent-weak)}
+@media(max-width:700px){
+  .file-workspace-ready .mobile-file-select{display:block}
+  .file-workspace-ready .file-nav-links{display:none}
+}
+
+.detail-file{background:var(--surface);border-radius:var(--radius-card)}
+.detail-file-nav{overflow:hidden}
+.file-nav-links{overflow-y:auto;min-height:0}
+.detail-file-nav>.toolbar{flex:none}
+
+#file-changes{scroll-margin-top:100px}
+
+/* 추천 파일은 제자리에서 열고, 코드 검토 공간은 넓게 쓴다. */
+body.pr-detail-page main{max-width:1600px}
+body.pr-detail-page .app-header{padding-left:max(24px,calc((100% - 1600px)/2));padding-right:max(24px,calc((100% - 1600px)/2))}
+.focus-entry{margin:0;padding:0;border:1px solid var(--line);border-radius:var(--radius-ctl);overflow:hidden}
+.focus-entry>.focus-file{border:0;border-radius:0;cursor:pointer}
+.focus-entry>.focus-file::before{display:none}
+.focus-entry[open]>.focus-file{margin-bottom:0;background:var(--accent-weak)}
+.focus-toggle{font-size:20px;line-height:1;color:var(--muted);transition:transform .15s}
+.focus-entry[open] .focus-toggle{transform:rotate(180deg)}
+.focus-text{display:block;min-width:0}
+.focus-text>.file-label{font-weight:600}
+.focus-reason{display:block;margin-top:2px;color:var(--text-sub);font-size:13px;font-weight:400}
+.focus-inline{padding:0 16px 16px;background:var(--surface)}
+.focus-inline>.detail-file{margin:0;padding:16px 0 0;border-top:1px solid var(--line);border-radius:0}
+.file-label{display:flex;align-items:baseline;gap:6px;min-width:0;max-width:100%}
+.file-basename{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.file-directory{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;color:var(--muted);font-size:12px;font-weight:400}
+.file-nav-links a>.file-label{flex:1 1 auto;overflow:hidden}
+.file-nav-links .file-label{display:block}
+.file-nav-links .file-basename,.file-nav-links .file-directory{display:block}
+.file-nav-links .file-directory{margin-top:1px}
+.detail-file-heading .file-title{overflow:hidden}
+@media(max-width:700px){body.pr-detail-page .app-header{padding-left:16px;padding-right:16px}.focus-inline{padding:0 12px 12px}}

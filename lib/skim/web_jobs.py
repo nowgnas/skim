@@ -14,6 +14,7 @@ RECOVERY = [
     ('codex-home', '분석 준비 초기화를 실행하세요. 터미널에서는 skim codex-home init을 사용합니다. 기존 파일이나 소유권 문제는 경로를 확인하세요.'),
     ('version, flags', 'Codex 안정 버전 0.165.0 이상을 설치하고 PATH를 확인하세요.'),
     ('probe, 모델', '모델 변경 후나 probe 만료 시 격리 검증을 실행하세요. 터미널에서는 skim doctor --probe를 사용합니다. 실제 모델 호출은 명시적 요청 때만 실행합니다.'),
+    ('중단된 모델 실행', '이전 모델 실행 종료 여부를 확인할 수 없으면 분석을 차단합니다. Codex와 하위 프로세스가 모두 종료됐는지 직접 확인한 뒤 data 디렉터리의 analysis-inflight 표식을 제거하세요. 기본 경로는 ~/.local/share/skim, SKIM_HOME 사용 시 $SKIM_HOME/data입니다.'),
     ('로컬 권한', 'SKIM_HOME 아래 디렉터리 0700, 파일 0600, 본인 소유, 심볼릭 링크 없음을 확인하세요.'),
 ]
 
@@ -45,18 +46,60 @@ def summary(row):
     return ', '.join(summary_parts(row))
 
 
+def collection_summary_parts(d):
+    if d['status'] == 'pending':
+        status = '수집 실패, 재시도 대기' if d['stage'] == '재시도 대기' else '수집 시작 대기'
+    else:
+        status = {'running': 'PR 정보 수집 중', 'completed': 'PR 정보 수집 완료',
+                  'failed': 'PR 정보 수집 실패', 'deferred': 'PR 정보 수집 보류',
+                  'blocked': 'PR 정보 수집 차단', 'cancelled': 'PR 정보 수집 취소'}.get(d['status'], 'PR 수집 상태 확인 필요')
+    parts = [status]
+    if d['status'] == 'running' and d['stage'] and d['stage'] not in ('수집 중', status):
+        parts.append('진행 단계: ' + d['stage'])
+    if d['total'] is not None and d['processed'] is not None:
+        parts.append(f'처리한 항목: {d["processed"]}/{d["total"]}')
+    if d['retry_at']:
+        parts.append('다시 시도할 시각: ' + d['retry_at'])
+    if d['finished_at'] and not d['active']:
+        parts.append('수집 종료 시각: ' + d['finished_at'])
+    if d['followup']:
+        parts.append('현재 작업 후 한 번 더 수집 예정')
+    return parts
+
+
+def analysis_summary_parts(d):
+    status = {'pending': '분석 대기 중', 'running': '분석 진행 중', 'completed': '분석 완료',
+              'failed': '분석 실패', 'deferred': '분석 보류', 'blocked': '분석 차단',
+              'cancelled': '분석 취소'}.get(d['status'], '분석 상태 확인 필요')
+    parts = [status]
+    if d['status'] == 'running' and d['stage'] and d['stage'] not in ('시작', '실행 중'):
+        parts.append(d['stage'])
+    if d['processed'] is not None and d['total'] is not None:
+        parts.append(f'{d["processed"]}/{d["total"]}')
+    return parts
+
+
 def describe(row):
-    return dict(jobs.describe(row), summary=summary(row), summary_parts=summary_parts(row))
+    d = jobs.describe(row)
+    result = dict(d, summary=summary(row), summary_parts=summary_parts(row))
+    if d['kind'] == 'collect':
+        result['collection_summary_parts'] = collection_summary_parts(d)
+    elif d['kind'] == 'analyze':
+        result['analysis_summary_parts'] = analysis_summary_parts(d)
+    return result
 
 
-def job_box(row, poll=True):
+def job_box(row, poll=True, compact=False, analysis_compact=False):
     from .web import esc
     if row is None:
-        return '<p class="muted">최근 작업 없음</p>'
+        if analysis_compact:
+            return ''
+        return '<p class="muted">아직 PR 수집 작업이 없습니다.</p>' if compact else '<p class="muted">최근 작업 없음</p>'
     d = jobs.describe(row)
-    body = (f'<div class="job" data-job-id="{d["id"]}" data-job-active="{int(poll and d["active"])}">'
+    parts = collection_summary_parts(d) if compact else analysis_summary_parts(d) if analysis_compact else summary_parts(row)
+    body = (f'<div class="job" data-job-id="{d["id"]}" data-job-active="{int(poll and d["active"])}"' + (' data-job-compact="1"' if compact else ' data-job-analysis="1"' if analysis_compact else '') + '>'
             '<p class="meta" aria-live="polite" data-job-field="summary">'
-            + ''.join(f'<span>{esc(part)}</span>' for part in summary_parts(row)) + '</p>')
+            + ''.join(f'<span>{esc(part)}</span>' for part in parts) + '</p>')
     if d['active']:
         running = d['status'] == 'running'
         known = running and d['total'] is not None and d['total'] > 0 and d['processed'] is not None and 0 <= d['processed'] <= d['total']
@@ -65,9 +108,16 @@ def job_box(row, poll=True):
                  + '<progress aria-label="작업 진행"' + (f' max="{d["total"]}" value="{d["processed"]}"' if known else '')
                  + ('' if running else ' hidden') + '></progress></div>')
     result = '\n'.join(str(value) for value in (d['error'], d['result']) if value)
-    body += ('<div class="job-result-slot"><details data-job-result' + ('' if result else ' hidden')
-             + '><summary>결과 상세</summary><pre data-job-result-text>' + esc(result) + '</pre></details>'
-             + '<a class="btn secondary sm" data-job-refresh href="" hidden>화면 새로고침</a></div>')
+    if analysis_compact:
+        if result == parts[0]:
+            result = ''
+        body += ('<div class="job-result-slot"><p class="analysis-result" data-job-result aria-live="polite"' + ('' if result else ' hidden')
+                 + '><span data-job-result-text>' + esc(result) + '</span></p>'
+                 + '<a class="btn secondary sm" data-job-refresh href="" hidden>결과 새로고침</a></div>')
+    else:
+        body += ('<div class="job-result-slot"><details data-job-result' + ('' if result else ' hidden')
+                 + '><summary>' + ('수집 결과와 오류 보기' if compact else '결과 상세') + '</summary><pre data-job-result-text>' + esc(result) + '</pre></details>'
+                 + '<a class="btn secondary sm" data-job-refresh href="" hidden>화면 새로고침</a></div>')
     return body + '</div>'
 
 
@@ -80,7 +130,7 @@ def collect_panel(conn, csrf, offline, compact=False):
     if compact:
         action = '<p class="muted">오프라인 모드</p>' if offline else form('/jobs/collect', csrf, '<button>지금 수집</button>', variant='primary')
         note = '' if offline else '<p class="muted collect-note">분석이 허용된 저장소는 수집 후 자동 분석될 수 있습니다.</p>'
-        return '<div class="heading-collect">' + action + note + job_box(jobs.latest(conn, 'collect')) + '</div>'
+        return '<section class="heading-collect" aria-label="PR 수집 현황"><div class="collect-heading"><h2>PR 수집 현황</h2>' + action + '</div><p class="collect-description">GitHub에서 연결한 저장소와 내게 요청된 리뷰의 PR 정보를 가져옵니다.</p>' + job_box(jobs.latest(conn, 'collect'), compact=True) + note + '</section>'
     body = '<article class="collect-panel"><h2>수집과 새로고침</h2>'
     if offline:
         body += '<p>오프라인 모드에서는 GitHub 수집을 실행하지 않습니다.</p>'
@@ -93,38 +143,31 @@ def collect_panel(conn, csrf, offline, compact=False):
 
 def analysis_panel(conn, pr, csrf, offline):
     from .web import esc
-    from .web_settings import form, WARNING
-    body = '<article class="detail-action"><h2>PR 분석 요청</h2>'
+    from .web_settings import form
+    body = '<article class="detail-action"><h2 class="sr-only">PR 분석 요청</h2><div class="analysis-controls">'
     snapshot = pr['snapshot']
     if offline:
-        body += '<p>오프라인 모드에서는 모델 분석을 실행하지 않습니다.</p>'
+        body += '<p class="analysis-note">오프라인 모드에서는 분석할 수 없습니다.</p>'
     elif not analysis_allowed(conn, pr['repo_id']):
         # 대상 저장소만 검색된 상태로 열고, 저장 후 이 PR로 돌아올 수 있게 번호를 넘긴다.
         target = urlencode([('scope_host', pr.get('host', 'github.com')), ('select_q', pr['owner'] + '/' + pr['name']),
                             ('from_pr', str(int(pr['id'])))])
-        body += ('<p>이 저장소는 LLM 분석이 허용되지 않았습니다. 호스트의 분석 허용 범위에서 이 저장소를 허용한 뒤 돌아와 분석을 요청하세요. '
-                 '분석 버튼은 동의를 켜지 않습니다.</p>'
-                 f'<p><a class="btn primary" href="/repos?{esc(target)}#analysis-scope">분석 허용 범위 열기</a></p>')
+        body += (f'<a class="btn primary" href="/repos?{esc(target)}#analysis-scope">분석 허용 범위 열기</a>'
+                 '<p class="analysis-note">이 저장소는 분석이 허용되지 않았습니다.</p>')
     elif not snapshot or snapshot['head_sha'] != pr['head_sha'] or snapshot['base_sha'] != pr['base_sha']:
-        body += '<p>최신 SHA의 스냅샷이 없습니다. <a href="/status">먼저 수집</a>한 뒤 분석을 요청하세요.</p>'
+        body += '<p class="analysis-note">최신 변경을 먼저 <a href="/status">수집</a>해 주세요.</p>'
     else:
-        body += '<p><strong>' + WARNING + '</strong></p>'
-        body += '<p class="muted">하루 20회 모델 호출 예산과 격리 검사는 수동 요청에도 적용됩니다.' + (' draft PR도 같은 동의, 예산을 따릅니다.' if pr['draft'] else '') + '</p>'
         current_analysis = pr['analysis'] if pr['analysis'] and pr['analysis']['snapshot_id'] == snapshot['id'] else None
-        if current_analysis and not current_analysis['intent']:
-            body += '<p>의도가 분석되지 않았습니다. 수집 결과와 제외 사유를 확인한 뒤 다시 분석할 수 있습니다.</p>'
-        elif not current_analysis:
-            body += '<p>현재 스냅샷의 분석 결과가 없습니다.</p>'
         body += form('/jobs/analyze', csrf,
                      f'<input type="hidden" name="host" value="{esc(pr.get("host", "github.com"))}"><input type="hidden" name="repository" value="{esc(pr["owner"] + "/" + pr["name"])}">'
-                     f'<input type="hidden" name="number" value="{int(pr["number"])}"><button>{"다시 분석" if current_analysis and not current_analysis["intent"] else "이 PR 분석"}</button>', variant='primary')
+                     f'<input type="hidden" name="number" value="{int(pr["number"])}"><button>{"다시 분석" if current_analysis else "이 PR 분석"}</button>', variant='primary')
+    body += '</div><div class="analysis-job-status">'
     running = jobs.active(conn, 'analyze')
     if running is not None and running['target_id'] != pr['id']:
-        body += ('<p>다른 분석 작업(' + esc(running['target'] or '자동 분석') + ')이 '
-                 + esc(jobs.STATUS[running['status']]) + ' 상태입니다. 이 PR은 완료 후 다시 요청하세요.</p>')
-        body += job_box(running)
-    body += job_box(jobs.latest(conn, 'analyze', pr['id']))
-    return body + '</article>'
+        body += '<p class="analysis-note">다른 PR 분석: ' + esc(running['target'] or '자동 분석') + '</p>'
+        body += job_box(running, analysis_compact=True)
+    body += job_box(jobs.latest(conn, 'analyze', pr['id']), analysis_compact=True)
+    return body + '</div></article>'
 
 
 def status_page(conn, csrf, offline):

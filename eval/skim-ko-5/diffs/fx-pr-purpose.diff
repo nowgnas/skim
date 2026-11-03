@@ -1,0 +1,25 @@
+diff --git a/app/checkout.py b/app/checkout.py
+--- a/app/checkout.py
++++ b/app/checkout.py
+@@ -1,5 +1,7 @@
+ def submit_order(order, payments):
+-    payments.charge(order.total)
++    if payments.has_charge(order.id):
++        return payments.get_charge(order.id)
++    payments.charge(order.total, idempotency_key=order.id)
+     return order
+diff --git a/infra/deployment.yaml b/infra/deployment.yaml
+--- a/infra/deployment.yaml
++++ b/infra/deployment.yaml
+@@ -1,5 +1,5 @@
+ strategy:
+   rollingUpdate:
+-    maxUnavailable: 0
++    maxUnavailable: 100%
+   type: RollingUpdate
+diff --git a/docs/checkout.md b/docs/checkout.md
+--- a/docs/checkout.md
++++ b/docs/checkout.md
+@@ -1 +1 @@
+-Submit orders using the checkout API.
++Submit an order using the checkout API.

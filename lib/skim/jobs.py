@@ -172,7 +172,7 @@ class Runner:
             if status == 'blocked':
                 error = '분석 격리 항목이 있습니다. 상태 점검 화면의 복구 안내를 확인하세요.'
             elif status == 'deferred':
-                error = '분석 보류 항목이 있습니다. 예산은 수동 요청으로 우회하지 않습니다.'
+                error = '자동 분석 예산이 소진되었거나 분석이 보류되었습니다. 직접 분석을 요청할 수 있습니다.'
             elif status == 'failed':
                 error = '분석 실패 항목이 있습니다. PR별 결과와 상태 점검을 확인하세요.'
             summary = ', '.join(f'{STATUS.get(key, "부분 완료" if key == "partial" else key)} {value}'
@@ -189,15 +189,15 @@ class Runner:
             return 'failed', None, '요청 이후 새 스냅샷이 수집되었습니다. 최신 화면에서 다시 요청하세요.'
         if not analysis_allowed(self.conn, row['repo_id']):
             return 'failed', None, '분석 허용이 꺼져 있어 모델을 호출하지 않았습니다. 분석 허용 화면을 확인하세요.'
-        results = analyzer.run(snapshot_id, include_drafts=True)
+        results = analyzer.run(snapshot_id, include_drafts=True, budgeted=False)
         if not results:
             return 'failed', None, '분석 대상이 없습니다. 허용 정책과 PR 상태를 확인하세요.'
         result = results[0]
         status = result['status']
         if status in ('completed', 'partial'):
-            return 'completed', '분석 ' + ('완료' if status == 'completed' else '부분 완료 (제외·누락·정제 항목 있음)'), None
+            return 'completed', '분석 ' + ('완료' if status == 'completed' else '부분 완료 (분석 범위 또는 요약 일부 확인 필요)'), None
         if status == 'deferred':
-            return 'deferred', None, (result.get('error') or '분석 보류') + ' 예산은 수동 요청으로 우회하지 않습니다.'
+            return 'deferred', None, result.get('error') or '분석 보류'
         if status == 'blocked':
             return 'blocked', None, '분석 격리: ' + (result.get('error') or '격리 검증 실패') + ' 상태 점검 화면의 복구 안내를 확인하세요.'
         return 'failed', None, result.get('error') or '분석 실패'
@@ -224,8 +224,7 @@ class Runner:
         lines = []
         if action == 'probe':
             progress(self.state, job['id'], '격리 검증 중')
-            with self.collector.lock('analysis.lock'):
-                code = (self.doctor or doctor.run)(self.config, probe=True, out=lines.append)
+            code = (self.doctor or doctor.run)(self.config, probe=True, out=lines.append)
         else:
             code = (self.doctor or doctor.run)(self.config, probe=False, out=lines.append)
         summary = '점검 실패 항목이 있습니다. 아래 안내를 따르세요.' if code else '모든 점검 항목 정상'

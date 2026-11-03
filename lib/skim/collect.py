@@ -135,6 +135,7 @@ class Collector:
         self.progress = None
         self._mutex = threading.RLock()
         self._lock_depth = {}
+        self._lock_handles = {}
 
     @contextmanager
     def lock(self, name="collection.lock"):
@@ -143,7 +144,7 @@ class Collector:
             if self._lock_depth.get(name):
                 self._lock_depth[name] += 1
                 try:
-                    yield
+                    yield self._lock_handles[name].fileno()
                 finally:
                     self._lock_depth[name] -= 1
                 return
@@ -152,11 +153,12 @@ class Collector:
             with path.open('r+') as handle:
                 fcntl.flock(handle, fcntl.LOCK_EX)
                 self._lock_depth[name] = 1
+                self._lock_handles[name] = handle
                 try:
-                    yield
+                    yield handle.fileno()
                 finally:
                     del self._lock_depth[name]
-                    fcntl.flock(handle, fcntl.LOCK_UN)
+                    del self._lock_handles[name]
 
     def collect(self):
         with self.lock():

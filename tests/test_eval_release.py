@@ -9,12 +9,59 @@ import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
+LEGACY_PROMPT_HASH = json.loads((ROOT / 'eval/skim-ko-3/results.json').read_text())['prompt_sha256']
 sys.path.insert(0, str(ROOT / 'scripts'))
 from eval_release import run_case, assess, rescore, main
 from skim.config import Config
 
 
 class EvalEvidenceTests(unittest.TestCase):
+    def test_overview_paired_metrics(self):
+        from skim.analyze.units import parse_diff
+        from skim.analyze.protocol import chunk_units
+        corpus = ROOT / 'eval/skim-ko-5'
+        manifest = json.loads((corpus / 'manifest.json').read_text())
+        case = next(c for c in manifest['cases'] if c['id'] == 'fx-multichunk')
+        diff = (corpus / case['diff']).read_text()
+        units, _ = parse_diff(diff)
+        self.assertGreater(len(chunk_units(units, dict(title=case['title'], body=case['body'], tests=[]))), 1)
+        result = dict(status='completed', intent='주문 계산 변경', units=units,
+                      items=[dict(change_id=units[0]['change_id'], importance='high', reason='핵심', risk_flags=[])],
+                      files=[dict(file_path=units[0]['file_path'], importance='high', candidates=[]),
+                             dict(file_path='infra/deployment.yaml', importance='low', candidates=['config'])])
+        evidence = assess(case, result, [], diff)['metrics']
+        self.assertEqual(evidence['model_high_files'], [units[0]['file_path']])
+        self.assertEqual(evidence['rule_candidate_files'], ['infra/deployment.yaml'])
+        self.assertEqual(evidence['top3'], [units[0]['file_path']])
+        self.assertEqual(evidence['top3_precision'], 1.0)
+        self.assertAlmostEqual(evidence['top3_recall'], 1 / 3)
+        self.assertEqual(evidence['intent'], '주문 계산 변경')
+        self.assertEqual(evidence['intent_review'], 'human_review_required')
+        single = next(c for c in manifest['cases'] if c['id'] == 'fx-pr-purpose')
+        single_diff = (corpus / single['diff']).read_text()
+        single_units, _ = parse_diff(single_diff)
+        self.assertEqual(len(chunk_units(single_units, dict(title=single['title'], body=single['body'], tests=[]))), 1)
+        comparison = dict(units=single_units, items=[], files=[], intent='별도 목적')
+        baseline = assess(single, comparison, [], single_diff)['metrics']
+        self.assertEqual(baseline['top3'], ['app/checkout.py', 'docs/checkout.md'])
+        self.assertEqual(baseline['top3_precision'], 0.5)
+        self.assertEqual(baseline['top3_recall'], 0.5)
+        self.assertEqual(baseline['intent'], '별도 목적')
+        low = dict(units=[dict(change_id='h1', file_path='docs/readme.md', candidates=[])],
+                   items=[dict(change_id='h1', importance='low', reason='문서', risk_flags=[])],
+                   files=[dict(file_path='docs/readme.md', importance='low', candidates=[])])
+        self.assertEqual(assess(dict(high_files=[]), low, [], '')['metrics']['top3'], [])
+
+    def test_pr_purpose_case_contains_core_logic_and_infrastructure(self):
+        from skim.analyze.units import parse_diff
+        corpus = ROOT / 'eval/skim-ko-4'
+        manifest = json.loads((corpus / 'manifest.json').read_text())
+        case = next(c for c in manifest['cases'] if c['id'] == 'fx-pr-purpose')
+        units, _ = parse_diff((corpus / case['diff']).read_text())
+        self.assertEqual(set(case['high_files']), {'app/checkout.py', 'infra/deployment.yaml'})
+        self.assertTrue(set(case['high_files']).issubset({unit['file_path'] for unit in units}))
+        self.assertTrue(case['title'] and case['body'])
+
     def test_real_analyzer_path_and_recording_with_offline_cli_boundary(self):
         with tempfile.TemporaryDirectory() as home, patch.dict(os.environ, SKIM_HOME=home):
             config = Config.load()
@@ -26,7 +73,7 @@ class EvalEvidenceTests(unittest.TestCase):
                 requests.append(request)
                 payload = json.loads(request.split('\n', 1)[1])
                 if payload['stage'] == 'synthesis':
-                    return '{"intent":"설정 변경"}'
+                    return '{"intent":"설정 변경","focus":[]}'
                 return json.dumps(dict(items=[dict(change_id=u['change_id'], importance='high',
                     reason='설정 변경', risk_flags=['secrets']) for u in payload['data']['units']], uncertainties=[]))
 
@@ -65,7 +112,7 @@ class EvalEvidenceTests(unittest.TestCase):
         for status in ('unanalysed', 'excluded', 'omitted', 'analyzed'):
             for u in units:
                 u['status'] = status
-            result['items'] = [dict(change_id=u['change_id']) for u in units] if status == 'analyzed' else []
+            result['items'] = [dict(change_id=u['change_id'], importance='mid', reason='확인', risk_flags=[]) for u in units] if status == 'analyzed' else []
             self.assertTrue(met())
         result['units'] = units[:-1]
         self.assertFalse(met())
@@ -76,6 +123,9 @@ class EvalEvidenceTests(unittest.TestCase):
         result['units'] = []
         self.assertFalse(met())
 
+    @patch('eval_release.SCHEMA_VERSION', '1')
+    @patch('eval_release.PROMPT_VERSION', 'skim-ko-3')
+    @patch('eval_release.prompt_hash', lambda: LEGACY_PROMPT_HASH)
     def test_rescore_offline_preserves_evidence_and_uses_current_manifest(self):
         corpus = ROOT / 'eval/skim-ko-3'
         original = json.loads((corpus / 'results.json').read_text())
@@ -110,6 +160,9 @@ class EvalEvidenceTests(unittest.TestCase):
         self.assertEqual(updated['summary']['hidden_count'], 0)
         self.assertNotIn('stale', updated['cases'][-1]['expectations'])
 
+    @patch('eval_release.SCHEMA_VERSION', '1')
+    @patch('eval_release.PROMPT_VERSION', 'skim-ko-3')
+    @patch('eval_release.prompt_hash', lambda: LEGACY_PROMPT_HASH)
     def test_rescore_refuses_mismatched_hash_without_mutation(self):
         corpus = ROOT / 'eval/skim-ko-3'
         report = json.loads((corpus / 'results.json').read_text())
@@ -129,6 +182,9 @@ class EvalEvidenceTests(unittest.TestCase):
             self.assertEqual(raised.exception.code, 2)
             self.assertEqual(out.read_bytes(), contents)
 
+    @patch('eval_release.SCHEMA_VERSION', '1')
+    @patch('eval_release.PROMPT_VERSION', 'skim-ko-3')
+    @patch('eval_release.prompt_hash', lambda: LEGACY_PROMPT_HASH)
     def test_rescore_requires_saved_requests(self):
         corpus = ROOT / 'eval/skim-ko-3'
         report = json.loads((corpus / 'results.json').read_text())
@@ -146,6 +202,9 @@ class EvalEvidenceTests(unittest.TestCase):
                 self.assertEqual(main(), 0)
             self.assertEqual(json.loads(out.read_text())['reviewed_by'], 'Reviewer')
 
+    @patch('eval_release.SCHEMA_VERSION', '1')
+    @patch('eval_release.PROMPT_VERSION', 'skim-ko-3')
+    @patch('eval_release.prompt_hash', lambda: LEGACY_PROMPT_HASH)
     def test_rescore_uses_saved_secret_payload(self):
         corpus = ROOT / 'eval/skim-ko-3'
         report = json.loads((corpus / 'results.json').read_text())

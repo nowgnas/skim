@@ -46,10 +46,16 @@ def parser():
         p.add_argument('repository', type=repository)
     commands.add_parser('collect', help='gh 로그인으로 PR 읽기 전용 수집')
     commands.add_parser('open', help='실행 중인 웹 서버를 브라우저에서 열기')
-    commands.add_parser('app', help='macOS 앱과 로그인 시 자동 시작 설정').add_argument('--uninstall', action='store_true')
+    app = commands.add_parser('app', help='macOS 앱과 로그인 시 자동 시작 설정')
+    app_actions = app.add_mutually_exclusive_group()
+    app_actions.add_argument('--uninstall', action='store_true')
+    app_actions.add_argument('--restart', action='store_true', help='서버를 재시작하고 브라우저 열기 (진행 중인 작업이 중단됩니다)')
+    update = commands.add_parser('update', help='정식 릴리스 업데이트 확인')
+    update.add_argument('--check', action='store_true', help='사용 가능한 정식 릴리스만 확인')
     analyze = commands.add_parser('analyze', help='허용한 저장소의 최신 스냅샷 분석')
     analyze.add_argument('--snapshot', type=int)
     analyze.add_argument('--include-drafts', action='store_true', help='draft도 수동 분석')
+    analyze.add_argument('--automatic', action='store_true', help='주기 실행용: 자동 분석 일일 호출 제한 적용')
     web = commands.add_parser('web', help='로컬 PR 대시보드')
     web.add_argument('--port', type=int, default=0)
     web.add_argument('--no-browser', action='store_true')
@@ -66,13 +72,29 @@ def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     args = parser().parse_args(argv or ['web'])
     try:
+        if args.command == 'update':
+            from .collect import GitHub
+            from .releases import ReleaseUnavailable, fetch_latest_authenticated
+            try:
+                latest = fetch_latest_authenticated(GitHub())
+            except ReleaseUnavailable as exc:
+                print(f'오류: {exc}', file=sys.stderr)
+                return 1
+            if latest is None:
+                print('게시된 정식 릴리스가 없습니다.')
+                return 0
+            print(f'사용 가능한 정식 릴리스: {latest.tag}')
+            if not args.check:
+                print('자동 업데이트 적용 기능은 아직 준비 중입니다.', file=sys.stderr)
+                return 1
+            return 0
         if args.command == 'doctor':
             from .doctor import run, paths
             return run(paths(), probe=args.probe)
         config = Config.load()
         if args.command == 'app':
             from .macos_bundle import install_app, uninstall_app
-            return uninstall_app(config) if args.uninstall else install_app(config)
+            return uninstall_app(config) if args.uninstall else install_app(config, restart=True) if args.restart else install_app(config)
         if args.command == 'open':
             from .web import open_running
             return open_running(config)
@@ -90,7 +112,7 @@ def main(argv=None):
         try:
             if args.command == 'analyze':
                 from .analyze import Analyzer
-                results = Analyzer(conn, config).run(args.snapshot, args.include_drafts)
+                results = Analyzer(conn, config).run(args.snapshot, args.include_drafts, budgeted=args.automatic)
                 for result in results:
                     print(f"스냅샷 {result['snapshot_id']}: {result['status']}")
                     if result.get('error'):

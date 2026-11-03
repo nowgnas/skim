@@ -28,7 +28,7 @@ class DemoModel:
     def generate(self, request, schema):
         value = json.loads(request.split('\n', 1)[1])
         if value['stage'] == 'synthesis':
-            return json.dumps({'intent': '변경 목적과 검토 우선순위를 보여 주는 가짜 PR입니다.'})
+            return json.dumps({'intent': '변경 목적과 검토 우선순위를 보여 주는 가짜 PR입니다.', 'focus': []})
         items = []
         for unit in value['data']['units']:
             path = unit['file_path']

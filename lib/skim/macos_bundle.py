@@ -165,7 +165,7 @@ def main(argv=None, quiet=False):
     return 0
 
 
-def install_app(config):
+def install_app(config, *, restart=False):
     """Install or open the user's macOS app without replacing unrelated files."""
     if sys.platform != 'darwin':
         print('skim app은 macOS에서 사용할 수 있습니다.', file=sys.stderr)
@@ -212,7 +212,11 @@ def install_app(config):
             result = subprocess.run(['/bin/launchctl', 'bootstrap', f'gui/{os.getuid()}', str(agent)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             if result.returncode:
                 raise ValueError('자동 시작을 등록하지 못했습니다. macOS 로그인 세션과 LaunchAgent 설정을 확인하세요.')
-        started = subprocess.run(['/bin/launchctl', 'kickstart', '-p', label], capture_output=True, text=True)
+        command = ['/bin/launchctl', 'kickstart']
+        if restart and status == 0:
+            print('서버를 재시작합니다. 진행 중인 수집·분석 작업이 중단될 수 있습니다.', file=sys.stderr, flush=True)
+            command.append('-k')
+        started = subprocess.run([*command, '-p', label], capture_output=True, text=True)
         if started.returncode or not started.stdout.strip().isdigit():
             raise ValueError('자동 시작 서버를 시작하지 못했습니다. 상태를 확인한 뒤 다시 실행하세요.')
         server_pid = started.stdout.strip()

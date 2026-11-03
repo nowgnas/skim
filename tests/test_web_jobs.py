@@ -143,14 +143,14 @@ class JobTests(unittest.TestCase):
                          (1, 'demo/checkout#1', 'head1', 'pending'))
         self.assertEqual(json.loads(rows[0]['params']), {'snapshot_id': 1})
         body = self.request('/pr/2')[2]
-        self.assertIn('다른 분석 작업(demo/checkout#1)', body)
-        self.assertIn('완료 후 다시 요청', body)
+        self.assertIn('다른 PR 분석: demo/checkout#1', body)
         self.assertIn('data-job-active="1"', body)
         self.assertIn('src="/static/jobs.js"', body)
 
-    def test_detail_shows_warning_only_when_opted_in(self):
+    def test_detail_analysis_requires_opt_in(self):
         body = self.request('/pr/1')[2]
-        self.assertIn(WARNING, body)
+        self.assertNotIn(WARNING, body)
+        self.assertIn(WARNING, self.request('/repos')[2])
         self.assertIn('action="/jobs/analyze"', body)
         with closing(connect(self.config)) as conn, conn:
             conn.execute("UPDATE repositories SET analysis_policy='inherit' WHERE owner='demo'")
@@ -171,7 +171,7 @@ class JobTests(unittest.TestCase):
                 analyzer = self.fake_analyzer(results)
                 self.post('/jobs/analyze', repository='demo/checkout', number='1')
                 self.assertTrue(self.runner(analyzer).step())
-                analyzer.return_value.run.assert_called_once_with(1, include_drafts=True)
+                analyzer.return_value.run.assert_called_once_with(1, include_drafts=True, budgeted=False)
                 row = self.rows('analyze')[-1]
                 self.assertEqual(row['status'], status)
                 if error:
@@ -211,7 +211,7 @@ class JobTests(unittest.TestCase):
         with closing(connect(self.config)) as conn, conn:
             conn.execute('DELETE FROM analyses WHERE snapshot_id IN (SELECT id FROM snapshots WHERE pr_id=1)')
         body = self.request('/pr/1')[2]
-        self.assertIn('현재 스냅샷의 분석 결과가 없습니다', body)
+        self.assertIn('이 PR 분석</button>', body)
         self.assertNotIn('다시 분석</button>', body)
         with closing(connect(self.config)) as conn, conn:
             snapshot = conn.execute('SELECT * FROM snapshots WHERE pr_id=1 ORDER BY id DESC LIMIT 1').fetchone()
@@ -220,7 +220,7 @@ class JobTests(unittest.TestCase):
             conn.execute('INSERT INTO snapshots(pr_id,base_sha,head_sha,diff_hash,input_hash,diff_path,coverage) VALUES(?,?,?,?,?,?,?)',
                          (1, snapshot['base_sha'], snapshot['head_sha'], 'new', 'new', snapshot['diff_path'], snapshot['coverage']))
         body = self.request('/pr/1')[2]
-        self.assertIn('현재 스냅샷의 분석 결과가 없습니다', body)
+        self.assertIn('이 PR 분석</button>', body)
         self.assertNotIn('다시 분석</button>', body)
 
     def test_status_polls_recent_and_older_active_jobs(self):
@@ -310,7 +310,7 @@ class JobTests(unittest.TestCase):
 
     def test_analysis_progress_is_recorded(self):
         seen = []
-        def run(snapshot_id, include_drafts):
+        def run(snapshot_id, include_drafts, budgeted):
             analyzer.return_value.progress('모델 분석', 1, 3)
             seen.extend((r['stage'], r['processed'], r['total']) for r in self.rows('analyze'))
             return [{'status': 'completed'}]

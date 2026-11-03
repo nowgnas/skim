@@ -19,19 +19,19 @@ class ReleaseGateTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        self.corpus = self.root / 'eval/skim-ko-3'
+        self.corpus = self.root / 'eval/skim-ko-5'
         self.corpus.mkdir(parents=True)
-        self.manifest = json.loads((ROOT / 'eval/skim-ko-3/manifest.json').read_text())
+        self.manifest = json.loads((ROOT / 'eval/skim-ko-5/manifest.json').read_text())
         self.manifest['confirmed_by'] = 'test reviewer'
         self.manifest['confirmed_sha256'] = confirmation_hash(self.manifest)
         (self.corpus / 'manifest.json').write_text(json.dumps(self.manifest))
-        self.report = dict(prompt_version='skim-ko-3', prompt_sha256=prompt_hash(), schema_version=SCHEMA_VERSION,
+        self.report = dict(prompt_version='skim-ko-5', prompt_sha256=prompt_hash(), schema_version=SCHEMA_VERSION,
                            cli_version='0.165.0', model='synthetic-gate-test', run_timestamp='2026-10-31T12:00:00+09:00',
                            reviewed_by='test reviewer', cases=[], summary=dict(total_misses=0, hidden_count=0, failures=[]))
         for case in self.manifest['cases']:
             path = self.corpus / case['diff']
             path.parent.mkdir(exist_ok=True)
-            path.write_bytes((ROOT / 'eval/skim-ko-3' / case['diff']).read_bytes())
+            path.write_bytes((ROOT / 'eval/skim-ko-5' / case['diff']).read_bytes())
             self.report['cases'].append(dict(id=case['id'], diff_sha256=sha256(path.read_bytes()),
                 model=self.report['model'], cli_version=self.report['cli_version'],
                 displayed=dict(status='completed', files=[dict(file_path=p, importance='high', candidates=[]) for p in case['high_files']], items=[], units=[]),
@@ -108,7 +108,7 @@ class ReleaseGateTests(unittest.TestCase):
 
     def test_other_version(self):
         with self.assertRaises(ValueError):
-            check_release.check(self.root, 'skim-ko-4')
+            check_release.check(self.root, 'skim-ko-3')
 
     def test_missing_results(self):
         with self.assertRaises(OSError):

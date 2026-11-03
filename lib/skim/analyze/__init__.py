@@ -2,11 +2,13 @@
 import hashlib
 import json
 import subprocess
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from .codex import CodexAdapter, IsolationError
-from .protocol import (PROMPT_VERSION, SCHEMA_VERSION, CHUNK_SCHEMA, SYNTHESIS_SCHEMA,
-                       encode, prompt, chunk_units, validate_chunk, validate, strict_json)
+from .protocol import (PROMPT_VERSION, SCHEMA_VERSION, CHUNK_SCHEMA, SYNTHESIS_SCHEMA, OVERVIEW_SCHEMA,
+                       encode, prompt, chunk_units, validate_chunk, validate_overview, validate_synthesis, validate, strict_json)
+from .context import overview_input, synthesis_input
 from .units import parse_diff, sanitize
 from ..db import analysis_allowed
 from ..collect import Collector
@@ -45,16 +47,26 @@ class Analyzer:
             self.conn.rollback()
             raise
 
-    def _call(self, stage, data, schema, ids=None):
+    def _check_budget(self, calls):
+        row = self.conn.execute('SELECT calls FROM analysis_budget WHERE day=?', (self.today(),)).fetchone()
+        if 20 - (row[0] if row else 0) < calls:
+            raise BudgetExceeded('자동 분석의 남은 일일 호출 예산이 부족합니다. 다음 로컬 자정까지 보류합니다.')
+
+    def _call(self, stage, data, schema, ids=None, *, budgeted=True):
         request = prompt(stage, data)
         if len(request.encode()) > 200*1024:
             raise ValueError('메타데이터 또는 합성 입력이 200 KiB를 초과했습니다')
         for attempt in range(2):
-            self._reserve()
+            check_inflight = getattr(self.adapter, 'check_inflight', None)
+            if check_inflight:
+                check_inflight()
+            if budgeted:
+                self._reserve()
             try:
                 raw = self.adapter.generate(request, schema)
                 if ids is not None:
-                    value = validate_chunk(raw, ids)
+                    value = (validate_overview(raw, ids) if stage == 'overview' else
+                             validate_synthesis(raw, ids) if stage == 'synthesis' else validate_chunk(raw, ids))
                 else:
                     value = strict_json(raw)
                     validate(value, schema)
@@ -76,10 +88,21 @@ class Analyzer:
                 if attempt:
                     raise ValueError('분석 응답 검증 또는 CLI 실행 실패 (재시도 소진)') from None
 
-    def run(self, snapshot_id=None, include_drafts=False):
+    @contextmanager
+    def _model_lock(self):
+        self._report('이전 분석 종료 대기')
+        with Collector(self.conn, self.config).lock('analysis.lock') as lock_fd:
+            previous = getattr(self.adapter, 'analysis_lock_fd', None)
+            self.adapter.analysis_lock_fd = lock_fd
+            try:
+                yield
+            finally:
+                self.adapter.analysis_lock_fd = previous
+
+    def run(self, snapshot_id=None, include_drafts=False, *, budgeted=True):
         results = []
         # 별도 분석 잠금으로 계정 동시 호출 1개를 보장한다.
-        with Collector(self.conn, self.config).lock("analysis.lock"):
+        with self._model_lock():
             rows = self.conn.execute('SELECT s.*,p.repo_id,p.title,p.body,p.draft,p.state,p.base_sha AS current_base,'
                                      'p.head_sha AS current_head FROM snapshots s JOIN pull_requests p ON p.id=s.pr_id '
                                      'WHERE (? IS NOT NULL OR s.id IN (SELECT MAX(id) FROM snapshots GROUP BY pr_id)) '
@@ -98,7 +121,7 @@ class Analyzer:
                         results.append(self._failure(row, '최신 SHA의 최신 스냅샷이 아닙니다', 'blocked', persist=False))
                     continue
                 try:
-                    results.append(self._analyze(row, retry_missing_intent=snapshot_id is not None))
+                    results.append(self._analyze(row, retry_missing_intent=snapshot_id is not None, budgeted=budgeted))
                 except Exception:
                     self.conn.rollback()
                     results.append(self._failure(row, '분석 실패: diff 캐시 또는 로컬 DB를 확인하세요'))
@@ -122,7 +145,7 @@ class Analyzer:
                               (row['id'], row.get('analysis_input_hash', ''), self.adapter.provider, self.adapter.model, self.adapter.cli_version, PROMPT_VERSION, SCHEMA_VERSION, status, encode(result), error))
         return result
 
-    def _analyze(self, row, retry_missing_intent=False):
+    def _analyze(self, row, retry_missing_intent=False, *, budgeted=True):
         source_coverage = json.loads(row['coverage'])
         source_coverage.setdefault('raw_input_hash', row['input_hash'])
         if source_coverage.get('status') in ('incomplete', 'inaccessible'):
@@ -146,7 +169,7 @@ class Analyzer:
                 used += unit['raw_bytes']
         eligible = [u for u in units if not u.get('omission_reason')]
         chunks = chunk_units(eligible, metadata)
-        material = dict(metadata=metadata, units=units, policy='redact-v2/limits-v1/rules-v7', prompt_version=PROMPT_VERSION)
+        material = dict(metadata=metadata, units=units, policy='redact-v2/limits-v1/rules-v7/context-v1', prompt_version=PROMPT_VERSION)
         input_hash = hashlib.sha256(encode(material).encode()).hexdigest()
         row['analysis_input_hash'] = input_hash
         adapter = self.adapter
@@ -182,16 +205,38 @@ class Analyzer:
             if chunks:
                 collected = []
                 uncertainties = []
+                overview = None
+                if budgeted:
+                    self._check_budget(len(chunks) + 1 + (1 if len(chunks) > 1 else 0))
+                if len(chunks) > 1:
+                    self._report('PR 전체 맥락 파악', 0, len(chunks) + 2)
+                    overview_data = overview_input(units, metadata)
+                    sample_ids = {sample['change_id'] for sample in overview_data['samples']}
+                    if not sample_ids:
+                        raise ValueError('PR 개요에 포함할 변경이 없습니다.')
+                    overview = self._call('overview', overview_data, OVERVIEW_SCHEMA, sample_ids, budgeted=budgeted)
+                    chunks = chunk_units(eligible, metadata, overview=overview)
+                    coverage['overview_sampled'] = overview_data['coverage']['sampled_units']
+                    coverage['overview_eligible'] = overview_data['coverage']['eligible_units']
+                    coverage['overview_missing'] = sum(len(chunk['units']) for chunk in chunks if 'overview' not in chunk)
+                    if budgeted:
+                        self._check_budget(len(chunks) + 1)
+                steps = len(chunks) + 1 + int(overview is not None)
                 for index, chunk in enumerate(chunks):
-                    self._report('모델 분석', index, len(chunks) + 1)
-                    value = self._call('chunk', chunk, CHUNK_SCHEMA, {u['change_id'] for u in chunk['units']})
+                    self._report('모델 분석', index + int(overview is not None), steps)
+                    value = self._call('chunk', chunk, CHUNK_SCHEMA, {u['change_id'] for u in chunk['units']}, budgeted=budgeted)
                     collected.extend(value['items'])
                     uncertainties.extend(value['uncertainties'])
-                self._report('결과 합성', len(chunks), len(chunks) + 1)
-                synthesis = self._call('synthesis', dict(metadata=metadata, items=collected, uncertainties=uncertainties), SYNTHESIS_SCHEMA)
-                result.update(intent=synthesis['intent'], items=collected, uncertainties=uncertainties)
+                self._report('결과 합성', len(chunks) + int(overview is not None), steps)
+                synthesis_data = synthesis_input(units, metadata, collected, dict(coverage, analyzed=len(collected)), overview, uncertainties)
+                synthesis_ids = {item['change_id'] for item in synthesis_data['items']}
+                synthesis = self._call('synthesis', synthesis_data, SYNTHESIS_SCHEMA, synthesis_ids, budgeted=budgeted)
+                coverage['synthesis_omitted'] = synthesis_data['coverage']['synthesis_omitted']
+                coverage['synthesis_uncertainties_omitted'] = synthesis_data['coverage']['synthesis_uncertainties_omitted']
+                result.update(intent=synthesis['intent'], focus=synthesis['focus'], items=collected,
+                              uncertainties=uncertainties, overview=overview)
                 coverage['analyzed'] = len(collected)
-                result['status'] = 'partial' if coverage['excluded'] or coverage['omitted'] or coverage['redacted'] else 'completed'
+                result['status'] = 'partial' if any(coverage.get(key) for key in ('excluded', 'omitted', 'redacted', 'overview_missing', 'synthesis_omitted', 'synthesis_uncertainties_omitted')) else 'completed'
         except (ValueError, OSError, subprocess.SubprocessError) as exc:
             result['status'] = 'deferred' if isinstance(exc, BudgetExceeded) else 'blocked' if isinstance(exc, IsolationError) else 'failed'
             result['error'] = str(exc) if isinstance(exc, (BudgetExceeded, IsolationError)) else '분석 실패: 입력 또는 응답 계약을 확인하세요'

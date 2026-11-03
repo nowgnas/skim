@@ -6,6 +6,8 @@ import re
 import stat
 import shutil
 import subprocess
+import sys
+from contextlib import contextmanager
 import tempfile
 import time
 from pathlib import Path
@@ -60,6 +62,7 @@ class CodexAdapter:
             raise ValueError('Codex 모델 식별자 형식을 확인하세요.')
         self.model = model if model is not None else 'unknown'
         self._detected_model = None
+        self.analysis_lock_fd = None
         self.prerelease_version = None
         self.disabled = []
         self.unknown_enabled = []
@@ -192,7 +195,13 @@ class CodexAdapter:
         except (OSError, ValueError, KeyError, TypeError):
             raise IsolationError('Codex 분석 차단: 유효한 probe 없음. skim doctor --probe를 실행하세요.') from None
 
+    def check_inflight(self):
+        marker = self.data_dir / 'analysis-inflight'
+        if marker.exists() or marker.is_symlink():
+            raise IsolationError('이전 모델 실행의 종료 여부를 확인할 수 없어 분석을 차단했습니다. 상태 점검의 복구 안내를 확인하세요.')
+
     def verify(self):
+        self.check_inflight()
         self.check_home()
         self.check_version()
         self.check_flags()
@@ -220,7 +229,21 @@ class CodexAdapter:
             json.dump({'version': self.cli_version, 'checked_at': time.time(),
                        'disabled': self.disabled, 'model': self.model, 'passed': True}, stream)
 
+    @contextmanager
+    def _analysis_lock(self):
+        if self.analysis_lock_fd is not None:
+            yield self.analysis_lock_fd
+            return
+        from ..collect import Collector
+        from types import SimpleNamespace
+        with Collector(None, SimpleNamespace(data_dir=self.data_dir)).lock('analysis.lock') as fd:
+            yield fd
+
     def _execute(self, prompt, schema, probe=False):
+        with self._analysis_lock() as fd:
+            return self._execute_locked(prompt, schema, probe, fd)
+
+    def _execute_locked(self, prompt, schema, probe, lock_fd):
         with tempfile.TemporaryDirectory(prefix='skim-analysis-') as parent, tempfile.TemporaryDirectory(prefix='skim-home-') as home, tempfile.TemporaryDirectory(prefix='skim-schema-') as control, tempfile.TemporaryDirectory(prefix='skim-codex-') as runtime:
             work = Path(parent) / 'work'
             work.mkdir()
@@ -241,13 +264,18 @@ class CodexAdapter:
             if self.model != 'unknown':
                 command.extend(['--model', self.model])
             command.append('-')
+            marker = self.data_dir / 'analysis-inflight'
+            self.check_inflight()
+            guarded = [sys.executable, str(Path(__file__).with_name('_guard.py')), str(marker), '120', *command]
             try:
-                result = self.runner(command, input=prompt, text=True, capture_output=True,
-                                     timeout=120, cwd=work, env=self._env(home, runtime))
+                result = self.runner(guarded, input=prompt, text=True, capture_output=True,
+                                     timeout=130, cwd=work, env=self._env(home, runtime), pass_fds=(lock_fd,))
                 if probe and (any(Path(work).iterdir()) or any(Path(home).iterdir())
                               or {p.name for p in Path(parent).iterdir()} != {'work'}):
                     raise IsolationError('Codex 격리 probe 파일 생성 감지')
                 if result.returncode:
+                    if marker.exists() or marker.is_symlink():
+                        raise IsolationError('이전 모델 실행의 종료 여부를 확인할 수 없어 분석을 차단했습니다. 상태 점검의 복구 안내를 확인하세요.')
                     raise ValueError('Codex 실행 실패')
                 raw = output.read_text()
                 self._check_events(result.stdout)
@@ -257,10 +285,10 @@ class CodexAdapter:
                         self.model = self._detected_model = model
                 return raw
             except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
-                if probe:
-                    raise IsolationError('Codex 실행 또는 격리 probe 실패') from None
                 if isinstance(exc, IsolationError):
                     raise
+                if probe:
+                    raise IsolationError('Codex 실행 또는 격리 probe 실패') from None
                 raise ValueError('Codex 실행 실패 또는 출력 누락') from None
 
     @staticmethod

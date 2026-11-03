@@ -1,0 +1,351 @@
+diff --git a/README.md b/README.md
+index 560daec..32eb1a9 100644
+--- a/README.md
++++ b/README.md
+@@ -64,7 +64,7 @@ SHA를 수집 전후 확인하고 설명·파일 목록·diff 해시를 스냅
+ `blocked` 상태와 이유를 기록합니다. 도움말 플래그 존재나 프롬프트만으로 우회하지
+ 않으며, 사용자 설정으로 이 검사를 해제하는 옵션도 없습니다. 어댑터의 실행 경로는
+ 검증 성공 후 빈 임시 디렉터리에서 `codex exec`를 호출하도록 분리되어 있습니다.
+-`web`, `doctor`는 아직 종료 코드 2를 반환하는 스텁입니다.
++`doctor`는 인증·설치·격리·권한을 점검하며 실패 시 종료 코드 1을 반환합니다.
+ 
+ 가짜 어댑터를 주입하는 테스트에서 청크·합성 파이프라인 전체를 검증합니다.
+ 청크는 100단위·200 KiB(프롬프트와 메타데이터 포함), PR은 200파일·500단위·
+@@ -100,3 +100,51 @@ Sessio의 실제 인덱스는 보통 저장소 이름만 기록하므로 그 이
+ 브랜치를 비교합니다(전체 `owner/repo` 값도 지원). 동일 이름의 저장소를
+ 여러 소유자 아래 사용하면 인덱스의 이름만으로 소유자를 구별할 수 없습니다.
+ 인덱스의 임의 URL은 사용하지 않고 검증한 harness·세션 ID로 링크를 생성합니다.
++
++## 설치와 Mac 실행
++
++Python 3.11 이상과 gh·Codex CLI를 미리 설치합니다. Python 외부 패키지는 없습니다.
++설치 스크립트는 다운로드나 관리자 권한 없이 사용자 링크를 생성합니다.
++저장소 폴더를 유지해야 링크가 동작합니다.
++
++```bash
++./setup.sh
++export PATH="$HOME/.local/bin:$PATH"
++gh auth login
++skim doctor
++skim repo add owner/repo
++skim collect
++skim web
++```
++
++Mac에서는 위 순서로 실행하면 브라우저가 열립니다. 터미널에서 Ctrl-C로 종료합니다.
++현재 Codex 격리 계약 미검증으로 doctor는 실패하고 실제 분석은 차단됩니다.
++수집과 로컬 웹은 사용할 수 있습니다. 등록만으로 코드 전송을 허용하지 않습니다.
++
++로그인 시 자동 시작 등록은 MVP 범위 밖입니다. 터미널에서 `skim web`을 실행하세요.
++CLI 제거는 `rm ~/.local/bin/skim`으로 합니다.
++기존 일반 파일이나 다른 설치의 링크는 덮어쓰지 않습니다.
++`SKIM_PYTHON`으로 Python 실행 경로를 선택할 수 있습니다.
++조직 SSO 승인·비공개 저장소 읽기 권한·팀 멤버십을 확인하세요.
++doctor의 gh 인증 성공만으로 모든 조직·팀 접근을 보장하지 않습니다.
++
++## 웹 기능과 보안
++
++skim web은 127.0.0.1 전용 대시보드와 5분 주기 수집·수동 갱신을 제공합니다.
++PR 목록·필터·상세에서 규칙 후보·미분석·high를 먼저 펼치고 mid/low는 접습니다.
++중요도는 검토 순서 참고이며 보안 감사나 정확성 보증이 아닙니다.
++GitHub 리뷰 작성·승인·머지는 하지 않습니다.
++
++데이터 화면은 인증이 필요합니다. fragment의 일회용 진입 토큰은 60초간 유효하며
++세션 수립 후 폐기됩니다. 진입 URL을 공유하지 마세요.
++Host·Origin·CSRF 검증, CSP, 콘텐츠 이스케이프를 적용합니다.
++로컬 HTTP 쿠키는 HttpOnly·SameSite=Strict이며 Secure는 사용하지 않습니다.
++동일 OS 사용자 권한의 악성 프로세스까지 방어하지는 않습니다.
++수집 원문 diff는 로컬 캐시에 저장됩니다. 전송 전 민감 정보 제외·가림은 완전하지
++않습니다. 허용한 분석 입력에는 선택 CLI 모델 서비스의 전송·보존 정책이 적용됩니다.
++별도 전송 API·원격 로그·텔레메트리는 없습니다.
++보존 기간 자동 정리·cache clear·uninstall --purge는 아직 구현하지 않았습니다.
++
++외부 통신 없는 화면 확인은 별도 SKIM_HOME에서 scripts/demo_seed.py 실행 후
++bin/skim web --offline으로 할 수 있습니다.
++테스트: python3 -m unittest discover -s tests (실제 LLM·외부 네트워크 사용 없음).
+diff --git a/lib/skim/cli.py b/lib/skim/cli.py
+index 4285154..42446ab 100644
+--- a/lib/skim/cli.py
++++ b/lib/skim/cli.py
+@@ -47,16 +47,16 @@ def parser():
+     web.add_argument('--port', type=int, default=0)
+     web.add_argument('--no-browser', action='store_true')
+     web.add_argument('--offline', action='store_true', help='수집·분석 없이 저장된 데이터만 표시')
+-    commands.add_parser('doctor', help='후속 PR에서 구현 예정')
++    commands.add_parser('doctor', help='인증·격리·로컬 권한 점검')
+     return root
+ 
+ 
+ def main(argv=None):
+     args = parser().parse_args(argv)
+-    if args.command == 'doctor':
+-        print(f'{args.command}: 아직 구현되지 않았습니다.', file=sys.stderr)
+-        return 2
+     try:
++        if args.command == 'doctor':
++            from .doctor import run, paths
++            return run(paths())
+         config = Config.load()
+         if args.command == 'web':
+             if not 0 <= args.port <= 65535:
+diff --git a/lib/skim/doctor.py b/lib/skim/doctor.py
+new file mode 100644
+index 0000000..7337c6e
+--- /dev/null
++++ b/lib/skim/doctor.py
+@@ -0,0 +1,71 @@
++"""외부 도구와 로컬 권한을 점검하며 자격 증명 출력은 노출하지 않는다."""
++import os
++from pathlib import Path
++import shutil
++import stat
++import subprocess
++
++from .analyze.codex import CodexAdapter, IsolationError
++
++
++def run(config, runner=None, which=None, adapter=None):
++    runner = runner or subprocess.run
++    which = which or shutil.which
++    failed = False
++
++    def report(ok, name, detail):
++        nonlocal failed
++        failed |= not ok
++        print(f'{"정상" if ok else "실패"}: {name} — {detail}')
++
++    for name, args in (('gh', ['gh', 'auth', 'status', '--hostname', 'github.com']),
++                       ('codex', ['codex', '--version'])):
++        if not which(name):
++            report(False, name, 'PATH에서 실행 파일을 찾지 못했습니다.')
++            continue
++        try:
++            result = runner(args, capture_output=True, text=True, timeout=15)
++            report(result.returncode == 0, name,
++                   ('인증 확인' if name == 'gh' else '설치 확인') if result.returncode == 0
++                   else ('gh auth login으로 인증을 확인하세요.' if name == 'gh' else '실행에 실패했습니다.'))
++        except (OSError, subprocess.TimeoutExpired):
++            report(False, name, '실행 실패 또는 시간 초과')
++    try:
++        (adapter or CodexAdapter()).verify()
++        report(True, '분석 격리', '어댑터의 격리 계약 확인')
++    except (IsolationError, OSError, ValueError):
++        report(False, '분석 격리', '전역 설정·메모리·플러그인·hooks·MCP 및 도구 금지 계약 미검증. 실제 분석은 차단됩니다.')
++    # Config.load 이전의 상태도 보존하도록 CLI는 경로만 전달한다.
++    roots = [config.config_dir, config.data_dir]
++    if os.environ.get('SKIM_HOME'):
++        roots.insert(0, Path(os.environ['SKIM_HOME']).expanduser().resolve())
++    for root in dict.fromkeys(roots):
++        if not root.exists() and not root.is_symlink():
++            report(True, '로컬 권한', f'{root}: 미생성 (최초 실행 시 0700/0600)')
++            continue
++        paths = [root, *root.rglob('*')] if root.is_dir() and not root.is_symlink() else [root]
++        unsafe = False
++        for path in paths:
++            try:
++                info = path.lstat()
++            except FileNotFoundError:
++                # 실행 중 소켓·WAL 등이 삭제되면 해당 항목만 건너뛴다.
++                continue
++            expected = 0o700 if stat.S_ISDIR(info.st_mode) else 0o600
++            if (stat.S_ISLNK(info.st_mode) or info.st_uid != os.getuid()
++                    or stat.S_IMODE(info.st_mode) != expected):
++                unsafe = True
++        report(not unsafe, '로컬 권한', f'{root}: ' + ('소유자·심볼릭 링크·0700/0600 권한을 확인하세요.' if unsafe else '사용자 전용'))
++    print('안내: 조직 SSO는 gh 자격 증명의 SSO 승인을 확인하세요. 비공개 저장소 읽기 권한과 팀 멤버십·리뷰 요청 접근 권한도 필요합니다.')
++    print('안내: gh 인증 성공만으로 모든 조직·팀 접근을 보장하지 않습니다. PATH와 로그인 키체인 접근은 실행 터미널에서 확인하세요.')
++    return int(failed)
++
++
++def paths():
++    """권한을 변경하거나 DB를 만들지 않고 기본 경로를 계산한다."""
++    from .config import Config
++    home = os.environ.get('SKIM_HOME')
++    if home:
++        root = Path(home).expanduser().resolve()
++        return Config(root / 'config', root / 'data')
++    return Config(Path.home() / '.config/skim', Path.home() / '.local/share/skim')
+diff --git a/lib/skim/setup.py b/lib/skim/setup.py
+new file mode 100644
+index 0000000..b45ed5a
+--- /dev/null
++++ b/lib/skim/setup.py
+@@ -0,0 +1,32 @@
++"""사용자 PATH 링크를 설치한다. 자동 시작 등록은 MVP 범위 밖이다."""
++import argparse
++from pathlib import Path
++import sys
++
++
++def main(argv=None):
++    parser = argparse.ArgumentParser(description='skim 설치 (Python 3.11+, 사용자 범위)')
++    parser.add_argument('--root', required=True, type=Path)
++    args = parser.parse_args(argv)
++    try:
++        home = Path.home()
++        root = args.root.resolve()
++        binary = root / 'bin/skim'
++        link = home / '.local/bin/skim'
++        link.parent.mkdir(parents=True, exist_ok=True)
++        if link.is_symlink():
++            if link.resolve() != binary:
++                raise ValueError('기존 skim 링크가 다른 설치를 가리킵니다.')
++        elif link.exists():
++            raise ValueError('기존 ~/.local/bin/skim 파일을 덮어쓰지 않습니다.')
++        else:
++            link.symlink_to(binary)
++        print('설치 완료: ~/.local/bin/skim (PATH에 ~/.local/bin 추가)')
++        return 0
++    except (OSError, ValueError) as exc:
++        print(f'설치 실패: {exc}', file=sys.stderr)
++        return 1
++
++
++if __name__ == '__main__':
++    raise SystemExit(main())
+diff --git a/progress.md b/progress.md
+index df16140..c6f9f68 100644
+--- a/progress.md
++++ b/progress.md
+@@ -70,3 +70,15 @@
+ 
+ - Sessio 코드의 `index/sessions.jsonl`·저장소 이름·브랜치·웹 라우트 형식을 확인하고, 설정 가능한 인덱스 경로와 로컬 웹 주소로 PR 상세 연결을 추가했다. 단일 후보이며 현재 gh 사용자와 작성자가 일치할 때만 링크·세션 ID를 표시한다.
+ - 인덱스 누락/손상·복수 후보·인증 실패·잘못된 링크는 숨기며 offline에서는 외부 조회를 하지 않는다. fixture 인덱스와 fake gh로 unittest 83개가 통과했다. 실제 LLM·네트워크 호출, GitHub 쓰기와 커밋은 하지 않았다.
++
++## PR6 — 2026-10-31
++
++- 한국어 README에 설치·사용·보안·Mac 실행 순서와 현재 분석 격리 제한을 정리했다. setup.sh는 사용자 PATH 링크와 선택적 launchd/systemd --user 웹 자동 시작·제거를 제공한다.
++- doctor에 gh 인증·Codex 설치·격리 계약·로컬 권한 점검 및 SSO·팀 권한 안내를 추가했다. 진단은 권한을 고치거나 자격 증명 출력을 노출하지 않는다.
++- 임시 홈과 fake 서비스 관리자·CLI로 unittest 89개 및 git diff --check가 통과했다. 실제 LLM·외부 네트워크·GitHub 쓰기·커밋은 하지 않았다. macOS/systemd 실제 로그인 서비스 동작은 미검증이다.
++
++## PR6 리뷰 수정 — 2026-10-31
++
++- 설계의 MVP 범위를 유지하도록 setup의 launchd/systemd 자동 시작 옵션·구현·README 안내·서비스 테스트를 제거했다. 서비스 journal의 진입 토큰 노출 경로와 임시 파일 잔존·제거 시 설치·중복 시작·잠금 충돌 문제도 해당 코드 제거로 해소했다.
++- doctor는 SKIM_HOME 루트 권한을 검사하고 검사 중 사라진 파일은 건너뛴다. stdout·stderr 비밀값 비노출 검증과 권한·파일 삭제 회귀 테스트를 보완했다.
++- 실제 LLM·네트워크 호출 없이 unittest 88개와 git diff --check가 통과했다. GitHub 쓰기와 커밋은 하지 않았다.
+diff --git a/setup.sh b/setup.sh
+new file mode 100755
+index 0000000..6cf2168
+--- /dev/null
++++ b/setup.sh
+@@ -0,0 +1,11 @@
++#!/usr/bin/env bash
++# 사용자 PATH 링크를 설치한다.
++set -euo pipefail
++ROOT="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++PY="${SKIM_PYTHON:-$(command -v python3 || true)}"
++if [[ -z "$PY" ]] || ! "$PY" -c 'import sys; sys.exit(sys.version_info < (3,11))'; then
++  echo 'Python 3.11 이상이 필요합니다.' >&2
++  exit 2
++fi
++export PYTHONPATH="$ROOT/lib${PYTHONPATH:+:$PYTHONPATH}"
++exec "$PY" -m skim.setup --root "$ROOT" "$@"
+diff --git a/tests/test_scaffold.py b/tests/test_scaffold.py
+index a3ff138..a1be6bb 100644
+--- a/tests/test_scaffold.py
++++ b/tests/test_scaffold.py
+@@ -107,7 +107,8 @@ def test_wrapper_symlink_and_stubs(self):
+         link.symlink_to(ROOT / 'bin/skim')
+         result = subprocess.run([str(link), 'repo', 'add', 'a/b'], capture_output=True, text=True, cwd='/tmp')
+         self.assertEqual(result.returncode, 0, result.stderr)
+-        self.assertEqual(self.cli('doctor')[0], 2)
++        with patch('skim.doctor.run', return_value=1):
++            self.assertEqual(self.cli('doctor')[0], 1)
+         with patch('skim.web.serve', return_value=0) as serve:
+             self.assertEqual(self.cli('web', '--offline', '--no-browser')[0], 0)
+             self.assertEqual(serve.call_args.args[1:], (0, False, True))
+diff --git a/tests/test_setup_doctor.py b/tests/test_setup_doctor.py
+new file mode 100644
+index 0000000..8b3cb90
+--- /dev/null
++++ b/tests/test_setup_doctor.py
+@@ -0,0 +1,89 @@
++"""임시 홈과 fake 실행기로 설치·진단을 검증한다."""
++import contextlib
++import io
++import os
++from pathlib import Path
++import subprocess
++import sys
++import tempfile
++import unittest
++from unittest.mock import Mock, patch
++ROOT = Path(__file__).resolve().parents[1]
++sys.path.insert(0, str(ROOT / 'lib'))
++from skim.config import Config
++from skim.doctor import run
++from skim.setup import main
++
++
++class SetupDoctorTests(unittest.TestCase):
++    def setUp(self):
++        self.temp = tempfile.TemporaryDirectory(prefix='skim space ')
++        self.addCleanup(self.temp.cleanup)
++        self.home = Path(self.temp.name)
++
++    def test_doctor(self):
++        config = Config(self.home, self.home / 'absent')
++        runner = Mock(return_value=subprocess.CompletedProcess([], 0, 'SECRET', 'TOKEN'))
++        out = io.StringIO()
++        with contextlib.redirect_stdout(out):
++            self.assertEqual(run(config, runner, lambda n: '/fake'), 1)
++        self.assertIn('SSO', out.getvalue())
++        self.assertNotIn('SECRET', out.getvalue())
++        self.assertNotIn('TOKEN', out.getvalue())
++        self.assertIn('차단', out.getvalue())
++        with contextlib.redirect_stdout(io.StringIO()):
++            self.assertEqual(run(config, runner, lambda n: '/fake', Mock()), 0)
++            self.home.chmod(0o755)
++            self.assertEqual(run(config, runner, lambda n: '/fake', Mock()), 1)
++            self.assertEqual(self.home.stat().st_mode & 0o777, 0o755)
++            runner.reset_mock()
++            self.assertEqual(run(config, runner, lambda n: None), 1)
++            runner.assert_not_called()
++
++    def install(self):
++        with patch('pathlib.Path.home', return_value=self.home), contextlib.redirect_stdout(io.StringIO()):
++            return main(['--root', str(ROOT)])
++
++    def test_wrapper_and_conflict(self):
++        result = subprocess.run([str(ROOT / 'setup.sh')], env=dict(os.environ, HOME=str(self.home)), capture_output=True, text=True)
++        self.assertEqual(result.returncode, 0, result.stderr)
++        link = self.home / '.local/bin/skim'
++        self.assertEqual(link.resolve(), ROOT / 'bin/skim')
++        link.unlink()
++        link.write_text('keep')
++        with contextlib.redirect_stderr(io.StringIO()):
++            self.assertEqual(self.install(), 1)
++        self.assertEqual(link.read_text(), 'keep')
++
++    def test_doctor_checks_skim_home_root_without_changing_permissions(self):
++        config = Config(self.home / 'config', self.home / 'data')
++        config.config_dir.mkdir(mode=0o700)
++        config.data_dir.mkdir(mode=0o700)
++        self.home.chmod(0o755)
++        with patch.dict(os.environ, SKIM_HOME=str(self.home)), contextlib.redirect_stdout(io.StringIO()):
++            runner = Mock(return_value=subprocess.CompletedProcess([], 0))
++            self.assertEqual(run(config, runner, lambda n: '/fake', Mock()), 1)
++        self.assertEqual(self.home.stat().st_mode & 0o777, 0o755)
++
++    def test_doctor_skips_disappearing_files(self):
++        missing = self.home / 'removed-wal'
++        original = Path.lstat
++
++        def lstat(path):
++            if path == missing:
++                raise FileNotFoundError(path)
++            return original(path)
++
++        with patch.object(Path, 'rglob', return_value=iter([missing])), patch.object(Path, 'lstat', lstat), contextlib.redirect_stdout(io.StringIO()):
++            runner = Mock(return_value=subprocess.CompletedProcess([], 0))
++            self.assertEqual(run(Config(self.home, self.home / 'absent'), runner,
++                                 lambda n: '/fake', Mock()), 0)
++
++    def test_doctor_timeout_and_auth_failure(self):
++        config = Config(self.home, self.home / 'absent')
++        for runner in (Mock(side_effect=subprocess.TimeoutExpired('fake', 15)),
++                       Mock(return_value=subprocess.CompletedProcess([], 1, 'SECRET', 'TOKEN'))):
++            out = io.StringIO()
++            with contextlib.redirect_stdout(out):
++                self.assertEqual(run(config, runner, lambda n: '/fake'), 1)
++            self.assertNotIn('TOKEN', out.getvalue())

@@ -1,0 +1,518 @@
+diff --git a/README.md b/README.md
+index 9adf478..ddd979a 100644
+--- a/README.md
++++ b/README.md
+@@ -180,3 +180,17 @@ bin/skim web --offline으로 할 수 있습니다.
+ 테스트: python3 -m unittest discover -s tests (실제 LLM·외부 네트워크 사용 없음).
+ 
+ 인증 refresh token이 교체되면 임시 홈의 갱신 결과가 삭제되어 원본 Codex CLI 로그인도 무효화될 수 있습니다. 이 경우 원본 CLI에서 다시 로그인하세요.
++
++### Codex 모델 기록
++
++`config.json`의 `codex_model`(예: `"codex_model": "gpt-5.4"`)로 모델을
++지정할 수 있습니다. `SKIM_CODEX_MODEL` 환경 변수가 설정 파일보다 우선하며,
++지정한 값은 Codex의 `--model` 인수와 분석 모델·캐시 키에 사용됩니다.
++**`codex_model`을 명시적으로 설정하는 것을 권장합니다.** 실제 codex-cli 0.165.0의
++`codex --json` 출력은 JSON 이벤트와 stderr 모두에 모델 이름을 노출하지 않아
++probe로 모델을 감지하지 못합니다.
++미지정 시 `skim doctor --probe`는 JSON 이벤트의 모델 메타데이터 또는
++stderr의 `model:` 배너가 있는 경우에만 최선의 노력으로 감지하고 CLI 버전별 probe 캐시에 보관합니다.
++일반 검사에서는 캐시를 읽어 추가 모델 호출을 하지 않습니다. 감지 실패 시
++`unknown`을 유지하고 doctor에서 명시적 모델 설정을 권장합니다.
++모델은 doctor와 웹 PR 상세 화면에서 확인할 수 있습니다.
+diff --git a/lib/skim/analyze/__init__.py b/lib/skim/analyze/__init__.py
+index 57fa834..3f8dad9 100644
+--- a/lib/skim/analyze/__init__.py
++++ b/lib/skim/analyze/__init__.py
+@@ -19,7 +19,7 @@ class BudgetExceeded(ValueError):
+ class Analyzer:
+     def __init__(self, conn, config, adapter=None, today=None):
+         self.conn, self.config = conn, config
+-        self.adapter = adapter if adapter is not None else CodexAdapter(data_dir=config.data_dir)
++        self.adapter = adapter if adapter is not None else CodexAdapter(data_dir=config.data_dir, model=config.codex_model)
+         self.today = today or (lambda: datetime.now().astimezone().date().isoformat())
+ 
+     def _reserve(self):
+diff --git a/lib/skim/analyze/codex.py b/lib/skim/analyze/codex.py
+index 23258a9..316c484 100644
+--- a/lib/skim/analyze/codex.py
++++ b/lib/skim/analyze/codex.py
+@@ -10,6 +10,7 @@
+ import time
+ from pathlib import Path
+ from .protocol import encode
++from ..config import valid_model
+ 
+ 
+ class IsolationError(ValueError):
+@@ -55,7 +56,10 @@ def __init__(self, runner=subprocess.run, data_dir=None, model=None):
+             data_dir = paths().data_dir
+         self.data_dir = Path(data_dir).absolute()
+         self.home = self.data_dir / 'codex-home'
+-        self.model = model or 'unknown'
++        if model is not None and not valid_model(model):
++            raise ValueError('Codex 모델 식별자 형식을 확인하세요.')
++        self.model = model if model is not None else 'unknown'
++        self._detected_model = None
+         self.disabled = []
+         self.unknown_enabled = []
+ 
+@@ -130,7 +134,11 @@ def check_version(self):
+         match = re.fullmatch(r'codex(?:-cli)? (\d+)\.(\d+)\.(\d+)', output)
+         if not match or tuple(map(int, match.groups())) < (0, 165, 0):
+             raise IsolationError('Codex 분석 차단: 검증된 최소 버전 0.165.0 이상이 필요합니다.')
+-        self.cli_version = '.'.join(match.groups())
++        version = '.'.join(match.groups())
++        if version != self.cli_version and self.model == self._detected_model:
++            self.model = 'unknown'
++            self._detected_model = None
++        self.cli_version = version
+ 
+     def check_flags(self):
+         help_text = self._inspect(['exec', '--help'])
+@@ -158,7 +166,7 @@ def check_flags(self):
+ 
+     @property
+     def probe_path(self):
+-        model_key = hashlib.sha256(self.model.encode()).hexdigest()
++        model_key = hashlib.sha256(('unknown' if self.model == self._detected_model else self.model).encode()).hexdigest()
+         return self.data_dir / f'codex-probe-{self.cli_version}-{model_key}.json'
+ 
+     def check_probe(self):
+@@ -168,9 +176,14 @@ def check_probe(self):
+             age = time.time() - value['checked_at']
+             if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                     or stat.S_IMODE(info.st_mode) != 0o600 or value['version'] != self.cli_version
+-                    or value.get('model') != self.model or value['disabled'] != self.disabled or value['passed'] is not True
++                    or (self.model != 'unknown' and value.get('model') != self.model) or value['disabled'] != self.disabled or value['passed'] is not True
+                     or not 0 <= age < 7 * 86400):
+                 raise ValueError()
++            if self.model == 'unknown' or self.model == self._detected_model:
++                model = value['model']
++                if model != 'unknown' and not valid_model(model):
++                    raise ValueError()
++                self.model = self._detected_model = model
+         except (OSError, ValueError, KeyError, TypeError):
+             raise IsolationError('Codex 분석 차단: 유효한 probe 없음. skim doctor --probe를 실행하세요.') from None
+ 
+@@ -186,6 +199,8 @@ def probe(self):
+         self.check_flags()
+         # 실패한 재검사가 이전 성공 캐시로 우회되지 않게 먼저 폐기한다.
+         self.probe_path.unlink(missing_ok=True)
++        if self.model == self._detected_model:
++            self.model = 'unknown'
+         raw = self._execute(PROBE_PROMPT, PROBE_SCHEMA, probe=True)
+         try:
+             value = json.loads(raw)
+@@ -217,6 +232,7 @@ def _execute(self, prompt, schema, probe=False):
+             command.append('--json')
+             for name in self.disabled:
+                 command.extend(['--disable', name])
++            # 기본 모델은 probe로 감지한 뒤 분석에서 명시해 같은 모델로 고정한다.
+             if self.model != 'unknown':
+                 command.extend(['--model', self.model])
+             command.append('-')
+@@ -230,6 +246,10 @@ def _execute(self, prompt, schema, probe=False):
+                     raise ValueError('Codex 실행 실패')
+                 raw = output.read_text()
+                 self._check_events(result.stdout)
++                if probe and self.model == 'unknown':
++                    model = self._output_model(result.stdout, result.stderr)
++                    if model:
++                        self.model = self._detected_model = model
+                 return raw
+             except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
+                 if probe:
+@@ -238,6 +258,28 @@ def _execute(self, prompt, schema, probe=False):
+                     raise
+                 raise ValueError('Codex 실행 실패 또는 출력 누락') from None
+ 
++    @staticmethod
++    def _output_model(stdout, stderr):
++        # 응답 본문의 자기보고는 제외하고 이벤트 메타데이터만 확인한다.
++        def metadata(value):
++            if isinstance(value, dict):
++                model = value.get('model')
++                if valid_model(model):
++                    return model
++                for key in ('session', 'thread', 'turn', 'response', 'metadata'):
++                    found = metadata(value.get(key))
++                    if found:
++                        return found
++            return None
++
++        for line in stdout.splitlines():
++            if line.strip():
++                found = metadata(json.loads(line))
++                if found:
++                    return found
++        match = re.search(r'^\s*model:\s*(\S+)\s*$', stderr, re.MULTILINE)
++        return match.group(1) if match and valid_model(match.group(1)) else None
++
+     @staticmethod
+     def _check_events(stdout):
+         seen = False
+@@ -255,7 +297,10 @@ def _check_events(stdout):
+             raise ValueError('probe 이벤트 누락')
+ 
+     def generate(self, prompt, schema):
++        identity = (self.model, self.cli_version)
+         self.verify()
++        if identity[1] != 'unknown' and identity != (self.model, self.cli_version):
++            raise IsolationError('Codex 모델·버전이 분석 도중 변경되었습니다. 다시 분석하세요.')
+         try:
+             return self._execute(prompt, schema)
+         finally:
+diff --git a/lib/skim/config.py b/lib/skim/config.py
+index 2df2f7f..b12c443 100644
+--- a/lib/skim/config.py
++++ b/lib/skim/config.py
+@@ -1,10 +1,17 @@
+ """사용자 전용 경로와 JSON 설정."""
+ import json
+ import os
++import re
++import stat
+ from dataclasses import dataclass
+ from pathlib import Path
+ 
+ 
++def valid_model(value):
++    return (isinstance(value, str) and value != 'unknown'
++            and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:/-]*', value) is not None)
++
++
+ def private_dir(path):
+     path.mkdir(parents=True, exist_ok=True, mode=0o700)
+     path.chmod(0o700)
+@@ -27,6 +34,33 @@ class Config:
+     sessio_index_path: Path | None = None
+     sessio_web_url: str = 'http://127.0.0.1:8765/'
+ 
++    codex_model: str | None = None
++
++    def resolved_codex_model(self):
++        # 실행 중에는 파일·환경을 다시 읽지 않고 시작 시 확정한 값을 사용한다.
++        return self.codex_model
++
++    @staticmethod
++    def parse_codex_model(settings, default=None):
++        value = os.environ.get('SKIM_CODEX_MODEL', settings.get('codex_model', default))
++        if value is not None and not valid_model(value):
++            raise ValueError('codex_model 설정 형식을 확인하세요 (unknown·선행 하이픈·공백은 허용하지 않습니다)')
++        return value
++
++    def doctor_codex_model(self):
++        # doctor는 권한을 고치거나 파일을 생성하지 않고 안전한 설정만 읽는다.
++        path = self.config_dir / 'config.json'
++        settings = {}
++        if path.exists() or path.is_symlink():
++            info = path.lstat()
++            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
++                    or stat.S_IMODE(info.st_mode) != 0o600):
++                raise ValueError('config.json 소유자·일반 파일·0600 권한을 확인하세요')
++            settings = json.loads(path.read_text())
++            if not isinstance(settings, dict):
++                raise ValueError('설정은 JSON 객체여야 합니다')
++        return self.parse_codex_model(settings, self.codex_model)
++
+     @classmethod
+     def load(cls):
+         home = os.environ.get("SKIM_HOME")
+@@ -65,7 +99,7 @@ def load(cls):
+         if not valid_base_url(url):
+             raise ValueError('sessio_web_url 설정은 로컬 Sessio HTTP 주소여야 합니다')
+         values['sessio_web_url'] = url
+-        return cls(config_dir, data_dir, **values)
++        return cls(config_dir, data_dir, **values, codex_model=cls.parse_codex_model(settings))
+ 
+     @property
+     def db_path(self):
+diff --git a/lib/skim/doctor.py b/lib/skim/doctor.py
+index 66d6f1f..4ba8bc3 100644
+--- a/lib/skim/doctor.py
++++ b/lib/skim/doctor.py
+@@ -27,7 +27,13 @@ def report(ok, name, detail):
+             report(result.returncode == 0, 'gh', '인증 확인' if result.returncode == 0 else 'gh auth login으로 인증을 확인하세요.')
+         except (OSError, subprocess.TimeoutExpired):
+             report(False, 'gh', '실행 실패 또는 시간 초과')
+-    adapter = adapter or CodexAdapter(runner=runner, data_dir=config.data_dir)
++    model_ok = True
++    try:
++        model = config.doctor_codex_model()
++    except (OSError, ValueError):
++        model, model_ok = None, False
++        report(False, 'model', 'config.json 객체·JSON·권한과 codex_model / SKIM_CODEX_MODEL을 수정하세요.')
++    adapter = adapter or CodexAdapter(runner=runner, data_dir=config.data_dir, model=model)
+     ready = True
+     for label, method in (('codex-home', adapter.check_home), ('version', adapter.check_version),
+                           ('flags', adapter.check_flags),
+@@ -36,6 +42,10 @@ def report(ok, name, detail):
+             report(False, label, 'Codex 분석 차단: 선행 검사 실패 또는 CLI 없음')
+             ready = False
+             continue
++        if label == 'probe' and probe and not model_ok:
++            report(False, label, '모델 설정을 수정한 뒤 skim doctor --probe를 실행하세요.')
++            ready = False
++            continue
+         try:
+             method()
+             report(True, label, '격리 검사 통과')
+@@ -50,6 +60,11 @@ def report(ok, name, detail):
+                 'probe': 'skim doctor --probe로 격리를 재검증하세요. 도구 실행·지침·파일 생성 시 차단됩니다.',
+             }
+             report(False, label, 'Codex 분석 차단: ' + details[label])
++    if model_ok:
++        if adapter.model != 'unknown':
++            report(True, 'model', adapter.model)
++        else:
++            print('경고: model — Codex 모델을 알 수 없습니다. codex_model 설정 또는 SKIM_CODEX_MODEL을 지정하세요.')
+     # Config.load 이전의 상태도 보존하도록 CLI는 경로만 전달한다.
+     roots = [config.config_dir, config.data_dir]
+     if os.environ.get('SKIM_HOME'):
+diff --git a/lib/skim/web.py b/lib/skim/web.py
+index 980c4c4..815ab64 100644
+--- a/lib/skim/web.py
++++ b/lib/skim/web.py
+@@ -174,6 +174,8 @@ def detail(pr, query, config, offline=False):
+         sid, url = session
+         content += f'<p><a href="{esc(url)}" rel="noreferrer">Sessio · {esc(sid)} ↗</a></p>'
+     content += f'<article><h2>의도</h2><p>{esc(a["intent"] if a and a["intent"] else "미분석 — 분석 결과가 없습니다.")}</p><h2>위험 요약</h2><p>{badges(pr)}</p><p>{esc(pr["status"])} {esc(a["error"] if a else "")}</p>'
++    if a:
++        content += f'<p class="muted">모델 {esc(a["model"])} · Codex CLI {esc(a["cli_version"])}</p>'
+     if s:
+         coverage = json.loads(s['coverage'])
+         stats = coverage.get('analysis', {})
+diff --git a/progress.md b/progress.md
+index ff7c0ee..2cbecbd 100644
+--- a/progress.md
++++ b/progress.md
+@@ -124,3 +124,14 @@
+ - 개인 키 탐지 범위와 변경 줄 오프셋의 겹침으로 secrets 후보를 판정해 문맥의 BEGIN/END 사이 본문 교체·추가·삭제 누락을 고쳤다. 문맥만 가린 경우는 계속 제외하며 전송 가림 규칙은 유지한다.
+ - 리터럴 할당 중심으로 비밀값 후보를 좁히고 경로 접두사 오탐, 단수 migration, Dockerfile·Terraform·values.yaml·Dependabot 설정과 oauth_client 호출을 보완했다. 규칙별 헬퍼와 policy rules-v3를 적용하고 중복 빈 줄을 정리했다.
+ - 회귀 테스트를 포함한 unittest 121개와 git diff --check가 통과했다. 실제 LLM·네트워크 호출, GitHub 쓰기와 커밋은 하지 않았다.
++
++## Codex 모델 기록 — 2026-10-31
++
++- codex_model 설정과 SKIM_CODEX_MODEL 우선 적용, --model 전달을 연결했다. probe의 JSON 이벤트·stderr 배너에서 모델을 감지해 버전별 캐시에 보존하고 분석·캐시 키에 반영한다.
++- doctor·웹 PR 상세에 모델을 표시하며 감지 실패 시 unknown과 명시적 설정 안내를 유지한다. fake 기반 unittest 125개와 git diff --check가 통과했다. 실제 LLM·네트워크 호출, GitHub 쓰기와 커밋은 하지 않았다.
++
++## Codex 모델 설정 리뷰 수정 — 2026-10-31
++
++- 모델은 Config.load에서 한 번 해석해 분석기에 전달하며 실행 중 설정 파일·환경 변경으로 분석이 조용히 중단되지 않게 했다. doctor는 설정 JSON·객체·권한·모델 오류를 model 실패로 표시하고 나머지 진단을 계속한다.
++- 모델 식별자 검증, 감지 모델 고정 의도 주석, 실행 전 모델·버전 변경 차단과 probe 우선 안내를 보완했다. 웹의 실제 모델·CLI 버전 표시와 설정 손상 회귀를 검증했다.
++- fake 기반 unittest 129개와 git diff --check가 통과했다. 실제 LLM·네트워크 호출, GitHub 쓰기와 커밋은 하지 않았다.
+diff --git a/tests/test_codex.py b/tests/test_codex.py
+index 6e0cfb2..d995fff 100644
+--- a/tests/test_codex.py
++++ b/tests/test_codex.py
+@@ -37,6 +37,7 @@ def setUp(self):
+         self.answer = {'tool_ran': False, 'instructions_seen': ''}
+         self.file_location = None
+         self.events = [{'type': 'item.completed', 'item': {'type': 'agent_message', 'text': 'x'}}]
++        self.stderr = ''
+         self.exitcode = 0
+         self.adapter.init_home()
+ 
+@@ -72,7 +73,7 @@ def runner(self, command, **kw):
+             self.assertIn('--json', command)
+             events = self.events + [{'type': 'turn.completed'}]
+             stdout = '\n'.join(json.dumps(e) for e in events)
+-            return subprocess.CompletedProcess(command, self.exitcode, stdout, '')
++            return subprocess.CompletedProcess(command, self.exitcode, stdout, self.stderr)
+         return subprocess.CompletedProcess(command, 0, output, '')
+ 
+     def test_init_explicit_idempotent_and_no_credential_reads(self):
+@@ -323,6 +324,143 @@ def test_probe_records_are_separate_per_model(self):
+         self.adapter.model = 'unknown'
+         self.adapter.check_probe()
+ 
++    def test_model_banner_cached_without_extra_execution(self):
++        self.stderr = 'OpenAI Codex\nmodel: gpt-5.4\nprovider: openai\n'
++        self.adapter.probe()
++        self.assertEqual(self.adapter.model, 'gpt-5.4')
++        self.assertEqual(json.loads(self.adapter.probe_path.read_text())['model'], 'gpt-5.4')
++        fresh = CodexAdapter(self.runner, self.adapter.data_dir)
++        before = len(self.calls)
++        fresh.verify()
++        self.assertEqual(fresh.model, 'gpt-5.4')
++        self.assertFalse(any('--output-last-message' in c for c, _ in self.calls[before:]))
++        fresh.generate('자료', {})
++        command = self.calls[-1][0]
++        self.assertEqual(command[command.index('--model') + 1], 'gpt-5.4')
++
++    def test_model_event_precedes_banner_and_unknown_fallback(self):
++        self.stderr = 'model: banner-model\n'
++        self.events = [{'type': 'thread.started', 'metadata': {'model': 'event-model'}}]
++        self.adapter.probe()
++        self.assertEqual(self.adapter.model, 'event-model')
++        self.stderr = 'WARNING: proceeding, even though we could not update PATH alias\n'
++        self.events = [{'type': 'thread.started', 'thread_id': 'test-thread'}]
++        self.adapter.probe()
++        self.assertEqual(self.adapter.model, 'unknown')
++        out = io.StringIO()
++        with contextlib.redirect_stdout(out):
++            run(Config(self.root / 'config', self.adapter.data_dir), self.runner,
++                lambda _: '/fake', self.adapter)
++        self.assertIn('경고: model —', out.getvalue())
++        self.assertIn('codex_model 설정', out.getvalue())
++        self.assertIn('SKIM_CODEX_MODEL', out.getvalue())
++        self.assertNotIn('정상: model', out.getvalue())
++        self.assertNotIn('Codex 모델: unknown', out.getvalue())
++        self.assertEqual(sum('model —' in line for line in out.getvalue().splitlines()), 1)
++
++    def test_doctor_reports_one_known_model_after_checks(self):
++        for configured, probe in ((True, True), (True, False), (False, True), (False, False)):
++            with self.subTest(configured=configured, probe=probe):
++                config = Config(self.root / 'config', self.adapter.data_dir,
++                                codex_model='configured' if configured else None)
++                self.stderr = 'model: detected\n'
++                if not configured and not probe:
++                    self.adapter.probe()
++                out = io.StringIO()
++                with contextlib.redirect_stdout(out):
++                    self.assertEqual(run(config, self.runner, lambda _: '/fake', probe=probe), 0)
++                model = 'configured' if configured else 'detected'
++                self.assertIn(f'정상: model — {model}\n', out.getvalue())
++                self.assertEqual(sum('model —' in line for line in out.getvalue().splitlines()), 1)
++                self.assertNotIn('Codex 모델:', out.getvalue())
++
++    def test_configured_model_and_environment_override(self):
++        config = Config.load()
++        (config.config_dir / 'config.json').write_text(json.dumps({'codex_model': 'configured'}))
++        self.assertEqual(Config.load().codex_model, 'configured')
++        with patch.dict(os.environ, SKIM_CODEX_MODEL='override'):
++            config = Config.load()
++            self.assertEqual(config.codex_model, 'override')
++            adapter = CodexAdapter(self.runner, self.adapter.data_dir,
++                                   model=config.resolved_codex_model())
++            self.stderr = 'model: ignored-banner\n'
++            adapter.probe()
++            adapter.verify()
++            self.assertEqual(adapter.model, 'override')
++            command = next(c for c, _ in reversed(self.calls) if '--output-last-message' in c)
++            self.assertEqual(command[command.index('--model') + 1], 'override')
++
++    def test_loaded_config_is_stable_after_file_and_environment_changes(self):
++        from skim.analyze import Analyzer
++        config = Config.load()
++        path = config.config_dir / 'config.json'
++        path.write_text(json.dumps({'codex_model': 'original'}))
++        config = Config.load()
++        for contents in ('[]', '{', '{"codex_model": "replacement"}'):
++            path.write_text(contents)
++            with patch.dict(os.environ, SKIM_CODEX_MODEL=''):
++                analyzer = Analyzer(None, config)
++                self.assertEqual(analyzer.adapter.model, 'original')
++                self.assertEqual(config.resolved_codex_model(), 'original')
++        explicit = Config(config.config_dir, config.data_dir, codex_model='explicit')
++        self.assertEqual(Analyzer(None, explicit).adapter.model, 'explicit')
++
++    def test_invalid_model_identifiers(self):
++        config = Config.load()
++        path = config.config_dir / 'config.json'
++        for model in ('', 'unknown', '-model', 'two words', ' spaced ', 123):
++            with self.subTest(model=model):
++                path.write_text(json.dumps({'codex_model': model}))
++                with self.assertRaises(ValueError):
++                    Config.load()
++                with self.assertRaises(ValueError):
++                    CodexAdapter(self.runner, self.adapter.data_dir, model=model)
++        for model in ('-model', 'two words', 'unknown'):
++            self.assertIsNone(CodexAdapter._output_model(
++                json.dumps({'metadata': {'model': model}}), ''))
++        self.adapter.probe()
++        path = self.adapter.probe_path
++        value = json.loads(path.read_text())
++        value['model'] = '-invalid'
++        path.write_text(json.dumps(value))
++        with self.assertRaises(IsolationError):
++            self.adapter.check_probe()
++
++    def test_doctor_reports_invalid_settings_and_continues(self):
++        config = Config.load()
++        path = config.config_dir / 'config.json'
++        for contents, env in (('[]', {}), ('{', {}), ('{}', {'SKIM_CODEX_MODEL': ''})):
++            path.write_text(contents)
++            before = path.stat().st_mode
++            out = io.StringIO()
++            self.calls.clear()
++            with patch.dict(os.environ, env), contextlib.redirect_stdout(out):
++                self.assertEqual(run(config, self.runner, lambda _: '/fake', self.adapter), 1)
++            self.assertIn('실패: model', out.getvalue())
++            for label in ('codex-home', 'version', 'flags', 'probe', '로컬 권한'):
++                self.assertIn(label, out.getvalue())
++            self.assertNotIn('Traceback', out.getvalue())
++            self.assertFalse(any('--output-last-message' in c for c, _ in self.calls))
++            self.assertEqual(path.stat().st_mode, before)
++        path.write_text('{}')
++        path.chmod(0o644)
++        with contextlib.redirect_stdout(io.StringIO()) as out:
++            self.assertEqual(run(config, self.runner, lambda _: '/fake', self.adapter), 1)
++        self.assertIn('실패: model', out.getvalue())
++        self.assertEqual(path.stat().st_mode & 0o777, 0o644)
++
++    def test_generate_blocks_model_change_after_verification(self):
++        self.adapter.probe()
++        self.adapter.verify()
++        path = self.adapter.probe_path
++        value = json.loads(path.read_text())
++        value['model'] = 'changed-model'
++        path.write_text(json.dumps(value))
++        before = len(self.calls)
++        with self.assertRaises(IsolationError):
++            self.adapter.generate('자료', {})
++        self.assertFalse(any('--output-last-message' in c for c, _ in self.calls[before:]))
++
+     def test_cli_init(self):
+         with contextlib.redirect_stdout(io.StringIO()):
+             self.assertEqual(main(['codex-home', 'init']), 0)
+diff --git a/tests/test_setup_doctor.py b/tests/test_setup_doctor.py
+index cea9634..0949e86 100644
+--- a/tests/test_setup_doctor.py
++++ b/tests/test_setup_doctor.py
+@@ -37,9 +37,9 @@ def test_doctor(self):
+         self.assertNotIn('TOKEN', out.getvalue())
+         self.assertIn('차단', out.getvalue())
+         with contextlib.redirect_stdout(io.StringIO()):
+-            self.assertEqual(run(config, runner, lambda n: '/fake', Mock(unknown_enabled=[])), 0)
++            self.assertEqual(run(config, runner, lambda n: '/fake', Mock(unknown_enabled=[], model='unknown')), 0)
+             self.home.chmod(0o755)
+-            self.assertEqual(run(config, runner, lambda n: '/fake', Mock(unknown_enabled=[])), 1)
++            self.assertEqual(run(config, runner, lambda n: '/fake', Mock(unknown_enabled=[], model='unknown')), 1)
+             self.assertEqual(self.home.stat().st_mode & 0o777, 0o755)
+             runner.reset_mock()
+             self.assertEqual(run(config, runner, lambda n: None), 1)
+@@ -67,7 +67,7 @@ def test_doctor_checks_skim_home_root_without_changing_permissions(self):
+         self.home.chmod(0o755)
+         with patch.dict(os.environ, SKIM_HOME=str(self.home)), contextlib.redirect_stdout(io.StringIO()):
+             runner = Mock(return_value=subprocess.CompletedProcess([], 0))
+-            self.assertEqual(run(config, runner, lambda n: '/fake', Mock(unknown_enabled=[])), 1)
++            self.assertEqual(run(config, runner, lambda n: '/fake', Mock(unknown_enabled=[], model='unknown')), 1)
+         self.assertEqual(self.home.stat().st_mode & 0o777, 0o755)
+ 
+     def test_doctor_skips_disappearing_files(self):
+@@ -82,7 +82,7 @@ def lstat(path):
+         with patch.object(Path, 'rglob', return_value=iter([missing])), patch.object(Path, 'lstat', lstat), contextlib.redirect_stdout(io.StringIO()):
+             runner = Mock(return_value=subprocess.CompletedProcess([], 0))
+             self.assertEqual(run(Config(self.home, self.home / 'absent'), runner,
+-                                 lambda n: '/fake', Mock(unknown_enabled=[])), 0)
++                                 lambda n: '/fake', Mock(unknown_enabled=[], model='unknown')), 0)
+ 
+     def test_doctor_timeout_and_auth_failure(self):
+         config = Config(self.home, self.home / 'absent')
+diff --git a/tests/test_web.py b/tests/test_web.py
+index cf3cae5..5bdc9c6 100644
+--- a/tests/test_web.py
++++ b/tests/test_web.py
+@@ -157,6 +157,10 @@ def test_demo_priority_filters_and_collapsed_units(self):
+         self.assertNotIn('결제 인증 경계', body)
+         self.assertNotIn('일반 API 응답 정리', self.request('/?review=1')[2])
+         body = self.request('/pr/1')[2]
++        with closing(connect(self.config)) as conn:
++            analysis = conn.execute('SELECT model, cli_version FROM analyses WHERE snapshot_id=1 ORDER BY id DESC LIMIT 1').fetchone()
++        self.assertIn('모델 ' + analysis['model'], body)
++        self.assertIn('Codex CLI ' + analysis['cli_version'], body)
+         self.assertIn('<details open><summary>auth/session.py', body)
+         self.assertIn('<details open><summary>.env', body)
+         self.assertIn('<details><summary>README.md', body)

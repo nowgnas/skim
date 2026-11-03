@@ -31,6 +31,14 @@ class ScaffoldTests(unittest.TestCase):
             code = main(args)
         return code, out.getvalue()
 
+    def test_cli_manual_and_scheduled_analysis_budget_policy(self):
+        with patch('skim.analyze.Analyzer') as analyzer:
+            analyzer.return_value.run.return_value = []
+            self.assertEqual(self.cli('analyze')[0], 0)
+            analyzer.return_value.run.assert_called_with(None, False, budgeted=False)
+            self.assertEqual(self.cli('analyze', '--automatic')[0], 0)
+            analyzer.return_value.run.assert_called_with(None, False, budgeted=True)
+
     def test_repository_and_policy_lifecycle(self):
         self.assertEqual(self.cli('repo', 'add', 'Org/Repo', '--source', 'managed')[0], 0)
         config = Config.load()

@@ -1,0 +1,936 @@
+diff --git a/README.md b/README.md
+index 88061ce..d1b0117 100644
+--- a/README.md
++++ b/README.md
+@@ -4,13 +4,15 @@
+ 
+ 설계: docs/01-design.md (작성 중)
+ 
+-## PR1 실행
++## 실행
+ 
+ Python 3.11 이상과 표준 라이브러리만 사용합니다.
+ 
+ ```bash
+ bin/skim repo add owner/repo --source responsible
+ bin/skim repo list
++bin/skim collect
++bin/skim repo list --candidates
+ bin/skim analysis allow --org owner
+ bin/skim analysis deny owner/repo
+ bin/skim analysis reset owner/repo
+@@ -29,10 +31,23 @@ PR·스냅샷·분석은 보존하며, 출처가 없어진 PR만 삭제합니다
+ 설정 파일은 `~/.config/skim/config.json`, DB는
+ `~/.local/share/skim/skim.db`입니다. `SKIM_HOME`을 지정하면 각각
+ `$SKIM_HOME/config/config.json`, `$SKIM_HOME/data/skim.db`를 사용합니다.
+-설정 기본값은 수집 간격 300초, 보존 기간 30일이며 실제 수집·보존 처리는
+-후속 구현에서 적용합니다. 전용 config/data 디렉터리는 0700이며 SKIM_HOME 자체의 기존 권한은 바꾸지 않습니다. 설정·DB·백업 파일은 0600입니다.
++설정 기본값은 수집 간격 300초, 보존 기간 30일입니다. 보존 기간에 따른 정리는 후속 구현입니다. 전용 config/data 디렉터리는 0700이며 SKIM_HOME 자체의 기존 권한은 바꾸지 않습니다. 설정·DB·백업 파일은 0600입니다.
+ DB 버전은 `PRAGMA user_version`으로 관리하고 기존 DB 변경 전에 백업합니다.
+ `SKIM_PYTHON`으로 래퍼가 사용할 Python 실행 파일을 지정할 수 있습니다.
+ 
+-`collect`, `analyze`, `web`, `doctor`는 현재 안내와 종료 코드 2를 반환하는
+-스텁입니다. PR1은 네트워크 조회나 모델 호출을 수행하지 않습니다.
++`collect`는 기존 `gh` 로그인으로 GitHub.com REST API의 GET만 호출합니다.
++등록 저장소의 열린 PR과 개인·팀 리뷰 요청을 중복 없이 수집합니다. 소유·관리
++권한 저장소는 `repo list --candidates`로 확인한 뒤 `repo add`로 선택합니다.
++후보와 리뷰 요청 저장소는 자동으로 전체 PR 추적이나 분석 전송을 허용하지 않습니다.
++SHA를 수집 전후 확인하고 설명·파일 목록·diff 해시를 스냅샷에 저장합니다.
++닫힘·머지 PR은 DB 상태를 갱신하고 활성 출처에서 제외하며, 해제된 리뷰 요청은
++다른 출처가 없으면 삭제합니다. 고아 diff 캐시도 정리합니다.
++요청 제한 시 재개 시각을 표시하고 기존 결과를 보존합니다.
++
++`CollectionScheduler`는 웹 프로세스의 루프에서 `tick(collector)`을 호출하는
++내장 도우미입니다. 주기 갱신과 `request()` 수동 갱신은 SQLite 작업 큐를 공유하고,
++실패 시 지수 백오프와 Retry-After/요청 제한 재개 시각을 적용합니다.
++`interval=config.poll_interval_seconds`를 전달하며 자체 데몬이나 스레드를 만들지 않습니다.
++현재 `analyze`, `web`, `doctor`는 종료 코드 2를 반환하는 스텁입니다.
++스냅샷의 `raw-v1` 입력 해시는 수집용이며, 후속 분석은 민감 정보 정제·분할 정책을
++적용한 별도 입력 해시를 만들어야 합니다. 실제 모델 호출은 구현하지 않았습니다.
+diff --git a/lib/skim/cli.py b/lib/skim/cli.py
+index 4061d7b..9a43187 100644
+--- a/lib/skim/cli.py
++++ b/lib/skim/cli.py
+@@ -1,4 +1,5 @@
+-"""네트워크를 사용하지 않는 초기 CLI."""
++"""로컬 설정과 읽기 전용 PR 수집 CLI."""
++from contextlib import nullcontext
+ import argparse
+ import re
+ import sqlite3
+@@ -27,7 +28,8 @@ def parser():
+     add = actions.add_parser('add')
+     add.add_argument('repository', type=repository)
+     add.add_argument('--source', choices=('owned', 'managed', 'responsible'), default='responsible')
+-    actions.add_parser('list')
++    listing = actions.add_parser('list')
++    listing.add_argument('--candidates', action='store_true', help='소유·관리 권한으로 발견한 미등록 후보')
+     remove = actions.add_parser('remove')
+     remove.add_argument('repository', type=repository)
+     analysis = commands.add_parser('analysis', help='모델 서비스 코드 전송 허용 관리')
+@@ -37,64 +39,77 @@ def parser():
+         group = p.add_mutually_exclusive_group(required=True)
+         group.add_argument('repository', type=repository, nargs='?')
+         group.add_argument('--org')
+-    for command in ('collect', 'analyze', 'web', 'doctor'):
++    commands.add_parser('collect', help='gh 로그인으로 PR 읽기 전용 수집')
++    for command in ('analyze', 'web', 'doctor'):
+         commands.add_parser(command, help='후속 PR에서 구현 예정')
+     return root
+ 
+ 
+ def main(argv=None):
+     args = parser().parse_args(argv)
+-    if args.command in ('collect', 'analyze', 'web', 'doctor'):
++    if args.command in ('analyze', 'web', 'doctor'):
+         print(f'{args.command}: 아직 구현되지 않았습니다.', file=sys.stderr)
+         return 2
+     try:
+         config = Config.load()
+         conn = connect(config)
+         try:
+-            with conn:
+-                if args.command == 'analysis' and args.action == 'allow':
+-                    print('허용된 코드가 선택한 LLM CLI의 모델 서비스로 전송될 수 있습니다.', flush=True)
+-                if args.command == 'repo':
+-                    if args.action == 'list':
+-                        print('저장소\t출처\t활성\t분석 정책\t분석 허용')
+-                        for row in conn.execute('SELECT * FROM repositories WHERE tracked=1 ORDER BY owner,name'):
+-                            print(f"{row['owner']}/{row['name']}\t{row['source']}\t{row['enabled']}\t"
+-                                  f"{row['analysis_policy']}\t{int(analysis_allowed(conn, row['id']))}")
+-                    elif args.action == 'add':
+-                        conn.execute('INSERT INTO repositories(owner,name,source,tracked) VALUES(?,?,?,1) '
+-                                     'ON CONFLICT(owner,name) DO UPDATE SET source=excluded.source,enabled=1,tracked=1',
+-                                     (*args.repository, args.source))
+-                        print('저장소를 등록했습니다. 분석은 별도 허용이 필요합니다.')
++            if args.command == 'collect':
++                from .collect import Collector
++                count = Collector(conn, config).collect()
++                print(f'PR {count}개를 수집했습니다.')
++                return 0
++            from .collect import Collector
++            collector = Collector(conn, config)
++            removing = args.command == 'repo' and args.action == 'remove'
++            with collector.lock() if removing else nullcontext():
++                with conn:
++                    if args.command == 'analysis' and args.action == 'allow':
++                        print('허용된 코드가 선택한 LLM CLI의 모델 서비스로 전송될 수 있습니다.', flush=True)
++                    if args.command == 'repo':
++                        if args.action == 'list':
++                            print('저장소\t출처\t활성\t분석 정책\t분석 허용')
++                            condition = "tracked=0 AND source IN ('owned','managed')" if args.candidates else 'tracked=1'
++                            for row in conn.execute('SELECT * FROM repositories WHERE ' + condition + ' ORDER BY owner,name'):
++                                print(f"{row['owner']}/{row['name']}\t{row['source']}\t{row['enabled']}\t"
++                                      f"{row['analysis_policy']}\t{int(analysis_allowed(conn, row['id']))}")
++                        elif args.action == 'add':
++                            conn.execute('INSERT INTO repositories(owner,name,source,tracked) VALUES(?,?,?,1) '
++                                         'ON CONFLICT(owner,name) DO UPDATE SET source=excluded.source,enabled=1,tracked=1',
++                                         (*args.repository, args.source))
++                            print('저장소를 등록했습니다. 분석은 별도 허용이 필요합니다.')
++                        else:
++                            result = conn.execute('UPDATE repositories SET tracked=0 WHERE owner=? AND name=? AND tracked=1',
++                                                  args.repository)
++                            if not result.rowcount:
++                                raise ValueError('등록되지 않은 저장소입니다')
++                            # 리뷰 요청 출처와 그 스냅샷·분석은 추적 해제 후에도 보존한다.
++                            conn.execute("DELETE FROM pr_sources WHERE source='repository' AND pr_id IN "
++                                         '(SELECT p.id FROM pull_requests p JOIN repositories r ON r.id=p.repo_id '
++                                         'WHERE r.owner=? AND r.name=?)', args.repository)
++                            conn.execute('DELETE FROM pull_requests WHERE repo_id IN '
++                                         '(SELECT id FROM repositories WHERE owner=? AND name=?) '
++                                         'AND NOT EXISTS (SELECT 1 FROM pr_sources WHERE pr_id=pull_requests.id)',
++                                         args.repository)
++                            print('저장소 추적을 해제했습니다.')
++                    elif args.org is not None:
++                        if not re.fullmatch(OWNER_PATTERN, args.org):
++                            raise ValueError('잘못된 조직 이름입니다')
++                        if args.action == 'reset':
++                            conn.execute('DELETE FROM organization_policies WHERE owner=?', (args.org,))
++                        else:
++                            conn.execute('INSERT INTO organization_policies VALUES(?,?) '
++                                         'ON CONFLICT(owner) DO UPDATE SET policy=excluded.policy', (args.org, args.action))
++                        print('조직 분석 정책을 변경했습니다.')
+                     else:
+-                        result = conn.execute('UPDATE repositories SET tracked=0 WHERE owner=? AND name=? AND tracked=1',
+-                                              args.repository)
++                        policy = 'inherit' if args.action == 'reset' else args.action
++                        result = conn.execute('UPDATE repositories SET analysis_policy=? WHERE owner=? AND name=?',
++                                              (policy, *args.repository))
+                         if not result.rowcount:
+                             raise ValueError('등록되지 않은 저장소입니다')
+-                        # 리뷰 요청 출처와 그 스냅샷·분석은 추적 해제 후에도 보존한다.
+-                        conn.execute("DELETE FROM pr_sources WHERE source='repository' AND pr_id IN "
+-                                     '(SELECT p.id FROM pull_requests p JOIN repositories r ON r.id=p.repo_id '
+-                                     'WHERE r.owner=? AND r.name=?)', args.repository)
+-                        conn.execute('DELETE FROM pull_requests WHERE repo_id IN '
+-                                     '(SELECT id FROM repositories WHERE owner=? AND name=?) '
+-                                     'AND NOT EXISTS (SELECT 1 FROM pr_sources WHERE pr_id=pull_requests.id)',
+-                                     args.repository)
+-                        print('저장소 추적을 해제했습니다.')
+-                elif args.org is not None:
+-                    if not re.fullmatch(OWNER_PATTERN, args.org):
+-                        raise ValueError('잘못된 조직 이름입니다')
+-                    if args.action == 'reset':
+-                        conn.execute('DELETE FROM organization_policies WHERE owner=?', (args.org,))
+-                    else:
+-                        conn.execute('INSERT INTO organization_policies VALUES(?,?) '
+-                                     'ON CONFLICT(owner) DO UPDATE SET policy=excluded.policy', (args.org, args.action))
+-                    print('조직 분석 정책을 변경했습니다.')
+-                else:
+-                    policy = 'inherit' if args.action == 'reset' else args.action
+-                    result = conn.execute('UPDATE repositories SET analysis_policy=? WHERE owner=? AND name=?',
+-                                          (policy, *args.repository))
+-                    if not result.rowcount:
+-                        raise ValueError('등록되지 않은 저장소입니다')
+-                    print('저장소 분석 정책을 변경했습니다.')
++                        print('저장소 분석 정책을 변경했습니다.')
++                if removing:
++                    collector.clean_cache()
+         finally:
+             conn.close()
+     except (OSError, ValueError, sqlite3.Error) as exc:
+diff --git a/lib/skim/collect.py b/lib/skim/collect.py
+new file mode 100644
+index 0000000..90fb240
+--- /dev/null
++++ b/lib/skim/collect.py
+@@ -0,0 +1,332 @@
++"""기존 gh 인증으로 읽기 전용 수집과 프로세스 내 작업 예약을 수행한다."""
++import fcntl
++import os
++import tempfile
++import threading
++from contextlib import contextmanager
++import hashlib
++import json
++import re
++import subprocess
++import time
++from datetime import datetime, timezone
++from email.utils import parsedate_to_datetime
++from urllib.parse import urlencode
++
++from .config import private_dir, private_file
++
++
++class CollectionError(ValueError):
++    """원문 CLI 출력을 노출하지 않는 수집 오류."""
++
++
++def error_message(exc):
++    # 예상하지 못한 예외의 원문에는 응답이나 비밀값이 포함될 수 있다.
++    if isinstance(exc, CollectionError):
++        return str(exc)
++    if isinstance(exc, OSError):
++        return '네트워크·파일 접근 실패: 연결과 로컬 저장소를 확인하세요'
++    return '수집 내부 오류: 응답 형식과 로컬 DB를 확인하세요'
++
++
++class Inaccessible(CollectionError):
++    """삭제되었거나 현재 인증으로 접근할 수 없는 PR."""
++
++
++class Deferred(CollectionError):
++    def __init__(self, retry_at):
++        self.retry_at = retry_at
++        super().__init__(f'GitHub 요청 제한: 요청을 {datetime.fromtimestamp(retry_at, timezone.utc).isoformat()} 이후 재개합니다')
++
++
++class GitHub:
++    def __init__(self, runner=None, clock=time.time):
++        self.runner = runner or subprocess.run
++        self.clock = clock
++        self.not_before = 0
++
++    def get(self, endpoint, *, diff=False):
++        if self.clock() < self.not_before:
++            raise Deferred(self.not_before)
++        command = ['gh', 'api', '--hostname', 'github.com', '--method', 'GET', '--include', endpoint]
++        if diff:
++            command += ['-H', 'Accept: application/vnd.github.diff']
++        try:
++            result = self.runner(command, capture_output=True, text=True, timeout=120)
++        except (OSError, subprocess.TimeoutExpired) as exc:
++            raise CollectionError('gh 실행·연결 실패: 설치와 네트워크 연결을 확인하세요') from exc
++        raw = result.stdout
++        headers = {}
++        status = 200
++        if raw.startswith('HTTP/'):
++            separator = '\r\n\r\n' if '\r\n\r\n' in raw else '\n\n'
++            block, _, raw = raw.partition(separator)
++            status = int(block.splitlines()[0].split()[1])
++            headers = {k.lower(): v.strip() for line in block.splitlines()[1:]
++                       if ':' in line for k, v in [line.split(':', 1)]}
++        delay = 0
++        if 'retry-after' in headers:
++            try:
++                delay = float(headers['retry-after'])
++            except ValueError:
++                delay = parsedate_to_datetime(headers['retry-after']).timestamp() - self.clock()
++        if headers.get('x-ratelimit-remaining') == '0':
++            delay = max(delay, float(headers.get('x-ratelimit-reset', self.clock() + 60)) - self.clock())
++        if status == 429 or (status == 403 and delay):
++            delay = max(delay, 60)
++        if delay > 0:
++            self.not_before = self.clock() + delay
++        if result.returncode or status >= 400:
++            if self.not_before > self.clock():
++                raise Deferred(self.not_before)
++            if status == 404:
++                raise Inaccessible('GitHub 접근 불가: 저장소 삭제 또는 접근 권한을 확인하세요')
++            if status in (401, 403):
++                raise CollectionError('GitHub 인증·권한 실패: gh auth login과 저장소 권한을 확인하세요')
++            raise CollectionError('GitHub 조회 실패: 네트워크 연결과 GitHub 상태를 확인하세요')
++        return raw if diff else json.loads(raw)
++
++    def pages(self, endpoint, **params):
++        items = []
++        for page in range(1, 10001):
++            payload = self.get(endpoint + '?' + urlencode(dict(params, per_page=100, page=page)))
++            if isinstance(payload, dict):
++                if payload.get('incomplete_results') or payload.get('total_count', 0) > 1000:
++                    raise CollectionError('리뷰 요청 검색이 불완전하여 기존 결과를 보존합니다')
++                batch = payload['items']
++            else:
++                batch = payload
++            items.extend(batch)
++            if len(batch) < 100:
++                return items
++        raise CollectionError('페이지 한도를 초과했습니다')
++
++
++def repo_parts(full_name):
++    if not re.fullmatch(r'[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?/[A-Za-z0-9_.-]+', full_name):
++        raise CollectionError('잘못된 GitHub 저장소 이름입니다')
++    owner, name = full_name.split('/')
++    if name in ('.', '..'):
++        raise CollectionError('잘못된 GitHub 저장소 이름입니다')
++    return owner, name
++
++
++class Collector:
++    def __init__(self, conn, config, runner=None, clock=time.time):
++        self.conn, self.config = conn, config
++        self.gh = GitHub(runner, clock)
++        self._mutex = threading.RLock()
++        self._lock_depth = 0
++
++    @contextmanager
++    def lock(self):
++        # 수집·추적 해제·캐시 정리는 같은 프로세스 간 잠금을 공유한다.
++        with self._mutex:
++            if self._lock_depth:
++                self._lock_depth += 1
++                try:
++                    yield
++                finally:
++                    self._lock_depth -= 1
++                return
++            path = self.config.data_dir / 'collection.lock'
++            private_file(path)
++            with path.open('r+') as handle:
++                fcntl.flock(handle, fcntl.LOCK_EX)
++                self._lock_depth = 1
++                try:
++                    yield
++                finally:
++                    self._lock_depth = 0
++                    fcntl.flock(handle, fcntl.LOCK_UN)
++
++    def collect(self):
++        with self.lock():
++            return self._collect()
++
++    def _collect(self):
++        gh, conn = self.gh, self.conn
++        login = gh.get('user')['login']
++        discovered = gh.pages('user/repos', affiliation='owner,organization_member,collaborator')
++        candidates = []
++        for repo in discovered:
++            owned = repo['owner']['login'].lower() == login.lower()
++            if owned or repo.get('permissions', {}).get('admin'):
++                candidates.append((*repo_parts(repo['full_name']), 'owned' if owned else 'managed'))
++        targets = {}
++        names = {}
++        listing_failures = []
++        for row in conn.execute('SELECT * FROM repositories WHERE tracked=1 AND enabled=1'):
++            full = row['owner'] + '/' + row['name']
++            names[full.lower()] = full
++            try:
++                for pr in gh.pages(f'repos/{full}/pulls', state='open'):
++                    targets.setdefault((full.lower(), pr['number']), set()).add('repository')
++            except Exception as exc:
++                listing_failures.append(exc)
++                # 목록 조회 실패를 PR 삭제·출처 해제로 오인하지 않는다.
++                for previous in conn.execute("SELECT p.number FROM pull_requests p JOIN pr_sources s ON s.pr_id=p.id WHERE p.repo_id=? AND p.state='open' AND s.source='repository'", (row['id'],)):
++                    targets.setdefault((full.lower(), previous['number']), set()).add('repository')
++        queries = [f'is:open is:pr review-requested:{login}']
++        for team in gh.pages('user/teams'):
++            queries.append(f"is:open is:pr team-review-requested:{team['organization']['login']}/{team['slug']}")
++        for query in queries:
++            for item in gh.pages('search/issues', q=query):
++                full = '/'.join(item['repository_url'].split('/')[-2:])
++                repo_parts(full)
++                names.setdefault(full.lower(), full)
++                targets.setdefault((full.lower(), item['number']), set()).add('review_request')
++        # 목록에서 사라진 PR도 상세 조회하여 닫힘·머지를 구분한다.
++        old = {(r['owner'].lower() + '/' + r['name'].lower(), r['number']) for r in conn.execute(
++            "SELECT r.owner,r.name,p.number FROM pull_requests p JOIN repositories r ON p.repo_id=r.id WHERE p.state='open'")}
++        for r in conn.execute("SELECT owner,name FROM repositories"):
++            names.setdefault((r['owner'] + '/' + r['name']).lower(), r['owner'] + '/' + r['name'])
++        collected = []
++        failures = []
++        for (full, number) in sorted(set(targets) | old):
++            endpoint = f'repos/{full}/pulls/{int(number)}'
++            try:
++                for attempt in range(2):
++                    pr = gh.get(endpoint)
++                    # 저장 단계까지 잘못된 응답이 흘러가 다른 PR을 막지 않게 검증한다.
++                    for value in (pr['title'], pr['user']['login'], pr['head']['ref'],
++                                  pr['head']['sha'], pr['base']['sha'], pr['updated_at']):
++                        if not isinstance(value, str):
++                            raise CollectionError('GitHub PR 응답 형식이 잘못되었습니다')
++                    if pr['state'] not in ('open', 'closed'):
++                        raise CollectionError('GitHub PR 상태가 잘못되었습니다')
++                    state = 'merged' if pr.get('merged_at') else pr['state']
++                    snapshot = None
++                    if state == 'open' and (full, number) in targets:
++                        files = gh.pages(endpoint + '/files')
++                        if len(files) != pr.get('changed_files', len(files)):
++                            raise CollectionError('GitHub 파일 목록이 불완전하여 기존 결과를 보존합니다')
++                        diff = gh.get(endpoint, diff=True)
++                        after = gh.get(endpoint)
++                        if (pr['head']['sha'], pr['base']['sha']) != (after['head']['sha'], after['base']['sha']) or after['state'] != 'open':
++                            if attempt == 0:
++                                continue
++                            raise CollectionError('수집 도중 PR이 변경되어 기존 스냅샷을 보존합니다')
++                        snapshot = (files, diff)
++                    collected.append((full, number, pr, state, snapshot))
++                    break
++            except Exception as exc:
++                failures.append((full, number, exc))
++        now = datetime.now(timezone.utc).isoformat()
++        cache = private_dir(self.config.data_dir / 'cache' / 'diffs')
++        # 성공한 PR만 교체하고 실패한 PR의 스냅샷과 출처는 보존한다.
++        with conn:
++            conn.execute("UPDATE repositories SET source='responsible' WHERE tracked=0 AND source IN ('owned','managed')")
++            conn.executemany('INSERT INTO repositories(owner,name,source) VALUES(?,?,?) ON CONFLICT(owner,name) DO UPDATE SET source=excluded.source WHERE repositories.tracked=0', candidates)
++            for key, number, pr, state, snapshot in collected:
++                full = names[key]
++                conn.execute('INSERT INTO repositories(owner,name) VALUES(?,?) ON CONFLICT(owner,name) DO NOTHING', repo_parts(full))
++                repo_id = conn.execute('SELECT id FROM repositories WHERE owner=? AND name=?', repo_parts(full)).fetchone()[0]
++                conn.execute('INSERT INTO pull_requests(repo_id,number,url,title,body,author,state,draft,head_branch,base_sha,head_sha,updated_at,last_seen_at) '
++                             'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(repo_id,number) DO UPDATE SET '
++                             'url=excluded.url,title=excluded.title,body=excluded.body,author=excluded.author,state=excluded.state,draft=excluded.draft,'
++                             'head_branch=excluded.head_branch,base_sha=excluded.base_sha,head_sha=excluded.head_sha,updated_at=excluded.updated_at,last_seen_at=excluded.last_seen_at',
++                             (repo_id, number, f'https://github.com/{full}/pull/{number}', pr['title'], pr.get('body') or '', pr['user']['login'], state,
++                              int(pr.get('draft', False)), pr['head']['ref'], pr['base']['sha'], pr['head']['sha'], pr['updated_at'], now))
++                pr_id = conn.execute('SELECT id FROM pull_requests WHERE repo_id=? AND number=?', (repo_id, number)).fetchone()[0]
++                conn.execute('DELETE FROM pr_sources WHERE pr_id=?', (pr_id,))
++                for source in targets.get((key, number), ()):
++                    if state == 'open':
++                        conn.execute('INSERT INTO pr_sources VALUES(?,?)', (pr_id, source))
++                if snapshot:
++                    files, diff = snapshot
++                    diff_hash = hashlib.sha256(diff.encode()).hexdigest()
++                    material = dict(title=pr['title'], body=pr.get('body') or '', files=files, diff=diff, policy='raw-v1')
++                    input_hash = hashlib.sha256(json.dumps(material, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
++                    path = cache / (diff_hash + '.diff')
++                    fd, temporary = tempfile.mkstemp(dir=cache, suffix='.tmp')
++                    try:
++                        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
++                            handle.write(diff)
++                        os.replace(temporary, path)
++                    finally:
++                        if os.path.exists(temporary):
++                            os.unlink(temporary)
++                    existing = conn.execute('SELECT 1 FROM snapshots WHERE pr_id=? AND base_sha=? AND head_sha=? AND input_hash=?',
++                                            (pr_id, pr['base']['sha'], pr['head']['sha'], input_hash)).fetchone()
++                    if existing:
++                        for row in conn.execute('SELECT id,coverage FROM snapshots WHERE pr_id=? AND base_sha=? AND head_sha=? AND input_hash=?',
++                                                (pr_id, pr['base']['sha'], pr['head']['sha'], input_hash)):
++                            coverage = json.loads(row['coverage'])
++                            coverage.pop('collection_error', None)
++                            coverage['status'] = 'collected'
++                            conn.execute('UPDATE snapshots SET coverage=? WHERE id=?', (json.dumps(coverage, ensure_ascii=False), row['id']))
++                    else:
++                        coverage = json.dumps(dict(files=files, status='collected', policy='raw-v1'), ensure_ascii=False)
++                        conn.execute('INSERT INTO snapshots(pr_id,base_sha,head_sha,diff_hash,input_hash,diff_path,coverage) VALUES(?,?,?,?,?,?,?)',
++                                     (pr_id, pr['base']['sha'], pr['head']['sha'], diff_hash, input_hash, str(path), coverage))
++            for full, number, exc in failures:
++                row = conn.execute('SELECT p.id FROM pull_requests p JOIN repositories r ON p.repo_id=r.id WHERE r.owner=? AND r.name=? AND p.number=?',
++                                   (*repo_parts(full), number)).fetchone()
++                if row:
++                    for snapshot in conn.execute('SELECT id,coverage FROM snapshots WHERE pr_id=?', (row['id'],)):
++                        coverage = json.loads(snapshot['coverage'])
++                        coverage.update(status='inaccessible' if isinstance(exc, Inaccessible) else 'incomplete', collection_error=error_message(exc))
++                        conn.execute('UPDATE snapshots SET coverage=? WHERE id=?', (json.dumps(coverage, ensure_ascii=False), snapshot['id']))
++            conn.execute("DELETE FROM pull_requests WHERE state='open' AND NOT EXISTS (SELECT 1 FROM pr_sources WHERE pr_id=pull_requests.id)")
++            conn.execute('UPDATE repositories SET last_synced_at=? WHERE tracked=1 AND enabled=1', (now,))
++        self.clean_cache()
++        deferred = [exc.retry_at for exc in listing_failures + [f[2] for f in failures] if isinstance(exc, Deferred)]
++        if deferred:
++            raise Deferred(max(deferred))
++        if listing_failures:
++            raise CollectionError('저장소 목록 수집 실패: ' + error_message(listing_failures[0]))
++        if failures:
++            raise CollectionError(f'PR {len(failures)}개 수집 실패: ' + error_message(failures[0][2]))
++        return len(targets)
++
++    def clean_cache(self):
++        with self.lock():
++            self._clean_cache()
++
++    def _clean_cache(self):
++        live = {r[0] for r in self.conn.execute('SELECT diff_path FROM snapshots WHERE diff_path IS NOT NULL')}
++        for path in (self.config.data_dir / 'cache' / 'diffs').glob('*.diff'):
++            if str(path) not in live:
++                path.unlink()
++
++
++class CollectionScheduler:
++    """웹 루프에서 tick을 호출한다. 수동 갱신도 동일한 SQLite 큐를 쓴다."""
++    def __init__(self, conn, interval=300, clock=time.time):
++        self.conn, self.interval, self.clock = conn, interval, clock
++        self.next_poll = 0
++
++    def request(self):
++        with self.conn:
++            self.conn.execute("INSERT OR IGNORE INTO jobs(type,target_id) VALUES('collect',0)")
++
++    def tick(self, collector):
++        with collector.lock():
++            # 잠금을 확보했으므로 이전 running 작업을 실행하는 수집기는 없다.
++            # 프로세스 중단·DB 기록 실패 후에도 다음 tick에서 복구한다.
++            with self.conn:
++                self.conn.execute("UPDATE jobs SET status='pending',next_run_at=NULL,last_error='중단된 수집 작업을 복구했습니다' WHERE type='collect' AND status='running'")
++            return self._tick(collector)
++
++    def _tick(self, collector):
++        now = self.clock()
++        if now >= self.next_poll:
++            self.request()
++            self.next_poll = now + self.interval
++        stamp = datetime.fromtimestamp(now, timezone.utc).isoformat()
++        with self.conn:
++            row = self.conn.execute("UPDATE jobs SET status='running',attempts=attempts+1 WHERE id=(SELECT id FROM jobs WHERE type='collect' AND status='pending' AND (next_run_at IS NULL OR next_run_at<=?) ORDER BY id LIMIT 1) RETURNING id,attempts", (stamp,)).fetchone()
++        if row is None:
++            return False
++        try:
++            collector.collect()
++        except Exception as exc:
++            retry = exc.retry_at if isinstance(exc, Deferred) else now + min(3600, 30 * 2 ** min(row['attempts'] - 1, 7))
++            with self.conn:
++                self.conn.execute("UPDATE jobs SET status='pending',next_run_at=?,last_error=? WHERE id=?",
++                                  (datetime.fromtimestamp(retry, timezone.utc).isoformat(), error_message(exc), row['id']))
++        else:
++            with self.conn:
++                self.conn.execute("UPDATE jobs SET status='completed',last_error=NULL WHERE id=?", (row['id'],))
++        return True
+diff --git a/progress.md b/progress.md
+index 9235d72..b712613 100644
+--- a/progress.md
++++ b/progress.md
+@@ -19,3 +19,16 @@
+ 
+ - 설계·진행 기록과 Sessio CLI 래퍼를 확인했다. 요청의 TASK가 비어 있어 추가 구현은 범위 확인 후 진행한다.
+ - 기존 unittest 8개가 모두 통과했다. 실제 LLM·네트워크 호출, GitHub 쓰기, 커밋은 수행하지 않았다.
++
++## PR2 — 2026-10-31
++
++- gh REST GET 전용 수집과 `skim collect`를 구현했다. 명시적 추적 저장소·개인/팀 리뷰 요청을 중복 제거하고, 소유·관리 저장소는 자동 추적하지 않는 후보로 발견한다(`repo list --candidates`).
++- 수집 전후 SHA 검증, 파일 목록·diff·입력 해시 스냅샷, 닫힘/머지 상태 및 리뷰 요청 출처 조정, 고아 diff 정리를 추가했다. 불완전한 조회는 기존 결과를 보존한다.
++- Retry-After·rate limit과 지수 백오프를 적용하고, 주기/수동 수집이 SQLite 큐를 공유하는 프로세스 내 스케줄러 도우미를 구현했다. 분석 전 정제용 해시는 후속 분석 구현에서 별도로 생성한다.
++- 가짜 gh runner로 unittest 18개가 모두 통과했고 `git diff --check`도 통과했다. 실제 네트워크·LLM 호출, GitHub 쓰기, 커밋은 하지 않았다.
++
++## PR2 리뷰 수정 — 2026-10-31
++
++- PR별 조회 실패를 격리해 다른 PR 갱신·닫힘·리뷰 해제를 계속 반영하며, 실패한 기존 스냅샷·출처를 보존하고 coverage에 불완전/접근 불가 사유를 기록한다. 닫힌 PR은 재조회하지 않고, 저장소 목록 조회 실패도 출처 삭제로 오인하지 않는다.
++- 수집·추적 해제·캐시 정리에 공통 프로세스 잠금을 적용하고 diff는 임시 파일 후 원자적으로 교체한다. 잠금을 확보한 tick에서 중단된 running 작업을 복구하고 예상 밖 예외도 재시도 처리한다.
++- 저장소 대소문자 보존, 관리 권한을 잃은 후보 해제, 인증·요청 제한·연결 오류 안내를 보완했다. 실제 네트워크·LLM 없이 unittest 27개와 git diff --check가 통과했다. GitHub 쓰기와 커밋은 하지 않았다.
+diff --git a/tests/test_collect.py b/tests/test_collect.py
+new file mode 100644
+index 0000000..f9e20e3
+--- /dev/null
++++ b/tests/test_collect.py
+@@ -0,0 +1,367 @@
++"""실제 gh나 네트워크 호출 없이 수집 계약을 검증한다."""
++import contextlib
++import io
++import json
++import os
++from pathlib import Path
++import sqlite3
++import subprocess
++import sys
++import tempfile
++import unittest
++from unittest.mock import patch
++from urllib.parse import parse_qs, urlsplit
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))
++from skim.collect import Collector, GitHub, Deferred, CollectionError, CollectionScheduler
++from skim.config import Config
++from skim.db import connect
++from skim.cli import main
++
++
++class FakeGH:
++    def __init__(self):
++        self.calls = []
++        self.state = 'open'
++        self.head = 'head1'
++        self.body = '설명'
++        self.personal = True
++        self.team = True
++        self.race = 0
++        self.fail = False
++        self.review_repo = 'outside'
++        self.file_count = 1
++
++    def __call__(self, command, **kwargs):
++        self.calls.append(command)
++        assert command[:7] == ['gh', 'api', '--hostname', 'github.com', '--method', 'GET', '--include']
++        assert kwargs == dict(capture_output=True, text=True, timeout=120)
++        endpoint = command[7]
++        url = urlsplit(endpoint)
++        path, query = url.path, parse_qs(url.query)
++        if self.fail:
++            return subprocess.CompletedProcess(command, 1, '', '비밀 원문')
++        if path == 'user':
++            value = {'login': 'me'}
++        elif path == 'user/repos':
++            value = [{'full_name': 'org/candidate', 'owner': {'login': 'org'}, 'permissions': {'admin': True}}]
++        elif path == 'user/teams':
++            value = [{'organization': {'login': 'org'}, 'slug': 'team'}]
++        elif path == 'search/issues':
++            active = self.team if 'team-review-requested' in query['q'][0] else self.personal
++            value = dict(total_count=int(active), incomplete_results=False, items=[dict(repository_url='https://api.github.com/repos/org/' + self.review_repo, number=1 if self.review_repo == 'repo' else 2)] if active else [])
++        elif path.endswith('/pulls'):
++            value = [{'number': 1}] if self.state == 'open' else []
++        elif path.endswith('/files'):
++            value = [{'filename': 'a.py', 'status': 'modified'}]
++        elif '-H' in command:
++            if self.race:
++                self.head += 'x'
++                self.race -= 1
++            return subprocess.CompletedProcess(command, 0, 'HTTP/2.0 200 OK\r\n\r\ndiff --git a/a.py b/a.py\n+변경\n', '')
++        else:
++            value = dict(title='제목', body=self.body, state='open' if self.state == 'merged' else self.state,
++                         merged_at='2026-01-01' if self.state == 'merged' else None,
++                         user={'login': 'me'}, head={'sha': self.head, 'ref': 'branch'}, base={'sha': 'base'},
++                         updated_at='2026-10-31T00:00:00Z', draft=False, changed_files=self.file_count)
++        return subprocess.CompletedProcess(command, 0, 'HTTP/2.0 200 OK\r\nX-RateLimit-Remaining: 500\r\n\r\n' + json.dumps(value), '')
++
++
++class CollectionTests(unittest.TestCase):
++    def setUp(self):
++        temp = tempfile.TemporaryDirectory()
++        self.addCleanup(temp.cleanup)
++        env = patch.dict(os.environ, SKIM_HOME=temp.name)
++        env.start()
++        self.addCleanup(env.stop)
++        self.config = Config.load()
++        self.conn = connect(self.config)
++        self.addCleanup(self.conn.close)
++        with self.conn:
++            self.conn.execute("INSERT INTO repositories(owner,name,tracked) VALUES('org','repo',1)")
++        self.fake = FakeGH()
++        self.collector = Collector(self.conn, self.config, self.fake)
++
++    def count(self, table):
++        return self.conn.execute('SELECT count(*) FROM ' + table).fetchone()[0]
++
++    def test_collect_dedupe_candidates_and_snapshots(self):
++        self.assertEqual(self.collector.collect(), 2)
++        self.assertEqual(self.count('pull_requests'), 2)
++        self.assertEqual(self.count('snapshots'), 2)
++        candidate = self.conn.execute("SELECT * FROM repositories WHERE name='candidate'").fetchone()
++        self.assertEqual((candidate['tracked'], candidate['source']), (0, 'managed'))
++        outside = self.conn.execute("SELECT * FROM repositories WHERE name='outside'").fetchone()
++        self.assertEqual(outside['tracked'], 0)
++        self.assertFalse(any('repos/org/candidate/pulls' in c[7] for c in self.fake.calls))
++        self.collector.collect()
++        self.assertEqual(self.count('snapshots'), 2)
++        self.fake.body = '수정 설명'
++        self.collector.collect()
++        self.assertEqual(self.count('snapshots'), 4)
++        for row in self.conn.execute('SELECT * FROM snapshots'):
++            self.assertEqual(Path(row['diff_path']).stat().st_mode & 0o777, 0o600)
++            self.assertIn('변경', Path(row['diff_path']).read_text())
++            self.assertEqual(len(row['input_hash']), 64)
++            self.assertEqual(json.loads(row['coverage'])['files'][0]['filename'], 'a.py')
++
++    def test_review_removal_and_closed_merged(self):
++        self.collector.collect()
++        self.fake.personal = False
++        self.collector.collect()
++        self.assertEqual(self.count('pull_requests'), 2)  # 팀 요청이 남아 있다.
++        self.fake.team = False
++        self.collector.collect()
++        self.assertEqual(self.count('pull_requests'), 1)
++        self.fake.state = 'merged'
++        self.collector.collect()
++        self.assertEqual(self.conn.execute('SELECT state FROM pull_requests').fetchone()[0], 'merged')
++        self.assertEqual(self.count('pr_sources'), 0)
++        self.fake.state = 'closed'
++        self.collector.collect()
++        self.assertEqual(self.conn.execute('SELECT state FROM pull_requests').fetchone()[0], 'merged')
++
++    def test_race_retry_and_failure_preserves_data(self):
++        self.fake.race = 1
++        self.collector.collect()
++        self.assertEqual({r[0] for r in self.conn.execute('SELECT head_sha FROM snapshots')}, {'head1x'})
++        self.fake.race = 2
++        with self.assertRaises(CollectionError):
++            self.collector.collect()
++        self.assertEqual(self.count('snapshots'), 3)  # 다른 PR은 계속 갱신한다.
++        self.fake.fail = True
++        with self.assertRaises(CollectionError) as raised:
++            self.collector.collect()
++        self.assertNotIn('비밀', str(raised.exception))
++        self.assertEqual(self.count('pr_sources'), 2)
++
++    def test_scheduler_shared_queue_and_backoff(self):
++        now = [1000]
++        scheduler = CollectionScheduler(self.conn, 300, lambda: now[0])
++        scheduler.request()
++        scheduler.request()
++        self.assertEqual(self.count('jobs'), 1)
++        self.fake.fail = True
++        self.assertTrue(scheduler.tick(self.collector))
++        self.assertFalse(scheduler.tick(self.collector))
++        self.fake.fail = False
++        now[0] += 31
++        self.assertTrue(scheduler.tick(self.collector))
++        self.assertEqual(self.conn.execute('SELECT status FROM jobs').fetchone()[0], 'completed')
++        self.assertFalse(scheduler.tick(self.collector))
++        now[0] += 300
++        self.assertTrue(scheduler.tick(self.collector))
++
++    def test_cli_uses_injected_subprocess(self):
++        with patch('skim.collect.subprocess.run', self.fake), contextlib.redirect_stdout(io.StringIO()) as out:
++            self.assertEqual(main(['collect']), 0)
++        self.assertIn('2개', out.getvalue())
++
++    def test_repository_and_review_sources_and_candidate_cli(self):
++        self.fake.review_repo = 'repo'
++        self.collector.collect()
++        self.assertEqual(self.count('pull_requests'), 1)
++        self.assertEqual(self.count('pr_sources'), 2)
++        with contextlib.redirect_stdout(io.StringIO()) as out:
++            self.assertEqual(main(['repo', 'list', '--candidates']), 0)
++        self.assertIn('org/candidate', out.getvalue())
++        self.assertNotIn('org/repo', out.getvalue())
++        with contextlib.redirect_stdout(io.StringIO()):
++            self.assertEqual(main(['repo', 'remove', 'org/repo']), 0)
++        self.assertEqual(self.count('snapshots'), 1)
++        self.fake.personal = self.fake.team = False
++        self.collector.collect()
++        self.assertEqual(self.count('pull_requests'), 0)
++        self.assertEqual(list((self.config.data_dir / 'cache/diffs').glob('*.diff')), [])
++
++    def test_incomplete_files_preserve_previous_snapshot(self):
++        self.collector.collect()
++        self.fake.file_count = 3001
++        with self.assertRaises(CollectionError):
++            self.collector.collect()
++        self.assertEqual(self.count('snapshots'), 2)
++
++    def test_per_pr_http_failures_keep_snapshot_and_allow_reconciliation(self):
++        for status in (404, 403, 406):
++            with self.subTest(status=status):
++                self.fake.personal = self.fake.team = True
++                self.fake.state = 'open'
++                self.collector.gh.runner = self.fake
++                self.collector.collect()
++                before = self.conn.execute("SELECT s.* FROM snapshots s JOIN pull_requests p ON p.id=s.pr_id WHERE p.number=2").fetchone()
++                original = Path(before['diff_path']).read_bytes()
++                def runner(command, **kwargs):
++                    if command[7] == 'repos/org/outside/pulls/2':
++                        return subprocess.CompletedProcess(command, 1, f'HTTP/2.0 {status} Error\n\n{{}}', '비밀')
++                    return self.fake(command, **kwargs)
++                self.collector.gh.runner = runner
++                self.fake.state = 'closed'
++                with self.assertRaises(CollectionError):
++                    self.collector.collect()
++                states = {r['number']: r['state'] for r in self.conn.execute('SELECT number,state FROM pull_requests')}
++                self.assertEqual(states, {1: 'closed', 2: 'open'})
++                coverage = json.loads(self.conn.execute('SELECT coverage FROM snapshots WHERE id=?', (before['id'],)).fetchone()[0])
++                self.assertEqual(coverage['status'], 'inaccessible' if status == 404 else 'incomplete')
++                self.assertNotIn('비밀', coverage['collection_error'])
++                self.assertEqual(Path(before['diff_path']).read_bytes(), original)
++                self.assertEqual(self.count('pr_sources'), 1)
++        self.collector.gh.runner = self.fake
++        self.fake.state = 'open'
++        self.collector.collect()
++        coverage = json.loads(self.conn.execute('SELECT coverage FROM snapshots WHERE id=?', (before['id'],)).fetchone()[0])
++        self.assertEqual(coverage['status'], 'collected')
++        self.assertNotIn('collection_error', coverage)
++
++    def test_closed_pr_is_not_requested_again(self):
++        self.fake.personal = self.fake.team = False
++        self.collector.collect()
++        self.fake.state = 'closed'
++        self.collector.collect()
++        self.fake.calls.clear()
++        self.collector.collect()
++        self.assertFalse(any(c[7] == 'repos/org/repo/pulls/1' for c in self.fake.calls))
++
++    def test_malformed_pr_does_not_prevent_review_removal(self):
++        self.collector.collect()
++        self.fake.personal = self.fake.team = False
++        def runner(command, **kwargs):
++            if command[7] == 'repos/org/repo/pulls/1':
++                return subprocess.CompletedProcess(command, 0, '{}', '')
++            return self.fake(command, **kwargs)
++        self.collector.gh.runner = runner
++        with self.assertRaises(CollectionError):
++            self.collector.collect()
++        self.assertEqual(self.count('pull_requests'), 1)
++        coverage = json.loads(self.conn.execute('SELECT coverage FROM snapshots').fetchone()[0])
++        self.assertEqual(coverage['status'], 'incomplete')
++
++    def test_deleted_tracked_repo_does_not_block_other_pr(self):
++        self.collector.collect()
++        self.fake.body = '새 설명'
++        def runner(command, **kwargs):
++            if command[7].startswith('repos/org/repo/'):
++                return subprocess.CompletedProcess(command, 1, 'HTTP/2.0 404 Error\n\n{}', '')
++            return self.fake(command, **kwargs)
++        self.collector.gh.runner = runner
++        with self.assertRaises(CollectionError):
++            self.collector.collect()
++        self.assertEqual(self.count('snapshots'), 3)
++        self.assertEqual(self.count('pr_sources'), 2)
++
++    def test_failed_repository_listing_preserves_repository_source(self):
++        self.collector.collect()
++        def runner(command, **kwargs):
++            if command[7].startswith('repos/org/repo/pulls?'):
++                return subprocess.CompletedProcess(command, 1, 'HTTP/2.0 403 Error\n\n{}', '')
++            return self.fake(command, **kwargs)
++        self.collector.gh.runner = runner
++        with self.assertRaises(CollectionError):
++            self.collector.collect()
++        self.assertEqual(self.count('pull_requests'), 2)
++        self.assertEqual(self.count('pr_sources'), 2)
++
++    def test_case_preserved_and_lost_candidate_removed(self):
++        self.fake.review_repo = 'MixedCase'
++        self.collector.collect()
++        row = self.conn.execute("SELECT r.name,p.url FROM repositories r JOIN pull_requests p ON p.repo_id=r.id WHERE r.name='mixedcase'").fetchone()
++        self.assertEqual(row['name'], 'MixedCase')
++        self.assertIn('/org/MixedCase/pull/', row['url'])
++        original = self.fake
++        def runner(command, **kwargs):
++            if command[7].startswith('user/repos?'):
++                return subprocess.CompletedProcess(command, 0, '[]', '')
++            return original(command, **kwargs)
++        self.collector.gh.runner = runner
++        self.collector.collect()
++        self.assertEqual(self.conn.execute("SELECT source FROM repositories WHERE name='candidate'").fetchone()[0], 'responsible')
++
++    def test_scheduler_recovers_crashed_job_and_unexpected_errors(self):
++        now = [1000]
++        scheduler = CollectionScheduler(self.conn, clock=lambda: now[0])
++        scheduler.request()
++        with self.conn:
++            self.conn.execute("UPDATE jobs SET status='running'")
++        for exc in (KeyError('비밀'), TypeError('비밀'), sqlite3.OperationalError('비밀')):
++            with self.subTest(exc=type(exc).__name__):
++                with patch.object(self.collector, 'collect', side_effect=exc):
++                    self.assertTrue(scheduler.tick(self.collector))
++                row = self.conn.execute('SELECT * FROM jobs').fetchone()
++                self.assertEqual(row['status'], 'pending')
++                self.assertNotIn('비밀', row['last_error'])
++                now[0] += 400
++        self.assertTrue(scheduler.tick(self.collector))
++        self.assertEqual(self.conn.execute('SELECT status FROM jobs').fetchone()[0], 'completed')
++
++    def test_scheduler_recovers_even_if_failure_record_could_not_be_saved(self):
++        scheduler = CollectionScheduler(self.conn, clock=lambda: 1000)
++        with self.conn:
++            self.conn.execute("CREATE TRIGGER fail_pending BEFORE UPDATE ON jobs WHEN NEW.status='pending' BEGIN SELECT RAISE(FAIL,'DB 실패'); END")
++        with patch.object(self.collector, 'collect', side_effect=ValueError('오류')):
++            with self.assertRaises(sqlite3.Error):
++                scheduler.tick(self.collector)
++        self.assertEqual(self.conn.execute('SELECT status FROM jobs').fetchone()[0], 'running')
++        with self.conn:
++            self.conn.execute('DROP TRIGGER fail_pending')
++        self.assertTrue(scheduler.tick(self.collector))
++        self.assertEqual(self.conn.execute('SELECT status FROM jobs').fetchone()[0], 'completed')
++
++    def test_atomic_diff_replacement_and_process_lock(self):
++        self.collector.collect()
++        path = Path(self.conn.execute('SELECT diff_path FROM snapshots').fetchone()[0])
++        with path.open() as reader:
++            old_inode = os.fstat(reader.fileno()).st_ino
++            self.collector.collect()
++            self.assertNotEqual(old_inode, path.stat().st_ino)
++            self.assertEqual(reader.read(), path.read_text())
++        original = path.read_bytes()
++        with patch('skim.collect.os.replace', side_effect=OSError('교체 실패')):
++            with self.assertRaises(OSError):
++                self.collector.collect()
++        self.assertEqual(path.read_bytes(), original)
++        self.assertFalse(list(path.parent.glob('*.tmp')))
++        code = "import fcntl,sys; f=open(sys.argv[1]); fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)"
++        with self.collector.lock():
++            result = subprocess.run([sys.executable, '-c', code, str(self.config.data_dir / 'collection.lock')], capture_output=True)
++            self.assertNotEqual(result.returncode, 0)
++        result = subprocess.run([sys.executable, '-c', code, str(self.config.data_dir / 'collection.lock')], capture_output=True)
++        self.assertEqual(result.returncode, 0)
++
++    def test_rate_limit_and_retry_after(self):
++        for headers, code, expected in [('Retry-After: 120', 429, 1120),
++                                        ('X-RateLimit-Remaining: 0\nX-RateLimit-Reset: 1300', 403, 1300),
++                                        ('Retry-After: Thu, 01 Jan 1970 00:20:00 GMT', 429, 1200)]:
++            runner = lambda command, **kw: subprocess.CompletedProcess(command, 1, f'HTTP/2.0 {code} Error\n{headers}\n\n{{}}', '')
++            gh = GitHub(runner, lambda: 1000)
++            with self.assertRaises(Deferred) as raised:
++                gh.get('user')
++            self.assertEqual(raised.exception.retry_at, expected)
++            with self.assertRaises(Deferred):
++                gh.get('user')
++
++    def test_successful_last_request_defers_following_call_and_preserves_diff(self):
++        calls = []
++        def runner(command, **kwargs):
++            calls.append(command)
++            return subprocess.CompletedProcess(command, 0,
++                'HTTP/2.0 200 OK\r\nX-RateLimit-Remaining: 0\r\nX-RateLimit-Reset: 1300\r\n\r\n+line\r\n', '')
++        gh = GitHub(runner, lambda: 1000)
++        self.assertEqual(gh.get('repos/org/repo/pulls/1', diff=True), '+line\r\n')
++        with self.assertRaises(Deferred):
++            gh.get('user')
++        self.assertEqual(len(calls), 1)
++
++    def test_pagination_and_incomplete_search(self):
++        seen = []
++        def runner(command, **kwargs):
++            seen.append(command[7])
++            page = int(parse_qs(urlsplit(command[7]).query)['page'][0])
++            return subprocess.CompletedProcess(command, 0, json.dumps([{}] * (100 if page == 1 else 1)), '')
++        self.assertEqual(len(GitHub(runner).pages('user/repos')), 101)
++        self.assertIn('page=2', seen[1])
++        runner = lambda c, **kw: subprocess.CompletedProcess(c, 0, json.dumps(dict(total_count=1001, items=[])), '')
++        with self.assertRaises(CollectionError):
++            GitHub(runner).pages('search/issues', q='is:pr')
++
++
++if __name__ == '__main__':
++    unittest.main()
+diff --git a/tests/test_scaffold.py b/tests/test_scaffold.py
+index b307bb5..a1fd789 100644
+--- a/tests/test_scaffold.py
++++ b/tests/test_scaffold.py
+@@ -91,7 +91,7 @@ def test_wrapper_symlink_and_stubs(self):
+         link.symlink_to(ROOT / 'bin/skim')
+         result = subprocess.run([str(link), 'repo', 'add', 'a/b'], capture_output=True, text=True, cwd='/tmp')
+         self.assertEqual(result.returncode, 0, result.stderr)
+-        for command in ('collect', 'analyze', 'web', 'doctor'):
++        for command in ('analyze', 'web', 'doctor'):
+             self.assertEqual(self.cli(command)[0], 2)
+ 
+     def test_review_request_survives_untracking(self):

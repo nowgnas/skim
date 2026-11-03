@@ -1,0 +1,309 @@
+diff --git a/README.md b/README.md
+index 90606ce..560daec 100644
+--- a/README.md
++++ b/README.md
+@@ -79,3 +79,24 @@ SHA를 수집 전후 확인하고 설명·파일 목록·diff 해시를 스냅
+ 구분하며 모델이 `unknown`이면 영속 결과를 재사용하지 않습니다. 수집용 원문
+ 해시는 coverage에 별도로 보존해 분석 뒤 재수집도 중복 스냅샷을 만들지 않습니다.
+ 실제 LLM·네트워크를 호출하는 테스트는 없습니다.
++
++## Sessio 연결
++
++PR 상세에서 로컬 Sessio 인덱스의 저장소·브랜치 후보가 정확히 하나일 때
++`gh api user`로 현재 로그인 사용자를 확인합니다. PR 작성자와 일치하면
++세션 ID와 링크를 표시합니다. 인증 실패·인덱스 누락/손상·복수 후보는 표시하지
++않으며 `web --offline`에서는 조회와 표시를 모두 생략합니다.
++
++인덱스 기본 경로는 `$SESSIO_HOME/index/sessions.jsonl`이며,
++`SESSIO_HOME`이 없으면 `~/.sessio/index/sessions.jsonl`입니다.
++skim의 `config.json`에서 `sessio_index_path`로 경로를 변경할 수 있습니다.
++`sessio_web_url` 기본값은 `http://127.0.0.1:8765/`입니다.
++Sessio가 다른 포트에서 실행되면 `http://localhost:8766/`처럼 설정합니다.
++HTTP의 `127.0.0.1` 또는 `localhost`와 명시적 포트·루트 경로만 허용하며,
++토큰·query·fragment는 설정에 넣지 않습니다. Sessio 웹 인증은 해당 앱에서
++먼저 진행해야 합니다.
++
++Sessio의 실제 인덱스는 보통 저장소 이름만 기록하므로 그 이름과 정확한
++브랜치를 비교합니다(전체 `owner/repo` 값도 지원). 동일 이름의 저장소를
++여러 소유자 아래 사용하면 인덱스의 이름만으로 소유자를 구별할 수 없습니다.
++인덱스의 임의 URL은 사용하지 않고 검증한 harness·세션 ID로 링크를 생성합니다.
+diff --git a/docs/04-web.md b/docs/04-web.md
+index 12614d5..5693dd8 100644
+--- a/docs/04-web.md
++++ b/docs/04-web.md
+@@ -18,7 +18,10 @@ URL을 공유하지 않으며, 초기 진입 셸에는 PR 데이터를 포함하
+ 판정 근거를 확인하고, 전체 원본 diff 또는 GitHub 변경 화면으로 이동할 수 있다.
+ 이전 SHA 결과, 분석 실패·차단·부분 분석, 수집 오류를 별도로 표시한다.
+ 원본 diff에는 분석에서 제외한 민감 정보가 있을 수 있으므로 인증 후에만 표시한다.
+-Sessio 인덱스 연동은 아직 구현하지 않아 세션 링크를 생성하지 않는다.
++Sessio 인덱스에서 저장소·브랜치 후보가 정확히 하나이며 현재 gh 사용자와
++PR 작성자가 일치할 때 상세 화면에 세션 링크·ID를 표시한다. 경로와 로컬
++웹 주소는 `sessio_index_path`, `sessio_web_url` 설정으로 지정한다.
++`--offline`에서는 Sessio 사용자 조회와 링크 표시를 생략한다.
+ 
+ 수동 새로고침은 수집 작업을 SQLite 큐에 넣는다. 내장 워커는 설정된 간격으로
+ 같은 큐를 점유해 수집하고 허용된 최신 스냅샷을 분석한다. Codex 격리 계약이
+diff --git a/lib/skim/config.py b/lib/skim/config.py
+index 24d637b..2df2f7f 100644
+--- a/lib/skim/config.py
++++ b/lib/skim/config.py
+@@ -24,6 +24,8 @@ class Config:
+     data_dir: Path
+     poll_interval_seconds: int = 300
+     retention_days: int = 30
++    sessio_index_path: Path | None = None
++    sessio_web_url: str = 'http://127.0.0.1:8765/'
+ 
+     @classmethod
+     def load(cls):
+@@ -53,6 +55,16 @@ def load(cls):
+             values[name] = value
+         for name in ("cache", "logs"):
+             private_dir(data_dir / name)
++        index = settings.get('sessio_index_path')
++        if index is not None and (not isinstance(index, str) or not index):
++            raise ValueError('sessio_index_path 설정은 비어 있지 않은 경로여야 합니다')
++        values['sessio_index_path'] = (Path(index).expanduser() if index else
++                                      Path(os.environ.get('SESSIO_HOME', '~/.sessio')).expanduser() / 'index/sessions.jsonl')
++        url = settings.get('sessio_web_url', 'http://127.0.0.1:8765/')
++        from .sessio import valid_base_url
++        if not valid_base_url(url):
++            raise ValueError('sessio_web_url 설정은 로컬 Sessio HTTP 주소여야 합니다')
++        values['sessio_web_url'] = url
+         return cls(config_dir, data_dir, **values)
+ 
+     @property
+diff --git a/lib/skim/sessio.py b/lib/skim/sessio.py
+new file mode 100644
+index 0000000..4c5c018
+--- /dev/null
++++ b/lib/skim/sessio.py
+@@ -0,0 +1,55 @@
++"""Sessio JSONL 인덱스를 읽기 전용으로 조회한다."""
++import json
++import re
++from urllib.parse import quote, urlsplit
++
++from .collect import GitHub, CollectionError
++
++
++def valid_base_url(value):
++    # 사용자 정보·토큰·외부 호스트·임의 경로를 링크에 섞지 않는다.
++    if not isinstance(value, str) or not re.fullmatch(r'http://(?:127\.0\.0\.1|localhost):[0-9]+/', value):
++        return False
++    try:
++        return 1 <= urlsplit(value).port <= 65535
++    except ValueError:
++        return False
++
++
++def session_link(config, pr):
++    """후보가 하나이고 현재 gh 사용자 본인의 PR일 때만 (ID, URL)을 반환한다."""
++    if not pr.get('author') or not pr.get('head_branch') or not config.sessio_index_path:
++        return None
++    if not valid_base_url(config.sessio_web_url):
++        return None
++    matches = []
++    try:
++        with config.sessio_index_path.open(encoding='utf-8') as stream:
++            for line in stream:
++                if not line.strip():
++                    continue
++                row = json.loads(line)
++                if not isinstance(row, dict):
++                    return None
++                # Sessio의 repo는 remote_name()으로 만든 저장소 이름이다.
++                repo = row.get('repo')
++                if isinstance(repo, str) and repo.lower() in (pr['name'].lower(), f"{pr['owner']}/{pr['name']}".lower()) and row.get('branch') == pr['head_branch']:
++                    matches.append(row)
++                    if len(matches) > 1:
++                        return None
++    except (OSError, UnicodeError, ValueError):
++        # 손상된 인덱스에서 모호한 후보를 임의로 선택하지 않는다.
++        return None
++    if len(matches) != 1:
++        return None
++    row = matches[0]
++    sid, harness = row.get('session_id'), row.get('harness')
++    if harness not in ('codex', 'claude') or not isinstance(sid, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,199}', sid):
++        return None
++    try:
++        login = GitHub().get('user').get('login')
++    except (CollectionError, OSError, ValueError, TypeError, AttributeError):
++        return None
++    if not isinstance(login, str) or not login or login.lower() != pr['author'].lower():
++        return None
++    return sid, config.sessio_web_url + '#/s/' + quote(harness + ':' + sid, safe='')
+diff --git a/lib/skim/web.py b/lib/skim/web.py
+index 5f50791..980c4c4 100644
+--- a/lib/skim/web.py
++++ b/lib/skim/web.py
+@@ -20,6 +20,7 @@
+ from .db import connect
+ from .collect import Collector, CollectionScheduler
+ from .analyze.units import parse_diff
++from .sessio import session_link
+ 
+ CSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'"
+ STATIC = Path(__file__).with_name('web_static')
+@@ -162,12 +163,16 @@ def github(pr):
+     return None
+ 
+ 
+-def detail(pr, query, config):
++def detail(pr, query, config, offline=False):
+     a, s = pr['analysis'], pr['snapshot']
+     content = f'<p><a href="/">← PR 목록</a></p><h1>{esc(pr["title"])}</h1>'
+     link = github(pr)
+     if link:
+         content += f'<p><a href="{esc(link)}" rel="noreferrer">GitHub 원문 ↗</a></p>'
++    session = None if offline else session_link(config, pr)
++    if session:
++        sid, url = session
++        content += f'<p><a href="{esc(url)}" rel="noreferrer">Sessio · {esc(sid)} ↗</a></p>'
+     content += f'<article><h2>의도</h2><p>{esc(a["intent"] if a and a["intent"] else "미분석 — 분석 결과가 없습니다.")}</p><h2>위험 요약</h2><p>{badges(pr)}</p><p>{esc(pr["status"])} {esc(a["error"] if a else "")}</p>'
+     if s:
+         coverage = json.loads(s['coverage'])
+@@ -273,7 +278,7 @@ def do_GET(self):
+                     pr = next((p for p in prs if match and p['id'] == int(match[1])), None)
+                     if pr is None:
+                         return self.reply(404, 'PR이 없습니다')
+-                    body = detail(pr, parse_qs(url.query), self.server.config)
++                    body = detail(pr, parse_qs(url.query), self.server.config, getattr(self.server, 'offline', False))
+         self.reply(200, page('대시보드', body))
+ 
+     def do_POST(self):
+@@ -355,6 +360,7 @@ def serve(config, port=0, open_browser=True, offline=False):
+         with closing(connect(config)):
+             pass
+         with Server(config, port) as server, socket.socket(socket.AF_UNIX) as control:
++            server.offline = offline
+             path.unlink(missing_ok=True)
+             # bind 시점에도 소켓이 공개되지 않도록 umask를 제한한다.
+             mask = os.umask(0o177)
+diff --git a/progress.md b/progress.md
+index 019e89e..df16140 100644
+--- a/progress.md
++++ b/progress.md
+@@ -65,3 +65,8 @@
+ - Sessio와 어울리는 어두운 서버 렌더링 목록·필터·상세 화면, 규칙 후보·미분석·high 우선 펼침, mid/low 접힘, 이전 SHA·수집/분석 상태, 전체 diff·GitHub 링크와 수동 갱신 큐·내장 워커를 추가했다.
+ - 외부 통신 없는 가짜 데이터 생성기 `scripts/demo_seed.py`, `web --offline`, 한국어 사용 문서를 추가했다. HTTP 루프백 쿠키는 Secure 없이 정확한 Origin 검사를 사용하며, 브라우저별 Secure 동작과 Sessio 인덱스 연동은 미검증·미구현으로 문서에 명시했다.
+ - 메모리 HTTP 연결과 fake 모델·소켓으로 unittest 80개 및 `git diff --check`가 통과했다. 실제 LLM·외부 네트워크·GitHub 쓰기·커밋은 수행하지 않았다.
++
++## PR5 — 2026-10-31
++
++- Sessio 코드의 `index/sessions.jsonl`·저장소 이름·브랜치·웹 라우트 형식을 확인하고, 설정 가능한 인덱스 경로와 로컬 웹 주소로 PR 상세 연결을 추가했다. 단일 후보이며 현재 gh 사용자와 작성자가 일치할 때만 링크·세션 ID를 표시한다.
++- 인덱스 누락/손상·복수 후보·인증 실패·잘못된 링크는 숨기며 offline에서는 외부 조회를 하지 않는다. fixture 인덱스와 fake gh로 unittest 83개가 통과했다. 실제 LLM·네트워크 호출, GitHub 쓰기와 커밋은 하지 않았다.
+diff --git a/tests/fixtures/sessio.jsonl b/tests/fixtures/sessio.jsonl
+new file mode 100644
+index 0000000..c9d77b0
+--- /dev/null
++++ b/tests/fixtures/sessio.jsonl
+@@ -0,0 +1,2 @@
++{"harness":"codex","session_id":"abc-123","repo":"checkout","branch":"feature/payment"}
++{"harness":"claude","session_id":"other-456","repo":"another","branch":"feature/payment"}
+diff --git a/tests/test_sessio.py b/tests/test_sessio.py
+new file mode 100644
+index 0000000..b844e1f
+--- /dev/null
++++ b/tests/test_sessio.py
+@@ -0,0 +1,56 @@
++"""가짜 gh와 로컬 fixture만으로 Sessio 연결을 검증한다."""
++import json
++import os
++from pathlib import Path
++import sys
++import tempfile
++import unittest
++from unittest.mock import patch
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))
++from skim.config import Config
++from skim.collect import CollectionError
++from skim.sessio import session_link, valid_base_url
++
++
++class SessioTests(unittest.TestCase):
++    def test_matching_and_invalid_index(self):
++        fixture = Path(__file__).parent / 'fixtures/sessio.jsonl'
++        rows = [json.loads(line) for line in fixture.read_text().splitlines()]
++        pr = dict(owner='demo', name='checkout', head_branch='feature/payment', author='me')
++        with tempfile.TemporaryDirectory() as tmp:
++            path = Path(tmp) / 'sessions.jsonl'
++            config = Config(Path(tmp), Path(tmp), sessio_index_path=path)
++            with patch('skim.sessio.GitHub.get', return_value={'login': 'ME'}) as gh:
++                for data in ['', 'invalid', '[]', json.dumps(rows[1]), '\n'.join(map(json.dumps, [rows[0], rows[0]])), json.dumps(rows[0]) + '\ninvalid']:
++                    path.write_text(data)
++                    self.assertIsNone(session_link(config, pr))
++                gh.assert_not_called()
++                path.write_text(fixture.read_text())
++                self.assertEqual(session_link(config, pr)[0], 'abc-123')
++                self.assertIsNone(session_link(config, dict(pr, head_branch='other')))
++                self.assertIsNone(session_link(config, dict(pr, name='different')))
++                for field, value in [('session_id', '../bad'), ('session_id', '<script>'), ('session_id', 'bad#id'), ('harness', 'unknown')]:
++                    path.write_text(json.dumps(dict(rows[0], **{field: value})))
++                    self.assertIsNone(session_link(config, pr))
++            path.write_text(fixture.read_text())
++            with patch('skim.sessio.GitHub.get', side_effect=CollectionError('인증 실패')):
++                self.assertIsNone(session_link(config, pr))
++            path.unlink()
++            self.assertIsNone(session_link(config, pr))
++
++    def test_config_and_link_validation(self):
++        for url in ['javascript:alert(1)', 'https://evil.test/', 'http://127.0.0.1:8765@evil.test/', 'http://127.0.0.1:8765/?t=secret', 'http://localhost:0/', 'http://localhost:99999/', 'http://localhost:8765/#bad', 'http://localhost:8765/\n']:
++            self.assertFalse(valid_base_url(url), url)
++        self.assertTrue(valid_base_url('http://localhost:8766/'))
++        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, SKIM_HOME=tmp, SESSIO_HOME=tmp + '/sessio'):
++            config = Config.load()
++            self.assertEqual(config.sessio_index_path, Path(tmp) / 'sessio/index/sessions.jsonl')
++            settings = config.config_dir / 'config.json'
++            settings.write_text(json.dumps(dict(sessio_index_path=tmp + '/custom.jsonl', sessio_web_url='http://localhost:8766/')))
++            config = Config.load()
++            self.assertEqual(config.sessio_index_path, Path(tmp) / 'custom.jsonl')
++            self.assertEqual(config.sessio_web_url, 'http://localhost:8766/')
++            settings.write_text('{"sessio_web_url":"https://evil.test/"}')
++            with self.assertRaises(ValueError):
++                Config.load()
+diff --git a/tests/test_web.py b/tests/test_web.py
+index 50fa8cd..cf3cae5 100644
+--- a/tests/test_web.py
++++ b/tests/test_web.py
+@@ -1,5 +1,6 @@
+ """실제 소켓·네트워크·모델 없이 HTTP와 데모 fixture를 검증한다."""
+ import io
++from dataclasses import replace
+ from contextlib import closing, redirect_stdout
+ import json
+ import os
+@@ -39,7 +40,7 @@ def setUp(self):
+         env = patch.dict(os.environ, SKIM_HOME=self.temp.name)
+         env.start()
+         self.addCleanup(env.stop)
+-        self.config = Config.load()
++        self.config = replace(Config.load(), sessio_index_path=Path(self.temp.name) / 'sessions.jsonl')
+         self.now = 10
+         self.auth = Auth(clock=lambda: self.now)
+         self.server = SimpleNamespace(config=self.config, auth=self.auth,
+@@ -84,6 +85,22 @@ def test_token_ttl_one_use_and_restart(self):
+         self.assertIsNone(Auth().csrf(self.cookie))
+         self.assertIsNone(self.auth.csrf(self.auth.cookie + '=한글'))
+ 
++    def test_sessio_detail_uses_fixture_and_current_user(self):
++        self.config.sessio_index_path.write_text((ROOT / 'tests/fixtures/sessio.jsonl').read_text())
++        with closing(connect(self.config)) as conn, conn:
++            conn.execute("UPDATE pull_requests SET author='Me',head_branch='feature/payment' WHERE id=1")
++        with patch('skim.sessio.GitHub.get', return_value={'login': 'me'}) as gh:
++            body = self.request('/pr/1')[2]
++            self.assertIn('Sessio · abc-123', body)
++            self.assertIn('http://127.0.0.1:8765/#/s/codex%3Aabc-123', body)
++            gh.assert_called_once_with('user')
++            self.assertNotIn('Sessio', self.request('/')[2])
++        with patch('skim.sessio.GitHub.get', return_value={'login': 'someone-else'}):
++            self.assertNotIn('Sessio', self.request('/pr/1')[2])
++        self.server.offline = True
++        with patch('skim.sessio.GitHub.get', side_effect=AssertionError('외부 실행 금지')):
++            self.assertNotIn('Sessio', self.request('/pr/1')[2])
++
+     def test_entry_has_no_data_and_session_cookie(self):
+         code, headers, body = self.request('/entry', authenticated=False)
+         self.assertEqual(code, 200)

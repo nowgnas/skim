@@ -1,0 +1,565 @@
+"""정식 릴리스 설치의 신뢰 경계를 임시 파일로 검증한다."""
+import io
+import hashlib
+import json
+import os
+import sqlite3
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing, redirect_stdout, redirect_stderr
+from types import SimpleNamespace
+from unittest.mock import patch
+import tarfile
+import tempfile
+from urllib.request import Request
+from pathlib import Path
+import unittest
+
+from skim import maintenance, program_store, release_package, releases, update_backup
+
+
+class UpdateCommandTests(unittest.TestCase):
+    def test_no_release_does_not_touch_configuration(self):
+        from skim import cli
+        output = io.StringIO()
+        with patch('skim.releases.fetch_latest_authenticated', return_value=None), \
+                patch('skim.cli.Config.load', side_effect=AssertionError('설정 변경 금지')), redirect_stdout(output):
+            self.assertEqual(cli.main(['update']), 0)
+        self.assertIn('정식 릴리스가 없습니다', output.getvalue())
+
+    def test_release_exists_does_not_claim_update(self):
+        from skim import cli
+        output, errors = io.StringIO(), io.StringIO()
+        with patch('skim.releases.fetch_latest_authenticated', return_value=SimpleNamespace(tag='v1.2.3')), \
+                redirect_stdout(output), redirect_stderr(errors):
+            self.assertEqual(cli.main(['update']), 1)
+        self.assertIn('v1.2.3', output.getvalue())
+        self.assertIn('아직 준비 중', errors.getvalue())
+
+    def test_auth_failure_is_reported(self):
+        from skim import cli
+        errors = io.StringIO()
+        with patch('skim.releases.fetch_latest_authenticated', side_effect=releases.ReleaseUnavailable('인증 확인')), \
+                redirect_stderr(errors):
+            self.assertEqual(cli.main(['update', '--check']), 1)
+        self.assertIn('인증 확인', errors.getvalue())
+
+
+class ReleaseTests(unittest.TestCase):
+    def release(self, tag='v1.2.3'):
+        names = ('skim-macos.tar.gz', 'SHA256SUMS', 'manifest.json', 'install.sh')
+        return {'tag_name': tag, 'draft': False, 'prerelease': False,
+                'assets': [{'id': i, 'name': n, 'browser_download_url': 'https://github.com/nowgnas/skim/releases/download/' + tag + '/' + n} for i, n in enumerate(names, 1)]}
+
+    def archive(self, name, data=b'content', kind=tarfile.REGTYPE):
+        output = io.BytesIO()
+        with tarfile.open(fileobj=output, mode='w:gz') as tar:
+            info = tarfile.TarInfo(name)
+            info.type = kind
+            info.size = len(data) if kind == tarfile.REGTYPE else 0
+            tar.addfile(info, io.BytesIO(data) if info.size else None)
+        return output.getvalue()
+
+    def package_archive(self, manifest):
+        output = io.BytesIO()
+        files = {'skim/manifest.json': manifest, 'skim/bin/skim': b'#!/bin/sh\n',
+                 'skim/lib/python.sh': b'# helper\n', 'skim/lib/skim/__init__.py': b'',
+                 'skim/lib/skim/cli.py': b'', 'skim/lib/skim/web.py': b''}
+        with tarfile.open(fileobj=output, mode='w:gz') as tar:
+            for name, data in files.items():
+                info = tarfile.TarInfo(name)
+                info.mode = 0o755 if name == 'skim/bin/skim' else 0o644
+                info.size = len(data)
+                tar.addfile(info, io.BytesIO(data))
+        return output.getvalue()
+
+    def test_happy_path_release_metadata(self):
+        selected = releases.parse_release(self.release())
+        self.assertEqual(selected.version, (1, 2, 3))
+        self.assertEqual(selected.tag, 'v1.2.3')
+
+    def test_invalid_release_metadata(self):
+        for update in ({'draft': True}, {'prerelease': True}, {'tag_name': 'v1.2.3-rc1'}, {'assets': []}):
+            data = self.release()
+            data.update(update)
+            with self.subTest(update=update), self.assertRaises(ValueError):
+                releases.parse_release(data)
+
+    def test_invalid_release_archive(self):
+        for name, kind in (('../outside', tarfile.REGTYPE), ('/absolute', tarfile.REGTYPE), ('link', tarfile.SYMTYPE)):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory, self.assertRaises(ValueError):
+                releases.extract_archive(self.archive(name, kind=kind), Path(directory))
+
+    def test_invalid_release_pax_decompression_limit(self):
+        output = io.BytesIO()
+        with tarfile.open(fileobj=output, mode='w:gz', format=tarfile.PAX_FORMAT) as archive:
+            info = tarfile.TarInfo('skim/file')
+            info.pax_headers = {'comment': 'x' * 131072}
+            archive.addfile(info)
+        with patch.object(releases, 'MAX_EXPANDED_BYTES', 32768):
+            with tempfile.TemporaryDirectory() as directory, self.assertRaises(ValueError):
+                releases.extract_archive(output.getvalue(), Path(directory))
+            with tempfile.TemporaryDirectory() as directory:
+                releases.extract_archive(self.archive('skim/file'), Path(directory))
+
+    def test_happy_path_archive(self):
+        with tempfile.TemporaryDirectory() as directory:
+            releases.extract_archive(self.archive('skim/bin/skim'), Path(directory))
+            self.assertEqual((Path(directory) / 'skim/bin/skim').read_bytes(), b'content')
+
+    def test_happy_path_checksums(self):
+        metadata = self.release()
+        selected = releases.parse_release(metadata)
+        payloads = {'skim-macos.tar.gz': b'archive', 'manifest.json': json.dumps({'version': 'v1.2.3', 'archive': 'skim-macos.tar.gz'}).encode(), 'install.sh': b'install'}
+        sums = ''.join(hashlib.sha256(value).hexdigest() + '  ' + name + '\n' for name, value in payloads.items()).encode()
+        releases.verify_payload(selected, sums, payloads)
+
+    def test_happy_path_staging(self):
+        selected = releases.parse_release(self.release())
+        manifest = json.dumps({'version': selected.tag, 'archive': 'skim-macos.tar.gz'}).encode()
+        archive = self.package_archive(manifest)
+        payloads = {'skim-macos.tar.gz': archive, 'manifest.json': manifest, 'install.sh': b'install'}
+        sums = ''.join(hashlib.sha256(value).hexdigest() + '  ' + name + '\n' for name, value in payloads.items()).encode()
+        payloads['SHA256SUMS'] = sums
+        with tempfile.TemporaryDirectory() as directory:
+            releases.stage_release(selected, Path(directory), lambda release, name, limit: payloads[name])
+            self.assertEqual((Path(directory) / 'skim/manifest.json').read_bytes(), manifest)
+
+    def test_invalid_release_missing_program(self):
+        selected = releases.parse_release(self.release())
+        manifest = json.dumps({'version': selected.tag, 'archive': 'skim-macos.tar.gz'}).encode()
+        payloads = {'skim-macos.tar.gz': self.archive('skim/manifest.json', manifest),
+                    'manifest.json': manifest, 'install.sh': b'install'}
+        payloads['SHA256SUMS'] = ''.join(hashlib.sha256(value).hexdigest() + '  ' + name + '\n' for name, value in payloads.items()).encode()
+        with tempfile.TemporaryDirectory() as directory, self.assertRaises(ValueError):
+            releases.stage_release(selected, Path(directory), lambda release, name, limit: payloads[name])
+
+    def test_invalid_release_checksums(self):
+        selected = releases.parse_release(self.release())
+        payloads = {'skim-macos.tar.gz': b'archive', 'manifest.json': b'{}', 'install.sh': b'install'}
+        with self.assertRaises(ValueError):
+            releases.verify_payload(selected, b'0' * 64 + b'  skim-macos.tar.gz\n', payloads)
+
+    def test_invalid_release_redirect(self):
+        for url in ('http://github.com/path', 'https://evil.example/path', 'https://github.com@evil.example/path'):
+            with self.subTest(url=url), self.assertRaises(ValueError):
+                releases.check_download_url(url)
+
+    def test_invalid_release_redirect_strips_credentials(self):
+        original = Request('https://api.github.com/repos/nowgnas/skim/releases/assets/1', headers={'Authorization': 'Bearer private-token'})
+        redirected = releases.SafeRedirect().redirect_request(original, None, 302, 'Found', {}, 'https://release-assets.githubusercontent.com/file')
+        self.assertIsNone(redirected.get_header('Authorization'))
+
+    def test_happy_path_private_asset(self):
+        selected = releases.parse_release(self.release())
+        class Response:
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+            def read(self, limit):
+                return b'data'
+        class Opener:
+            def open(self, req, timeout):
+                self.assertions(req, timeout)
+                return Response()
+            def assertions(self, req, timeout):
+                assert req.full_url == 'https://api.github.com/repos/nowgnas/skim/releases/assets/1'
+                assert req.get_header('Authorization') == 'Bearer sample-token'
+        runner = lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout='sample-token\n')
+        self.assertEqual(releases.download_private_asset(selected, 'skim-macos.tar.gz', 10, runner, Opener()), b'data')
+
+    def test_invalid_release_private_asset_error_hides_token(self):
+        selected = releases.parse_release(self.release())
+        def runner(*args, **kwargs):
+            raise OSError('sample-secret')
+        with self.assertRaises(releases.ReleaseUnavailable) as raised:
+            releases.download_private_asset(selected, 'skim-macos.tar.gz', 10, runner)
+        self.assertNotIn('sample-secret', str(raised.exception))
+
+    def test_happy_path_latest_release(self):
+        class FakeGitHub:
+            def get(inner, endpoint):
+                return [self.release()]
+        version = releases.fetch_latest_authenticated(FakeGitHub())
+        self.assertEqual(version.tag, 'v1.2.3')
+
+    def test_release_gate_private_repository_no_release(self):
+        class FakeGitHub:
+            def get(self, endpoint):
+                self_endpoint = 'repos/nowgnas/skim/releases?per_page=100&page=1'
+                if endpoint != self_endpoint:
+                    raise AssertionError(endpoint)
+                return []
+        self.assertIsNone(releases.fetch_latest_authenticated(FakeGitHub()))
+
+    def test_invalid_release_private_repository_access(self):
+        class FakeGitHub:
+            def get(self, endpoint):
+                raise OSError('token must not be shown')
+        with self.assertRaises(releases.ReleaseUnavailable) as raised:
+            releases.fetch_latest_authenticated(FakeGitHub())
+        self.assertNotIn('token', str(raised.exception))
+
+    def test_happy_path_version_comparison(self):
+        self.assertEqual(releases.compare_versions(None, 'v1.2.3', None, 'a' * 64), 'install')
+        self.assertEqual(releases.compare_versions('v1.2.2', 'v1.2.3', 'b' * 64, 'a' * 64), 'update')
+        self.assertEqual(releases.compare_versions('v1.2.3', 'v1.2.3', 'a' * 64, 'a' * 64), 'current')
+
+    def test_invalid_release_version_replacement(self):
+        for current, latest, existing, new in (('v1.2.3', 'v1.2.3', 'a' * 64, 'b' * 64),
+                                                ('v2.0.0', 'v1.9.9', 'a' * 64, 'b' * 64)):
+            with self.subTest(current=current, latest=latest), self.assertRaises(ValueError):
+                releases.compare_versions(current, latest, existing, new)
+
+
+class JournalTests(unittest.TestCase):
+    def test_recovery_committed_request_retry_does_not_reopen_maintenance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = releases.UpdateJournal(Path(directory))
+            record = journal.start('b' * 32, 'v1.2.3', 'a' * 64)
+            for state in ('quiesced', 'backup', 'switched', 'ready', 'committed'):
+                journal.advance(record['id'], state)
+            again = journal.start('b' * 32, 'v1.2.3', 'a' * 64)
+            self.assertEqual(again['id'], record['id'])
+            self.assertEqual(again['state'], 'committed')
+            with maintenance.guard(Path(directory)):
+                pass
+
+    installation = 'b' * 32
+
+    def test_happy_path_journal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = releases.UpdateJournal(Path(directory))
+            record = journal.start(self.installation, 'v1.2.3', 'a' * 64, {'tag': 'v1.2.2', 'sha256': 'c' * 64})
+            for state in ('quiesced', 'backup', 'switched', 'ready', 'committed'):
+                record = journal.advance(record['id'], state)
+            self.assertEqual(record['state'], 'committed')
+
+    def test_concurrent_requests_share_same_update(self):
+        with tempfile.TemporaryDirectory() as directory:
+            first = releases.UpdateJournal(Path(directory))
+            second = releases.UpdateJournal(Path(directory))
+            self.assertEqual(first.start(self.installation, 'v1.2.3', 'a' * 64)['id'], second.start(self.installation, 'v1.2.3', 'a' * 64)['id'])
+            with self.assertRaises(ValueError):
+                second.start(self.installation, 'v1.2.4', 'b' * 64)
+
+    def test_concurrent_journal_start(self):
+        with tempfile.TemporaryDirectory() as directory:
+            def start(_):
+                return releases.UpdateJournal(Path(directory)).start(self.installation, 'v1.2.3', 'a' * 64)['id']
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                identities = list(executor.map(start, range(16)))
+            self.assertEqual(len(set(identities)), 1)
+
+    def test_recovery_repeated_phase(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = releases.UpdateJournal(Path(directory))
+            record = journal.start(self.installation, 'v1.2.3', 'a' * 64)
+            first = journal.advance(record['id'], 'quiesced')
+            self.assertEqual(first, journal.advance(record['id'], 'quiesced'))
+            with self.assertRaises(ValueError):
+                journal.advance(record['id'], 'switched')
+
+    def test_readiness_blocks_writes_during_update(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            journal = releases.UpdateJournal(path)
+            record = journal.start(self.installation, 'v1.2.3', 'a' * 64)
+            with self.assertRaises(maintenance.UpdateInProgress):
+                with maintenance.guard(path):
+                    pass
+            with maintenance.guard(path, exclusive=True, update_id=record['id']):
+                pass
+
+    def test_concurrent_guard_waits_for_existing_work(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            journal = releases.UpdateJournal(path)
+            with maintenance.guard(path):
+                record = journal.start(self.installation, 'v1.2.3', 'a' * 64)
+                with self.assertRaises(maintenance.UpdateInProgress):
+                    with maintenance.guard(path, exclusive=True, update_id=record['id']):
+                        pass
+            with maintenance.guard(path, exclusive=True, update_id=record['id']):
+                pass
+            with self.assertRaises(maintenance.UpdateInProgress):
+                with maintenance.guard(path):
+                    pass
+
+    def test_invalid_release_update_id_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            releases.UpdateJournal(path).start(self.installation, 'v1.2.3', 'a' * 64)
+            with self.assertRaises(maintenance.UpdateInProgress):
+                with maintenance.guard(path, exclusive=True, update_id='0' * 32):
+                    pass
+
+
+class PackagingTests(unittest.TestCase):
+    def test_release_gate_blocks_packaging(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            destination = root / 'release-output'
+            with self.assertRaises(ValueError):
+                release_package.build(root, destination, 'v1.2.3', release_gate=lambda root: False)
+            self.assertFalse(destination.exists())
+
+
+class ProgramStoreTests(unittest.TestCase):
+    def test_recovery_cancel_before_switch_reopens_access(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            program, data = root / 'program', root / 'data'
+            program.mkdir(mode=0o700)
+            data.mkdir(mode=0o700)
+            store = program_store.ProgramStore.initialize(program)
+            journal = releases.UpdateJournal(data)
+            record = journal.start(store.installation_id, 'v1.2.3', 'a' * 64)
+            journal.advance(record['id'], 'quiesced')
+            store.cancel(data, record['id'])
+            self.assertEqual(journal.read()['state'], 'rolled_back')
+            store.cancel(data, record['id'])
+            with maintenance.guard(data):
+                pass
+
+    def test_recovery_cancel_does_not_open_barrier_after_switch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            program, data = root / 'program', root / 'data'
+            program.mkdir(mode=0o700)
+            data.mkdir(mode=0o700)
+            store = program_store.ProgramStore.initialize(program)
+            journal = releases.UpdateJournal(data)
+            record = journal.start(store.installation_id, 'v1.2.3', 'a' * 64)
+            (program / 'versions' / 'v1.2.3').mkdir(mode=0o700)
+            (program / 'current').symlink_to('versions/v1.2.3')
+            with self.assertRaises(ValueError):
+                store.cancel(data, record['id'])
+            self.assertEqual(journal.read()['state'], 'prepared')
+            with self.assertRaises(maintenance.UpdateInProgress), maintenance.guard(data):
+                pass
+
+    def test_recovery_cancel_preserves_existing_database(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            program, data = root / 'program', root / 'data'
+            program.mkdir(mode=0o700)
+            data.mkdir(mode=0o700)
+            store = program_store.ProgramStore.initialize(program)
+            (program / 'versions' / 'v1.2.2').mkdir(mode=0o700)
+            (program / 'current').symlink_to('versions/v1.2.2')
+            with closing(sqlite3.connect(data / 'skim.db')) as conn, conn:
+                conn.execute('CREATE TABLE item (value TEXT)')
+                conn.execute("INSERT INTO item VALUES ('preserved')")
+            journal = releases.UpdateJournal(data)
+            record = journal.start(store.installation_id, 'v1.2.3', 'a' * 64,
+                                   {'tag': 'v1.2.2', 'sha256': 'b' * 64})
+            store.cancel(data, record['id'])
+            self.assertEqual(store.current(), 'v1.2.2')
+            with closing(sqlite3.connect(data / 'skim.db')) as conn:
+                self.assertEqual(conn.execute('SELECT value FROM item').fetchone(), ('preserved',))
+
+    def test_recovery_cancel_retries_after_running_work_finishes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            program, data = root / 'program', root / 'data'
+            program.mkdir(mode=0o700)
+            data.mkdir(mode=0o700)
+            store = program_store.ProgramStore.initialize(program)
+            with maintenance.guard(data):
+                record = releases.UpdateJournal(data).start(store.installation_id, 'v1.2.3', 'a' * 64)
+                with self.assertRaises(maintenance.UpdateInProgress):
+                    store.cancel(data, record['id'])
+            store.cancel(data, record['id'])
+            self.assertEqual(releases.UpdateJournal(data).read()['state'], 'rolled_back')
+
+    def test_ownership_rejects_foreign_or_unmanaged_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'foreign').write_text('preserve')
+            with self.assertRaises(ValueError):
+                program_store.ProgramStore.initialize(root)
+            self.assertEqual((root / 'foreign').read_text(), 'preserve')
+
+    def test_happy_path_store_identity_is_stable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            created = program_store.ProgramStore.initialize(root)
+            self.assertEqual(created.installation_id, program_store.ProgramStore.open(root).installation_id)
+
+    def test_invalid_release_current_link_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = program_store.ProgramStore.initialize(root)
+            (root / 'current').symlink_to('/tmp/outside')
+            with self.assertRaises(ValueError):
+                store.current()
+
+    def test_happy_path_stage_version(self):
+        fixture = ReleaseTests()
+        release = releases.parse_release(fixture.release())
+        manifest = json.dumps({'version': release.tag, 'archive': 'skim-macos.tar.gz'}).encode()
+        payloads = {'skim-macos.tar.gz': fixture.package_archive(manifest),
+                    'manifest.json': manifest, 'install.sh': b'install'}
+        payloads['SHA256SUMS'] = ''.join(hashlib.sha256(value).hexdigest() + '  ' + name + '\n' for name, value in payloads.items()).encode()
+        with tempfile.TemporaryDirectory() as directory:
+            store = program_store.ProgramStore.initialize(Path(directory))
+            sha256 = store.stage(release, lambda selected, name, limit: payloads[name])
+            self.assertEqual(sha256, hashlib.sha256(payloads['skim-macos.tar.gz']).hexdigest())
+            self.assertTrue((Path(directory) / 'versions' / release.tag / 'manifest.json').is_file())
+            self.assertIsNone(store.current())
+            self.assertEqual(store.stage(release, lambda selected, name, limit: payloads[name]), sha256)
+            (Path(directory) / 'versions' / release.tag / 'manifest.json').write_text('changed')
+            with self.assertRaises(ValueError):
+                store.stage(release, lambda selected, name, limit: payloads[name])
+
+    def test_invalid_release_stage_enforces_recovery_tree_limit(self):
+        fixture = ReleaseTests()
+        release = releases.parse_release(fixture.release())
+        manifest = json.dumps({'version': release.tag, 'archive': 'skim-macos.tar.gz'}).encode()
+        payloads = {'skim-macos.tar.gz': fixture.package_archive(manifest), 'manifest.json': manifest, 'install.sh': b'install'}
+        payloads['SHA256SUMS'] = ''.join(hashlib.sha256(value).hexdigest() + '  ' + name + '\n' for name, value in payloads.items()).encode()
+        with tempfile.TemporaryDirectory() as directory:
+            store = program_store.ProgramStore.initialize(Path(directory))
+            with patch.object(program_store, 'MAX_FILES', 2), self.assertRaises(ValueError):
+                store.stage(release, lambda selected, name, limit: payloads[name])
+            self.assertFalse((Path(directory) / 'versions' / release.tag).exists())
+
+    def test_recovery_switch_is_idempotent(self):
+        fixture = ReleaseTests()
+        release = releases.parse_release(fixture.release())
+        manifest = json.dumps({'version': release.tag, 'archive': 'skim-macos.tar.gz'}).encode()
+        payloads = {'skim-macos.tar.gz': fixture.package_archive(manifest), 'manifest.json': manifest, 'install.sh': b'install'}
+        payloads['SHA256SUMS'] = ''.join(hashlib.sha256(value).hexdigest() + '  ' + name + '\n' for name, value in payloads.items()).encode()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            program, data = root / 'program', root / 'data'
+            program.mkdir(mode=0o700)
+            data.mkdir(mode=0o700)
+            store = program_store.ProgramStore.initialize(program)
+            sha256 = store.stage(release, lambda selected, name, limit: payloads[name])
+            journal = releases.UpdateJournal(data)
+            record = journal.start(store.installation_id, release.tag, sha256)
+            journal.advance(record['id'], 'quiesced')
+            journal.advance(record['id'], 'backup')
+            store.activate(data, record['id'])
+            self.assertEqual(store.current(), release.tag)
+            store.activate(data, record['id'])
+            self.assertEqual(journal.read()['state'], 'switched')
+
+    def test_concurrent_store_rejects_another_data_directory(self):
+        fixture = ReleaseTests()
+        release = releases.parse_release(fixture.release())
+        manifest = json.dumps({'version': release.tag, 'archive': 'skim-macos.tar.gz'}).encode()
+        payloads = {'skim-macos.tar.gz': fixture.package_archive(manifest), 'manifest.json': manifest, 'install.sh': b'install'}
+        payloads['SHA256SUMS'] = ''.join(hashlib.sha256(value).hexdigest() + '  ' + name + '\n' for name, value in payloads.items()).encode()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            program, first, second = root / 'program', root / 'first', root / 'second'
+            for path in (program, first, second):
+                path.mkdir(mode=0o700)
+            store = program_store.ProgramStore.initialize(program)
+            sha256 = store.stage(release, lambda selected, name, limit: payloads[name])
+            records = []
+            for data in (first, second):
+                journal = releases.UpdateJournal(data)
+                record = journal.start(store.installation_id, release.tag, sha256)
+                journal.advance(record['id'], 'quiesced')
+                journal.advance(record['id'], 'backup')
+                records.append(record)
+            store.activate(first, records[0]['id'])
+            with self.assertRaises(ValueError):
+                store.activate(second, records[1]['id'])
+            self.assertEqual(releases.UpdateJournal(second).read()['state'], 'backup')
+
+    def test_recovery_rollback_version(self):
+        fixture = ReleaseTests()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            program, data = root / 'program', root / 'data'
+            program.mkdir(mode=0o700)
+            data.mkdir(mode=0o700)
+            store = program_store.ProgramStore.initialize(program)
+            journal = releases.UpdateJournal(data)
+            previous = None
+            for tag in ('v1.2.2', 'v1.2.3'):
+                release = releases.parse_release(fixture.release(tag))
+                manifest = json.dumps({'version': tag, 'archive': 'skim-macos.tar.gz'}).encode()
+                payloads = {'skim-macos.tar.gz': fixture.package_archive(manifest), 'manifest.json': manifest, 'install.sh': b'install'}
+                payloads['SHA256SUMS'] = ''.join(hashlib.sha256(value).hexdigest() + '  ' + name + '\n' for name, value in payloads.items()).encode()
+                sha256 = store.stage(release, lambda selected, name, limit: payloads[name])
+                record = journal.start(store.installation_id, tag, sha256, previous)
+                journal.advance(record['id'], 'quiesced')
+                update_backup.backup_database(data, record['id'])
+                store.activate(data, record['id'])
+                if previous is None:
+                    journal.advance(record['id'], 'ready')
+                    journal.advance(record['id'], 'committed')
+                previous = {'tag': tag, 'sha256': sha256}
+            journal.begin_rollback(record['id'])
+            update_backup.restore_database(data, record['id'])
+            store.rollback(data, record['id'])
+            self.assertEqual(store.current(), 'v1.2.2')
+            self.assertEqual(journal.read()['state'], 'rolled_back')
+            with maintenance.guard(data):
+                pass
+
+
+class BackupTests(unittest.TestCase):
+    def test_recovery_backup_is_consistent_and_idempotent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data = Path(directory)
+            with closing(sqlite3.connect(data / 'skim.db')) as connection, connection:
+                connection.execute('CREATE TABLE example(value TEXT)')
+                connection.execute("INSERT INTO example VALUES('saved')")
+            (data / 'skim.db').chmod(0o600)
+            journal = releases.UpdateJournal(data)
+            record = journal.start('b' * 32, 'v1.2.3', 'a' * 64)
+            journal.advance(record['id'], 'quiesced')
+            backup = update_backup.backup_database(data, record['id'])
+            self.assertEqual(backup, update_backup.backup_database(data, record['id']))
+            with closing(sqlite3.connect(backup)) as connection:
+                self.assertEqual(connection.execute('SELECT value FROM example').fetchone()[0], 'saved')
+            self.assertEqual(journal.read()['state'], 'backup')
+
+    def test_recovery_interrupted_backup_link(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data = Path(directory)
+            with closing(sqlite3.connect(data / 'skim.db')) as connection, connection:
+                connection.execute('CREATE TABLE example(value TEXT)')
+            (data / 'skim.db').chmod(0o600)
+            journal = releases.UpdateJournal(data)
+            record = journal.start('b' * 32, 'v1.2.3', 'a' * 64)
+            journal.advance(record['id'], 'quiesced')
+            backup = update_backup.backup_database(data, record['id'])
+            leftover = backup.parent / '.backup-interrupted'
+            os.link(backup, leftover)
+            self.assertEqual(update_backup.backup_database(data, record['id']), backup)
+            self.assertFalse(leftover.exists())
+
+    def test_recovery_restore_keeps_maintenance_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data = Path(directory)
+            with closing(sqlite3.connect(data / 'skim.db')) as connection, connection:
+                connection.execute('CREATE TABLE example(value TEXT)')
+                connection.execute("INSERT INTO example VALUES('saved')")
+            (data / 'skim.db').chmod(0o600)
+            journal = releases.UpdateJournal(data)
+            record = journal.start('b' * 32, 'v1.2.3', 'a' * 64)
+            journal.advance(record['id'], 'quiesced')
+            update_backup.backup_database(data, record['id'])
+            journal.advance(record['id'], 'switched')
+            with closing(sqlite3.connect(data / 'skim.db')) as connection, connection:
+                connection.execute("INSERT INTO example VALUES('migration')")
+            journal.begin_rollback(record['id'])
+            update_backup.restore_database(data, record['id'])
+            update_backup.restore_database(data, record['id'])
+            with closing(sqlite3.connect(data / 'skim.db')) as connection:
+                self.assertEqual(connection.execute('SELECT value FROM example').fetchall(), [('saved',)])
+            with self.assertRaises(maintenance.UpdateInProgress):
+                with maintenance.guard(data):
+                    pass
+
+
+if __name__ == '__main__':
+    unittest.main()

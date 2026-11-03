@@ -1,5 +1,6 @@
 """외부 도구와 로컬 권한을 점검하며 자격 증명 출력은 노출하지 않는다."""
 import os
+import fcntl
 from pathlib import Path
 import shutil
 import stat
@@ -11,6 +12,21 @@ from . import MIN_PYTHON
 from .hosts import authenticated
 
 from .analyze.codex import CodexAdapter, IsolationError
+
+
+def inflight_status(data_dir):
+    marker = data_dir / 'analysis-inflight'
+    if not marker.exists() and not marker.is_symlink():
+        return None
+    try:
+        with (data_dir / 'analysis.lock').open('r') as handle:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return 'running'
+            return 'uncertain' if marker.exists() or marker.is_symlink() else None
+    except OSError:
+        return 'uncertain'
 
 
 def run(config, runner=None, which=None, adapter=None, probe=False, out=print):
@@ -75,6 +91,11 @@ def run(config, runner=None, which=None, adapter=None, probe=False, out=print):
             if label == 'version' and isinstance(getattr(adapter, 'prerelease_version', None), str):
                 details[label] = '감지된 버전 ' + adapter.prerelease_version + '은 사전 공개 버전입니다. npm install --prefix "$HOME/.local/share/skim-tools" @openai/codex@latest로 안정 버전을 설치하세요. 서버를 종료한 뒤 skim web으로 다시 시작하세요.'
             report(False, label, 'Codex 분석 차단: ' + details[label])
+    inflight = inflight_status(config.data_dir)
+    if inflight == 'uncertain':
+        report(False, '중단된 모델 실행', '이전 실행 종료를 직접 확인한 후 analysis-inflight 표식을 제거하세요. 상태 점검의 복구 안내를 확인하세요.')
+    elif inflight == 'running':
+        out('안내: 모델 실행 — 진행 중인 모델 호출이 끝나기를 기다립니다.')
     if model_ok:
         if adapter.model != 'unknown':
             report(True, 'model', adapter.model)

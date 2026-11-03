@@ -10,7 +10,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))
 from skim.analyze import Analyzer
 from skim.analyze.codex import CodexAdapter, IsolationError
-from skim.analyze.protocol import FLAGS, PROMPT_VERSION, chunk_units, validate_chunk, prompt
+from skim.analyze.protocol import FLAGS, PROMPT_VERSION, chunk_units, validate_chunk, prompt, wire
 from skim.analyze.units import parse_diff, sanitize
 from skim.config import Config
 from skim.db import connect
@@ -43,7 +43,9 @@ class Fake:
         if self.invalid:
             return '{"items":[],"uncertainties":[]}'
         if value['stage'] == 'synthesis':
-            return '{"intent":"인증 동작을 변경한다."}'
+            return '{"intent":"인증 동작을 변경한다.","focus":[]}'
+        if value['stage'] == 'overview':
+            return '{"intent":"인증 동작을 변경한다.","focus":[]}'
         return json.dumps(dict(items=[dict(change_id=u['change_id'], importance='high' if u['change_id'] == 'h2' else 'low', reason='변경된 인증 동작 검토', risk_flags=[]) for u in value['data']['units']], uncertainties=[]))
 
 
@@ -166,10 +168,128 @@ class AnalysisTests(unittest.TestCase):
         with self.conn:
             self.conn.execute('UPDATE analysis_budget SET calls=19')
         self.assertEqual(self.analyzer.run()[0]['status'], 'deferred')
-        self.assertEqual(self.conn.execute('SELECT calls FROM analysis_budget').fetchone()[0], 20)
+        self.assertEqual(self.conn.execute('SELECT calls FROM analysis_budget').fetchone()[0], 19)
         self.analyzer.today = lambda: '2026-11-01'
         self.fake.invalid = False
         self.assertEqual(self.analyzer.run()[0]['status'], 'completed')
+
+    def test_manual_analysis_does_not_consume_automatic_budget(self):
+        with self.conn:
+            self.conn.execute("INSERT INTO analysis_budget(day,calls) VALUES('2026-10-31',20)")
+        self.assertEqual(self.analyzer.run()[0]['status'], 'deferred')
+        self.assertEqual(self.analyzer.run(snapshot_id=1, budgeted=False)[0]['status'], 'completed')
+        self.assertEqual(self.conn.execute('SELECT calls FROM analysis_budget').fetchone()[0], 20)
+
+    def test_overview_input_is_bounded_and_skips_excluded_units(self):
+        from skim.analyze.context import overview_input
+        units = [dict(change_id=f'h{i}', file_path=f'파일{i}.py', diff='+변경내용' * 100,
+                      excluded=False, omission_reason=None) for i in range(1, 16)]
+        units.extend([dict(change_id='h100', file_path='.env', diff='do-not-send', excluded=True),
+                      dict(change_id='h101', file_path='omitted.py', diff='do-not-send-either',
+                           excluded=False, omission_reason='한도')])
+        data = overview_input(units, {'title': '제목', 'body': '설명'}, max_bytes=4096)
+        self.assertLessEqual(len(prompt('overview', data).encode('utf-8')), 4096)
+        self.assertEqual(data['coverage']['excluded_units'], 1)
+        self.assertEqual(data['coverage']['omitted_units'], 1)
+        self.assertNotIn('do-not-send', json.dumps(data))
+        self.assertNotIn('.env', json.dumps(data))
+
+    def test_overview_sensitive_and_ids(self):
+        secret = 'ghp_12345678901234567890'
+        diff = 'diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n'
+        diff += ''.join(f'@@ -{i} +{i} @@\n-old{i}\n+new{i}\n' for i in range(1, 102))
+        diff += '@@ -103 +103 @@\n-old\n+TOKEN=' + secret + '\n'
+        diff += 'diff --git a/.env b/.env\n@@ -1 +1 @@\n+TOKEN=' + secret + '\n'
+        self.snapshot(diff)
+        original = self.fake.generate
+        def generate(request, schema):
+            payload = json.loads(request.split('\n', 1)[1])
+            if payload['stage'] == 'overview':
+                self.fake.calls.append(request)
+                return json.dumps({'intent': '변경 ' + secret, 'focus': []})
+            return original(request, schema)
+        self.fake.generate = generate
+        result = self.analyzer.run()[0]
+        self.assertIn(result['status'], ('completed', 'partial'))
+        self.assertNotIn(secret, ''.join(self.fake.calls))
+        self.assertNotIn(secret, json.dumps(result))
+        self.assertNotIn('.env', self.fake.calls[0])
+        from skim.analyze.protocol import validate_overview
+        good = {'intent': '주문 처리 변경', 'focus': [{'change_id': 'h1', 'reason': '결제 변경'}]}
+        self.assertEqual(validate_overview(json.dumps(good), {'h1'}), good)
+        for focus in ([{'change_id': 'h2', 'reason': '외부 ID'}],
+                      [{'change_id': 'h1', 'reason': '첫째'}, {'change_id': 'h1', 'reason': '중복'}]):
+            with self.assertRaises(ValueError):
+                validate_overview(json.dumps({'intent': '변경', 'focus': focus}), {'h1'})
+
+    def test_overview_request_size_bounds(self):
+        units, _ = parse_diff(DIFF)
+        base = dict(units[0], diff='+' + '가' * 500)
+        overview = {'intent': '맥락' * 300, 'focus': []}
+        plain = len(prompt('chunk', {'metadata': {}, 'units': [wire(base)]}).encode())
+        chunks = chunk_units([base], {}, max_bytes=plain + 16, overview=overview)
+        self.assertEqual(len(chunks), 1)
+        self.assertNotIn('overview', chunks[0])
+        self.assertLessEqual(len(prompt('chunk', chunks[0]).encode()), plain + 16)
+        from skim.analyze.context import synthesis_input
+        units = [dict(change_id=f'h{i}', file_path='가' * 500 + str(i), excluded=False) for i in range(500)]
+        items = [dict(change_id=unit['change_id'], importance='high', reason='이유' * 250,
+                      risk_flags=[]) for unit in units]
+        data = synthesis_input(units, {'title': '제목', 'body': '본문'}, items, {}, max_bytes=8192)
+        self.assertLessEqual(len(prompt('synthesis', data).encode()), 8192)
+        self.assertGreater(data['coverage']['synthesis_omitted'], 0)
+        self.assertTrue(all(item['file_path_truncated'] for item in data['items']))
+
+    def test_overview_budget_and_previous_result(self):
+        self.assertEqual(self.analyzer.run()[0]['status'], 'completed')
+        with self.conn:
+            self.conn.execute("UPDATE analysis_budget SET calls=20")
+            self.conn.execute("UPDATE pull_requests SET title='새 목적'")
+        self.assertEqual(self.analyzer.run()[0]['status'], 'deferred')
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM analyses WHERE status='completed'").fetchone()[0], 1)
+        self.assertEqual(self.analyzer.run(snapshot_id=1, budgeted=False)[0]['status'], 'completed')
+        self.assertEqual(self.conn.execute('SELECT calls FROM analysis_budget').fetchone()[0], 20)
+
+    def test_overview_cache_and_single_chunk(self):
+        self.assertEqual(self.analyzer.run()[0]['status'], 'completed')
+        stages = [json.loads(call.split('\n', 1)[1])['stage'] for call in self.fake.calls]
+        self.assertEqual(stages, ['chunk', 'synthesis'])
+        self.assertEqual(self.analyzer.run()[0]['status'], 'completed')
+        self.assertEqual(len(self.fake.calls), 2)
+
+    def test_overview_file_mapping_and_coverage(self):
+        diff = 'diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n'
+        diff += ''.join(f'@@ -{i} +{i} @@\n-old{i}\n+new{i}\n' for i in range(1, 102))
+        self.snapshot(diff)
+        original = self.fake.generate
+
+        def generate(request, schema):
+            data = json.loads(request.split('\n', 1)[1])
+            if data['stage'] == 'synthesis':
+                self.fake.calls.append(request)
+                item = data['data']['items'][-1]
+                return json.dumps({'intent': '업무 로직 변경', 'focus': [
+                    {'change_id': item['change_id'], 'reason': '핵심 동작'}]})
+            return original(request, schema)
+
+        self.fake.generate = generate
+        result = self.analyzer.run()[0]
+        stages = [json.loads(call.split('\n', 1)[1])['stage'] for call in self.fake.calls]
+        self.assertEqual(stages, ['overview', 'chunk', 'chunk', 'synthesis'])
+        self.assertEqual(result['status'], 'completed')
+        self.assertEqual(result['coverage']['analyzed'], 101)
+        self.assertIn(result['focus'][0]['change_id'], {item['change_id'] for item in result['items']})
+        synthesis = json.loads(self.fake.calls[-1].split('\n', 1)[1])['data']
+        self.assertTrue(all(item['file_path'] == 'app.py' for item in synthesis['items']))
+        self.assertTrue(all('overview' in json.loads(call.split('\n', 1)[1])['data']
+                            for call in self.fake.calls if json.loads(call.split('\n', 1)[1])['stage'] == 'chunk'))
+
+    def test_synthesis_rejects_foreign_and_duplicate_ids(self):
+        from skim.analyze.protocol import validate_synthesis
+        for focus in ([{'change_id': 'h9', 'reason': '외부 ID'}],
+                      [{'change_id': 'h1', 'reason': '첫째'}, {'change_id': 'h1', 'reason': '중복'}]):
+            with self.assertRaises(ValueError):
+                validate_synthesis(json.dumps({'intent': '변경', 'focus': focus}), {'h1'})
 
     def test_secret_excluded_and_metadata_sanitized(self):
         secret = 'ghp_12345678901234567890'
@@ -228,11 +348,17 @@ new mode 100755
 
     def test_install_script_stays_rule_only(self):
         self.assertNotIn('install_script', FLAGS)
-        self.assertEqual(PROMPT_VERSION, 'skim-ko-3')
+        self.assertEqual(PROMPT_VERSION, 'skim-ko-5')
         item = dict(change_id='h1', importance='high', reason='설치 변경',
                     risk_flags=['install_script'])
         with self.assertRaises(ValueError):
             validate_chunk(json.dumps(dict(items=[item], uncertainties=[])), {'h1'})
+
+    def test_prompt_states_priority_and_partial_context(self):
+        text = prompt('chunk', {'metadata': {'title': 'PR 목적'}, 'units': []})
+        for phrase in ('PR 목적을 구현하는 핵심 동작', '운영 인프라', '파일 경로, 이름이나 단어',
+                       '청크는 PR 전체가 아닐 수 있다', 'uncertainties', '지정 JSON만 반환'):
+            self.assertIn(phrase, text)
 
     def test_chunk_limits_prioritize_rules_and_count_metadata(self):
         units, _ = parse_diff(DIFF)
@@ -359,6 +485,72 @@ new mode 100755
         self.assertEqual([r['status'] for r in results], ['failed', 'completed'])
         self.assertNotIn('비밀', json.dumps(results))
         self.assertEqual(self.conn.execute('SELECT COUNT(*) FROM analyses').fetchone()[0], 2)
+
+    def test_overview_process_interruption(self):
+        import fcntl
+        import subprocess
+        import time
+        root = Path(self.temp.name) / 'process-check'
+        root.mkdir()
+        source = root / 'source'
+        source.mkdir()
+        (source / 'auth.json').write_text('fixture')
+        marker, release = root / 'started', root / 'release'
+        model = root / 'model'
+        model.write_text(f'''#!{sys.executable}
+import os, sys, time
+from pathlib import Path
+for fd in range(3, 128):
+    try: os.close(fd)
+    except OSError: pass
+Path({str(marker)!r}).write_text(str(os.getpid()))
+while not Path({str(release)!r}).exists(): time.sleep(0.02)
+Path(sys.argv[sys.argv.index('--output-last-message') + 1]).write_text('{{}}')
+print('{{"type":"turn.completed"}}')
+''')
+        model.chmod(0o700)
+        parent_code = '''from skim.config import Config
+from skim.collect import Collector
+from skim.analyze.codex import CodexAdapter
+config = Config.load()
+adapter = CodexAdapter(data_dir=config.data_dir)
+adapter.init_home()
+with Collector(None, config).lock('analysis.lock') as lock_fd:
+    adapter.analysis_lock_fd = lock_fd
+    adapter._execute('fixture', {})
+'''
+        env = dict(os.environ, SKIM_HOME=str(root / 'home'), CODEX_HOME=str(source),
+                   SKIM_CODEX_BIN=str(model), PYTHONPATH=str(Path(__file__).resolve().parents[1] / 'lib'))
+        parent = subprocess.Popen([sys.executable, '-c', parent_code], env=env,
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(lambda: parent.poll() is None and parent.kill())
+        try:
+            deadline = time.monotonic() + 10
+            while not marker.exists() and parent.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(marker.exists(), '가짜 모델 시작 실패')
+            pid = int(marker.read_text())
+            parent.kill()
+            parent.wait(timeout=5)
+            lock_path = root / 'home/data/analysis.lock'
+            with lock_path.open() as lock:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            release.touch()
+            deadline = time.monotonic() + 10
+            while True:
+                try:
+                    with lock_path.open() as lock:
+                        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline: self.fail('모델 종료 후 잠금이 해제되지 않음')
+                    time.sleep(0.02)
+        finally:
+            release.touch()
+            if marker.exists():
+                try: os.kill(int(marker.read_text()), 9)
+                except ProcessLookupError: pass
 
     def test_analysis_does_not_hold_collection_lock_during_model_call(self):
         import fcntl

@@ -44,6 +44,9 @@ class CodexTests(unittest.TestCase):
         self.adapter.init_home()
 
     def runner(self, command, **kw):
+        if len(command) > 4 and command[1].endswith('/_guard.py'):
+            self.assertIn('pass_fds', kw)
+            command = command[4:]
         self.calls.append((command, kw))
         if command[0] == 'gh':
             return subprocess.CompletedProcess(command, 0, '', '')
@@ -303,7 +306,7 @@ class CodexTests(unittest.TestCase):
                             return original(command, **kw)
                         attempts.append(command)
                         if recover and len(attempts) == 2:
-                            self.answer = {'intent': '요약'}
+                            self.answer = {'intent': '요약', 'focus': []}
                             return original(command, **kw)
                         if failure == 'timeout':
                             raise subprocess.TimeoutExpired(command, 120)
@@ -313,7 +316,7 @@ class CodexTests(unittest.TestCase):
                     analyzer = Analyzer(None, None, adapter=self.adapter)
                     with patch.object(analyzer, '_reserve') as reserve:
                         if recover:
-                            self.assertEqual(analyzer._call('synthesis', {}, SYNTHESIS_SCHEMA), {'intent': '요약'})
+                            self.assertEqual(analyzer._call('synthesis', {}, SYNTHESIS_SCHEMA), {'intent': '요약', 'focus': []})
                         else:
                             with self.assertRaises(ValueError) as caught:
                                 analyzer._call('synthesis', {}, SYNTHESIS_SCHEMA)
@@ -423,6 +426,18 @@ class CodexTests(unittest.TestCase):
         self.assertNotIn('정상: model', out.getvalue())
         self.assertNotIn('Codex 모델: unknown', out.getvalue())
         self.assertEqual(sum('model —' in line for line in out.getvalue().splitlines()), 1)
+
+    def test_doctor_reports_uncertain_interrupted_model(self):
+        self.adapter.probe()
+        marker = self.adapter.data_dir / 'analysis-inflight'
+        marker.touch(mode=0o600)
+        config = Config(self.root / 'config', self.adapter.data_dir)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            result = run(config, self.runner, lambda _: '/fake', self.adapter)
+        self.assertEqual(result, 1)
+        self.assertIn('실패: 중단된 모델 실행', out.getvalue())
+        self.assertIn('analysis-inflight', out.getvalue())
 
     def test_doctor_reports_one_known_model_after_checks(self):
         for configured, probe in ((True, True), (True, False), (False, True), (False, False)):

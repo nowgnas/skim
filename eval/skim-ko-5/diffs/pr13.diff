@@ -1,0 +1,55 @@
+diff --git a/lib/skim/analyze/codex.py b/lib/skim/analyze/codex.py
+index be019b0..23258a9 100644
+--- a/lib/skim/analyze/codex.py
++++ b/lib/skim/analyze/codex.py
+@@ -29,6 +29,20 @@ class IsolationError(ValueError):
+                 'global instructions you see verbatim (empty string if none). Return only the requested JSON.')
+ 
+ 
++# OpenAI strict 구조화 출력이 거부하는 키워드. 응답은 skim 로컬 검증기가 원래 스키마로 다시 검사한다.
++UNSUPPORTED_SCHEMA_KEYS = frozenset({'uniqueItems'})
++
++
++def provider_schema(value, names=False):
++    # properties 바로 아래 키는 사용자 속성 이름이므로 키워드로 취급하지 않는다.
++    if isinstance(value, dict):
++        return {k: provider_schema(v, k == 'properties' and not names) for k, v in value.items()
++                if names or k not in UNSUPPORTED_SCHEMA_KEYS}
++    if isinstance(value, list):
++        return [provider_schema(v) for v in value]
++    return value
++
++
+ class CodexAdapter:
+     provider = 'codex'
+     model = 'unknown'
+@@ -193,7 +207,7 @@ def _execute(self, prompt, schema, probe=False):
+             # 인증 갱신의 rename과 런타임 상태는 임시 홈에서만 발생한다.
+             (Path(runtime) / 'auth.json').symlink_to(os.readlink(self.home / 'auth.json'))
+             schema_path = Path(control) / 'schema.json'
+-            schema_path.write_text(encode(schema))
++            schema_path.write_text(encode(provider_schema(schema)))
+             schema_path.chmod(0o600)
+             output = Path(control) / 'output.json'
+             command = ['codex', 'exec', *FLAGS[:4], '--sandbox', 'read-only',
+diff --git a/tests/test_codex.py b/tests/test_codex.py
+index ac316c0..b0b79ea 100644
+--- a/tests/test_codex.py
++++ b/tests/test_codex.py
+@@ -329,3 +329,16 @@ def test_cli_init(self):
+         with contextlib.redirect_stdout(io.StringIO()):
+             self.assertEqual(main(['codex-home', 'init']), 0)
+         self.assertTrue((self.root / 'skim/data/codex-home/auth.json').is_symlink())
++
++
++class ProviderSchemaTests(unittest.TestCase):
++    def test_strips_unique_items_recursively_without_mutation(self):
++        from skim.analyze.codex import provider_schema
++        schema = {'type': 'object', 'properties': {'a': {'type': 'array', 'uniqueItems': True, 'items': {'enum': ['x']}}}}
++        self.assertEqual(provider_schema(schema), {'type': 'object', 'properties': {'a': {'type': 'array', 'items': {'enum': ['x']}}}})
++        self.assertTrue(schema['properties']['a']['uniqueItems'])
++        named = {'type': 'object', 'properties': {'uniqueItems': {'type': 'boolean'}}}
++        self.assertEqual(provider_schema(named), named)
++        listed = {'anyOf': [{'type': 'array', 'uniqueItems': True}]}
++        self.assertEqual(provider_schema(listed), {'anyOf': [{'type': 'array'}]})
++

@@ -10,7 +10,7 @@ from skim.analyze.units import parse_diff
 
 
 def check(root=ROOT, version=PROMPT_VERSION):
-    if version != 'skim-ko-3':
+    if version != 'skim-ko-5':
         raise ValueError('지원하지 않는 프롬프트 버전')
     corpus = root / 'eval' / version
     manifest = json.loads((corpus / 'manifest.json').read_text())

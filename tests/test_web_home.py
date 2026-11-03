@@ -6,7 +6,7 @@ import unittest
 
 from test_web import WebTests
 from skim.db import connect
-from skim.web import file_anchor
+from skim.web import file_anchor, file_rows, file_card
 from skim.web_settings import RepoLookup
 
 
@@ -31,6 +31,20 @@ class HomeTests(unittest.TestCase):
             result['items'] = [dict(change_id=cid, importance=imp, reason=f'{cid} 근거', risk_flags=[]) for cid, imp in verdicts.items()]
             conn.execute('UPDATE analyses SET output_json=? WHERE id=?', (json.dumps(result), row['id']))
             return result['units']
+
+    def test_overview_focus_ranking(self):
+        units = [dict(change_id=f'h{i}', file_path=f'{i}.py', candidates=['config'] if i == 1 else [])
+                 for i in range(1, 5)]
+        pr = dict(id=1, units=units, items={unit['change_id']: dict(importance='high', reason='변경', risk_flags=[])
+                                         for unit in units}, allowed=True, stale=False,
+                  result={'focus': [dict(change_id='h4', reason='PR 목적 구현'),
+                                    dict(change_id='h3', reason='핵심 동작')]})
+        self.assertEqual([row['path'] for row in file_rows(pr)], ['4.py', '3.py', '1.py', '2.py'])
+        self.assertIn('목적 관련: PR 목적 구현', file_card(pr))
+        previous = dict(pr, result={})
+        self.assertEqual(file_rows(previous)[0]['path'], '1.py')
+        hidden_candidate = dict(pr, result={'focus': [dict(change_id=f'h{i}', reason='핵심') for i in (4, 3, 2)]})
+        self.assertIn('그 외 규칙 기반 후보 1개 확인', file_card(hidden_candidate))
 
     def test_only_prs_of_managed_repositories(self):
         with closing(connect(self.config)) as conn, conn:
@@ -77,7 +91,7 @@ class HomeTests(unittest.TestCase):
         self.assertIn('모델 판단: 인증', card)
         self.assertIn('파일 5개 (외 2개)', card)
         self.assertIn('<span>낮음 1</span>', card)
-        self.assertIn(f'href="/pr/2?unit_q=f1.py#{file_anchor("f1.py")}"', card)
+        self.assertIn(f'href="/pr/2?file=f1.py#{file_anchor("f1.py")}"', card)
 
     def test_file_link_lands_on_open_file_in_detail(self):
         card = self.card('결제 인증 경계')
@@ -85,7 +99,9 @@ class HomeTests(unittest.TestCase):
         path, anchor = href.split('#')
         body = self.request(path)[2]
         self.assertIn(f'id="{anchor}"', body)
-        self.assertIn(f'<span class="file-anchor" id="{anchor}"></span><details open>', body)
+        panel = re.search(r'<section class="detail-file" id="' + re.escape(anchor) + r'"[^>]*>', body)
+        self.assertIsNotNone(panel)
+        self.assertNotIn(' hidden', panel.group())
 
     def test_unanalyzed_card_shows_next_step(self):
         with closing(connect(self.config)) as conn, conn:
@@ -95,11 +111,14 @@ class HomeTests(unittest.TestCase):
         self.assertIn('분석 허용 안 됨', card)
         self.assertIn('#analysis-scope', card)
 
-    def test_review_requested_first(self):
+    def test_priority_first_then_review_requested(self):
         body = self.request('/')[2]
         cards = body.split('<article class="issue-row">')[1:]
-        flags = ['리뷰 요청 받음' in c for c in cards]
-        self.assertEqual(flags, sorted(flags, reverse=True))
+        levels = {'높음': 3, '보통': 2, '낮음': 1}
+        badges = [c.split('<p class="home-pr-badges">', 1)[1].split('</p>', 1)[0] for c in cards]
+        priorities = [(levels.get(match.group(1), 0) if (match := re.search(r'중요도 (높음|보통|낮음)', c)) else 0,
+                       '리뷰 요청 받음' in c) for c in badges]
+        self.assertEqual(priorities, sorted(priorities, reverse=True))
 
 
 if __name__ == '__main__':
