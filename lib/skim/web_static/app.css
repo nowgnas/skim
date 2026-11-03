@@ -558,3 +558,28 @@ input[type=search]{-webkit-appearance:none;appearance:none}
 .repo-discovery h3{margin:20px 0 8px}
 @media(max-width:700px){.scope-form .scope-choices{grid-template-columns:1fr}.repo-row{flex-wrap:wrap}}
 .scope-form .consent{align-self:flex-start}
+
+/* 저장소 카드 안의 추가 패널과 연결 확인 중 행 */
+.repo-card{position:relative}
+.repo-add{margin:0 0 16px;padding:0;background:transparent;box-shadow:none;border-radius:0}
+.repo-add>summary{position:absolute;top:28px;right:28px;list-style:none}
+.repo-add>summary::before,.repo-add>summary::-webkit-details-marker{display:none}
+.repo-add[open]>summary{background:var(--fill);color:var(--text-sub)}
+.repo-add-body{padding:16px 20px;border-radius:var(--radius-box);background:var(--surface-sub)}
+.repo-add-body .action-form{margin:8px 0}
+.repo-add-body .list-row:hover{background:var(--surface)}
+.repo-card-heading{padding-right:140px}
+.repo-pending{background:var(--accent-weak)}
+.repo-pending .job{margin:6px 0 0}
+.repo-pending .job [data-job-field=summary]{height:auto}
+.pending-mark{width:20px;text-align:center;color:var(--accent-text)}
+@media(prefers-reduced-motion:no-preference){.pending-mark{animation:spin 1.2s linear infinite}}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media(max-width:640px){.repo-add>summary{position:static;margin-bottom:8px}.repo-card-heading{padding-right:0}}
+.repo-pending .job [data-job-field=summary],.repo-pending .job-result-slot:not(:has(:not([hidden]))){display:none}
+.repo-pending .job{min-height:0}.repo-pending .job-progress{margin:2px 0 0}
+.repo-add-body .list-row{padding:8px 12px;align-items:center}
+.repo-add-body .list-row .action-form{margin:0;flex-wrap:nowrap;align-items:center}
+.repo-add-body .list-row label{flex-direction:row;align-items:center;gap:8px}
+.repo-add-body .list-row select{height:34px;font-size:14px}
+.repo-pending .job,.repo-pending .job-result-slot{min-height:0;margin-top:0}.repo-pending{align-items:flex-start}
