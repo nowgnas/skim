@@ -551,7 +551,7 @@ def detail(pr, query, config, offline=False, analysis_panel=""):
                 content += f'<a href="{esc(href)}" data-select-file="{file_anchor(path)}">{esc(path)}</a>'
             content += '</div>'
         for key, title in extras:
-            content += f'<p>{esc(title)} {esc(stats[key])} · <a href="?order=priority#file-changes">전체 파일 확인</a></p>'
+            content += f'<p>{esc(title)} {esc(stats[key])} <a href="?order=priority#file-changes">전체 파일 확인</a></p>'
         paths_by_id = {unit['change_id']: unit['file_path'] for unit in pr['units']}
         for uncertainty in uncertainties:
             if not isinstance(uncertainty, dict):
@@ -563,7 +563,7 @@ def detail(pr, query, config, offline=False, analysis_panel=""):
                 content += f'<p><a href="{esc(href)}" data-select-file="{file_anchor(path)}">{esc(path)}</a>: {esc(reason)}</p>'
         content += '</aside>'
     if a or snapshot:
-        content += '<details class="detail-diagnostics"><summary>수집·분석 상태 보기</summary>'
+        content += '<details class="detail-diagnostics"><summary>수집 및 분석 상태 보기</summary>'
         if a:
             content += meta('상태: ' + label(pr['status']), '모델 ' + a['model'], 'Codex CLI ' + a['cli_version'])
         if snapshot:

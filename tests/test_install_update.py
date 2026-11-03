@@ -383,13 +383,15 @@ class ProgramStoreTests(unittest.TestCase):
 
     def test_happy_path_store_identity_is_stable(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory) / 'program'
+            root.mkdir(mode=0o700)
             created = program_store.ProgramStore.initialize(root)
             self.assertEqual(created.installation_id, program_store.ProgramStore.open(root).installation_id)
 
     def test_invalid_release_current_link_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory) / 'program'
+            root.mkdir(mode=0o700)
             store = program_store.ProgramStore.initialize(root)
             (root / 'current').symlink_to('/tmp/outside')
             with self.assertRaises(ValueError):
@@ -403,13 +405,15 @@ class ProgramStoreTests(unittest.TestCase):
                     'manifest.json': manifest, 'install.sh': b'install'}
         payloads['SHA256SUMS'] = ''.join(hashlib.sha256(value).hexdigest() + '  ' + name + '\n' for name, value in payloads.items()).encode()
         with tempfile.TemporaryDirectory() as directory:
-            store = program_store.ProgramStore.initialize(Path(directory))
+            root = Path(directory) / 'program'
+            root.mkdir(mode=0o700)
+            store = program_store.ProgramStore.initialize(root)
             sha256 = store.stage(release, lambda selected, name, limit: payloads[name])
             self.assertEqual(sha256, hashlib.sha256(payloads['skim-macos.tar.gz']).hexdigest())
-            self.assertTrue((Path(directory) / 'versions' / release.tag / 'manifest.json').is_file())
+            self.assertTrue((root / 'versions' / release.tag / 'manifest.json').is_file())
             self.assertIsNone(store.current())
             self.assertEqual(store.stage(release, lambda selected, name, limit: payloads[name]), sha256)
-            (Path(directory) / 'versions' / release.tag / 'manifest.json').write_text('changed')
+            (root / 'versions' / release.tag / 'manifest.json').write_text('changed')
             with self.assertRaises(ValueError):
                 store.stage(release, lambda selected, name, limit: payloads[name])
 
@@ -420,10 +424,12 @@ class ProgramStoreTests(unittest.TestCase):
         payloads = {'skim-macos.tar.gz': fixture.package_archive(manifest), 'manifest.json': manifest, 'install.sh': b'install'}
         payloads['SHA256SUMS'] = ''.join(hashlib.sha256(value).hexdigest() + '  ' + name + '\n' for name, value in payloads.items()).encode()
         with tempfile.TemporaryDirectory() as directory:
-            store = program_store.ProgramStore.initialize(Path(directory))
+            root = Path(directory) / 'program'
+            root.mkdir(mode=0o700)
+            store = program_store.ProgramStore.initialize(root)
             with patch.object(program_store, 'MAX_FILES', 2), self.assertRaises(ValueError):
                 store.stage(release, lambda selected, name, limit: payloads[name])
-            self.assertFalse((Path(directory) / 'versions' / release.tag).exists())
+            self.assertFalse((root / 'versions' / release.tag).exists())
 
     def test_recovery_switch_is_idempotent(self):
         fixture = ReleaseTests()
