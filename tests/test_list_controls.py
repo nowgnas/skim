@@ -13,9 +13,11 @@ class ListControlsTest(unittest.TestCase):
         self.assertEqual(page, items[20:40])
         self.assertIn('other_q', controls)
         self.assertIn('repo_page=3', navigation)
+        self.assertIn('45개 중 2/3 페이지', controls)
         page, controls, _ = list_controls(items, {'repo_q': ['REPO-4'], 'repo_page': ['999']}, 'repo', '저장소', str)
         self.assertEqual(page, items[40:])
-        self.assertIn('1/1 페이지', controls)
+        # 한 페이지뿐이면 개수와 페이지 표시를 생략한다.
+        self.assertNotIn('페이지', controls)
         page, controls, _ = list_controls(items, {'repo_q': ['missing']}, 'repo', '저장소', str)
         self.assertFalse(page)
         self.assertIn('검색 결과가 없습니다', controls)

@@ -142,7 +142,7 @@ def collect_panel(conn, csrf, offline, compact=False):
 
 
 def analysis_panel(conn, pr, csrf, offline):
-    from .web import esc
+    from .web import esc, label
     from .web_settings import form
     body = '<article class="detail-action"><h2 class="sr-only">PR 분석 요청</h2><div class="analysis-controls">'
     snapshot = pr['snapshot']
@@ -160,7 +160,14 @@ def analysis_panel(conn, pr, csrf, offline):
         current_analysis = pr['analysis'] if pr['analysis'] and pr['analysis']['snapshot_id'] == snapshot['id'] else None
         body += form('/jobs/analyze', csrf,
                      f'<input type="hidden" name="host" value="{esc(pr.get("host", "github.com"))}"><input type="hidden" name="repository" value="{esc(pr["owner"] + "/" + pr["name"])}">'
-                     f'<input type="hidden" name="number" value="{int(pr["number"])}"><button>{"다시 분석" if current_analysis else "이 PR 분석"}</button>', variant='primary')
+                     f'<input type="hidden" name="number" value="{int(pr["number"])}"><button>{"다시 분석" if current_analysis else "이 PR 분석"}</button>',
+                     # 결과가 있으면 검토가 주된 일이고 재분석은 예산을 쓰는 보조 동작이다.
+                     variant='secondary' if current_analysis else 'primary')
+    if pr['analysis']:
+        stats = json.loads(snapshot['coverage']).get('analysis', {}) if snapshot else {}
+        body += ('<p class="analysis-summary"><span class="badge">' + esc(label(pr['status'])) + '</span>'
+                 + f'<span>분석 {int(stats.get("analyzed", 0))}개</span><span>제외 {int(stats.get("excluded", 0))}개</span>'
+                 + '<span>' + esc(pr['analysis']['created_at']) + '</span></p>')
     body += '</div><div class="analysis-job-status">'
     running = jobs.active(conn, 'analyze')
     if running is not None and running['target_id'] != pr['id']:
