@@ -21,6 +21,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 from .db import analysis_allowed, connect
 from .web_settings import POST_PATHS, RepoLookup, render, mutate
 from . import web_jobs
+from .timefmt import human_time
 from .jobs import worker, get as get_job
 from .analyze.units import parse_diff, sanitize
 from .sessio import session_link
@@ -351,9 +352,9 @@ def listing(prs, query, csrf, heading_toolbar=""):
     content += controls
     if has_prs and not prs:
         content += '<p class="empty">조건에 맞는 PR이 없습니다. <a href="/">전체 보기</a></p>'
-    collected = {pr['snapshot']['collected_at'] if pr['snapshot'] else '대기' for pr in prs}
+    collected = {human_time(pr['snapshot']['collected_at']) if pr['snapshot'] else '대기' for pr in prs}
     shared_collection = len(collected) == 1
-    analyzed = {pr['analysis']['created_at'] if pr['analysis'] else '대기' for pr in prs}
+    analyzed = {human_time(pr['analysis']['created_at']) if pr['analysis'] else '대기' for pr in prs}
     shared_analysis = len(analyzed) == 1
     if shared_collection or shared_analysis:
         content += meta(*(['수집 ' + next(iter(collected))] if shared_collection else []),
@@ -381,8 +382,8 @@ def listing(prs, query, csrf, heading_toolbar=""):
                     + (f'<span class="badge">{esc(label(pr["status"]))}</span>' if pr['allowed'] and not pr['stale'] and pr['status'] in ('completed', 'partial') else '') + '</p>'
                     + f'<p class="issue-intent"><strong>변경 의도</strong> {esc(a["intent"] if a and a["intent"] else "분석 결과 없음")}</p>'
                     + state + file_card(pr)
-                    + meta(*([] if shared_collection else ['수집 ' + (s['collected_at'] if s else '대기')]),
-                           *([] if shared_analysis else ['분석 ' + (a['created_at'] if a else '대기')])) + '</div></article>')
+                    + meta(*([] if shared_collection else ['수집 ' + (human_time(s['collected_at']) if s else '대기')]),
+                           *([] if shared_analysis else ['분석 ' + (human_time(a['created_at']) if a else '대기')])) + '</div></article>')
     return content + '</div>' + navigation + ('<div class="empty"><p><strong>아직 수집된 열린 PR이 없습니다.</strong></p>'
                                               '<p>저장소를 연결한 뒤 수집하면 이곳에 표시됩니다.</p>'
                                               '<p><a class="btn primary" href="/repos">저장소 연결하기</a> <a class="btn secondary" href="/status">상태 확인</a></p></div>' if not has_prs else '') + '</section>'
@@ -597,7 +598,7 @@ def detail(pr, query, config, offline=False, analysis_panel=""):
             content += meta('분석 ' + str(stats.get('analyzed', 0)), '제외 ' + str(stats.get('excluded', 0)), '누락 ' + str(stats.get('omitted', 0)))
             if stats.get('overview_eligible'):
                 content += meta('전체 맥락 발췌 ' + str(stats.get('overview_sampled', 0)) + '/' + str(stats['overview_eligible']))
-            content += meta('수집 ' + snapshot['collected_at'], '분석 ' + (a['created_at'] if a else '대기'))
+            content += meta('수집 ' + human_time(snapshot['collected_at']), '분석 ' + (human_time(a['created_at']) if a else '대기'))
         content += '</details>'
     content += '<section class="detail-changes" id="file-changes"><div class="section-heading"><h2>파일별 변경</h2><p>파일을 열어 변경 내용과 검토 근거를 확인하세요.</p></div><nav class="toolbar segments" aria-label="변경 보기">'
     for href, title, selected in [('?order=original', '원래 파일 순서', query.get('order', [''])[0] == 'original' and query.get('diff') != ['1']),

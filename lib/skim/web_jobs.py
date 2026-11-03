@@ -4,6 +4,7 @@ import json
 from urllib.parse import urlencode
 
 from . import jobs
+from .timefmt import human_time
 from .db import analysis_allowed
 from .repos import web_repository
 from .hosts import registered
@@ -36,7 +37,7 @@ def summary_parts(row):
     for key, label in [('target', '대상'), ('model', '모델'), ('started_at', '시작'),
                        ('finished_at', '종료'), ('retry_at', '재시도 가능')]:
         if d[key] and (key != 'finished_at' or not d['active']):
-            parts.append(label + ' ' + d[key])
+            parts.append(label + ' ' + (human_time(d[key]) if key.endswith('_at') else d[key]))
     if d['followup']:
         parts.append('완료 후 1회 다시 수집 예정')
     return parts
@@ -59,9 +60,9 @@ def collection_summary_parts(d):
     if d['total'] is not None and d['processed'] is not None:
         parts.append(f'처리한 항목: {d["processed"]}/{d["total"]}')
     if d['retry_at']:
-        parts.append('다시 시도할 시각: ' + d['retry_at'])
+        parts.append('다시 시도할 시각: ' + human_time(d['retry_at']))
     if d['finished_at'] and not d['active']:
-        parts.append('수집 종료 시각: ' + d['finished_at'])
+        parts.append('수집 종료 시각: ' + human_time(d['finished_at']))
     if d['followup']:
         parts.append('현재 작업 후 한 번 더 수집 예정')
     return parts
@@ -167,7 +168,7 @@ def analysis_panel(conn, pr, csrf, offline):
         stats = json.loads(snapshot['coverage']).get('analysis', {}) if snapshot else {}
         body += ('<p class="analysis-summary"><span class="badge">' + esc(label(pr['status'])) + '</span>'
                  + f'<span>분석 {int(stats.get("analyzed", 0))}개</span><span>제외 {int(stats.get("excluded", 0))}개</span>'
-                 + '<span>' + esc(pr['analysis']['created_at']) + '</span></p>')
+                 + '<span>' + esc(human_time(pr['analysis']['created_at'])) + '</span></p>')
     body += '</div><div class="analysis-job-status">'
     running = jobs.active(conn, 'analyze')
     if running is not None and running['target_id'] != pr['id']:
@@ -194,12 +195,6 @@ def doctor_checks(row):
         title = f'GitHub 인증 ({name[3:]})' if key == 'gh' else CHECK_LABELS.get(name, name)
         checks.append(dict(state={'정상': 'ok', '실패': 'bad', '경고': 'warn'}[state], key=key, title=title, detail=detail))
     return checks
-
-
-def short_time(value):
-    """'2026-11-03T15:07:38.95+00:00' 같은 저장값을 '11-03 15:07'로 줄인다. 형식이 다르면 그대로 둔다."""
-    match = re.match(r'\d{4}-(\d{2}-\d{2})[T ](\d{2}:\d{2})', value or '')
-    return f'{match[1]} {match[2]}' if match else (value or '')
 
 
 def recovery_for(key):
@@ -236,7 +231,7 @@ def status_page(conn, csrf, offline):
     body += '<section class="status-section status-health"><div class="section-heading"><h2>점검 결과</h2>'
     if finished:
         body += ('<p class="meta"><span class="badge ' + ('high' if problems else 'ok') + '">' + (f'확인 필요 {len(problems)}개' if problems else '모두 정상')
-                 + '</span><span>점검 ' + esc(short_time(finished['finished_at'])) + '</span></p>')
+                 + '</span><span>점검 ' + esc(human_time(finished['finished_at'])) + '</span></p>')
     body += '</div>'
     if latest_doctor and latest_doctor['status'] in ('pending', 'running'):
         body += job_box(latest_doctor)

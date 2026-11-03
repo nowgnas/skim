@@ -48,7 +48,7 @@ class StatusPageTests(unittest.TestCase):
         self.assertIn('<details id="codex-setup" class="status-section codex-setup" open>', body)
         self.assertIn('GitHub 인증 (github.com)', health)
         self.assertEqual(health.count('href="#codex-setup"'), 1)
-        self.assertRegex(health, r'점검 \d{2}-\d{2} \d{2}:\d{2}</span>')
+        self.assertIn('<span>점검 방금</span>', health)
 
     def test_all_ok_keeps_codex_setup_collapsed(self):
         self.finish_doctor('모든 점검 항목 정상\n정상: gh github.com — 인증 확인', status='completed')
