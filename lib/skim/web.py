@@ -278,7 +278,8 @@ def list_controls(items, query, prefix, label, text, search_form=True, fragment=
     controls = (f'<form class="filters" method="get"{action}>{hidden}<label>{esc(label)} 검색 '
                 f'<input type="search" name="{search_key}" value="{esc(term)}" maxlength="200"></label>'
                 '<button class="btn secondary">검색</button></form>') if search_form else ''
-    controls += f'<p class="meta">{len(filtered)}개 / {number}/{pages} 페이지</p>'
+    if pages > 1:
+        controls += f'<p class="meta">{len(filtered)}개 중 {number}/{pages} 페이지</p>'
     if not filtered and search_form:
         controls += '<p class="muted">검색 결과가 없습니다.</p>' if term else ''
     def link(target, title):
@@ -442,12 +443,32 @@ def file_label(path):
             + (f'<span class="file-directory" aria-hidden="true">{esc(directory)}</span>' if directory else '') + '</span>')
 
 
-def file_panel(row, members, items, github_link, *, inline=False, active=True):
+def full_path_title(path):
+    """선택한 파일은 같은 이름 파일을 구분할 수 있게 전체 경로를 보여준다."""
+    parent, _, name = path.rpartition('/')
+    return (f'<span class="file-path-full" title="{esc(path)}">' + (f'<span class="file-parent">{esc(parent)}/</span>' if parent else '')
+            + f'<span class="file-basename">{esc(name)}</span></span>')
+
+
+def file_nav(neighbors):
+    """작업 공간에서 앞뒤 파일로 넘긴다. 링크라서 스크립트 없이도 동작한다."""
+    previous, following = neighbors
+    def link(target, text, rel):
+        if not target:
+            return f'<span class="btn ghost sm" aria-disabled="true">{text}</span>'
+        href, path = target
+        return (f'<a class="btn secondary sm" rel="{rel}" href="{esc(href)}" data-select-file="{file_anchor(path)}"'
+                f' aria-label="{text}: {esc(path)}">{text}</a>')
+    return ('<nav class="file-step" aria-label="파일 이동">' + link(previous, '← 이전 파일', 'prev')
+            + '<span class="file-step-hint">단축키 j 다음, k 이전</span>' + link(following, '다음 파일 →', 'next') + '</nav>')
+
+
+def file_panel(row, members, items, github_link, *, active=True, neighbors=None):
     path = row['path']
     level = {3: 'high', 2: 'mid', 1: 'low'}.get(row['rank'], 'unanalyzed')
-    attributes = '' if inline else (f' id="{file_anchor(path)}" tabindex="-1" data-file-panel data-file-path="{esc(path)}"'
-                                     + ('' if active else ' hidden'))
-    content = f'<section class="detail-file"{attributes}><header class="detail-file-heading"><h3 class="file-title">{file_label(path)}</h3><span class="badge {level}">중요도 {esc(label(level))}</span><span class="file-count">변경 {len(members)}개</span></header>'
+    attributes = (f' id="{file_anchor(path)}" tabindex="-1" data-file-panel data-file-path="{esc(path)}"'
+                  + ('' if active else ' hidden'))
+    content = f'<section class="detail-file"{attributes}><header class="detail-file-heading"><h3 class="file-title">{full_path_title(path)}</h3><span class="badge {level}">중요도 {esc(label(level))}</span><span class="file-count">변경 {len(members)}개</span></header>'
     if row['focus_reason']:
         content += '<p class="file-focus-reason"><strong>중요한 이유</strong> ' + esc(row['focus_reason']) + '</p>'
     if github_link:
@@ -473,6 +494,8 @@ def file_panel(row, members, items, github_link, *, inline=False, active=True):
                 content += '<p>모델 판단: ' + esc(', '.join(FLAG_LABELS.get(flag, flag) for flag in model_flags)) + '</p>'
             content += '</details>'
         content += '</div>'
+    if neighbors:
+        content += file_nav(neighbors)
     return content + '</section>'
 
 def detail(pr, query, config, offline=False, analysis_panel=""):
@@ -490,7 +513,7 @@ def detail(pr, query, config, offline=False, analysis_panel=""):
         if order in ('priority', 'original'):
             params.append(('order', order))
         return '?' + urlencode(params) + '#' + file_anchor(path)
-    content = f'<p><a href="/">← PR 목록</a></p><header class="detail-header"><p class="eyebrow">PR REVIEW</p><h1>{esc(pr["title"])}</h1>'
+    content = f'<p><a href="/">← PR 목록</a></p><header class="detail-header"><h1>{esc(pr["title"])}</h1>'
     content += meta(repository_label(pr) + ' #' + str(pr['number']), pr['author'])
     if link:
         content += f'<p><a href="{esc(link)}" target="_blank" rel="noopener noreferrer">GitHub 원문 ↗<span class="sr-only"> (새 탭)</span></a></p>'
@@ -520,9 +543,11 @@ def detail(pr, query, config, offline=False, analysis_panel=""):
         for row in top:
             level = {3: 'high', 2: 'mid', 1: 'low'}.get(row['rank'], 'unanalyzed')
             reason = row['focus_reason'] or row['reason'] or '규칙에 따라 확인이 필요한 변경입니다.'
-            content += (f'<details class="focus-entry"><summary class="focus-file"><span class="badge {level}">{esc(label(level))}</span>'
-                        f'<span class="focus-text">{file_label(row["path"])}<span class="focus-reason">{esc(reason)}</span></span><span class="focus-toggle" aria-hidden="true">⌄</span></summary>'
-                        '<div class="focus-inline">' + file_panel(row, units_by_file[row['path']], shown['items'], link, inline=True) + '</div></details>')
+            # 같은 diff를 두 번 그리지 않고 아래 작업 공간의 해당 파일을 연다.
+            content += (f'<a class="focus-entry focus-file" href="{esc(file_href(row["path"]))}" data-select-file="{file_anchor(row["path"])}">'
+                        f'<span class="badge {level}">{esc(label(level))}</span>'
+                        f'<span class="focus-text">{file_label(row["path"])}<span class="focus-reason">{esc(reason)}</span></span>'
+                        '<span class="focus-toggle" aria-hidden="true">→</span></a>')
         content += '</div>'
     else:
         content += '<p class="muted">' + ('높음 또는 보통으로 분석된 파일이 없습니다.' if current else '분석 후 중요한 파일과 선정 이유를 확인할 수 있습니다.') + '</p>'
@@ -623,8 +648,10 @@ def detail(pr, query, config, offline=False, analysis_panel=""):
             content += (f'<a href="{esc(href)}" data-select-file="{file_anchor(row["path"])}"' + (' aria-current="true"' if active else '')
                         + f'>{file_label(row["path"])}<span class="badge {level}">{esc(label(level))}</span></a>')
         content += '</div>' + navigation + '</nav><div class="detail-file-list"><p class="sr-only" role="status" aria-live="polite" data-selected-file>선택한 파일: ' + esc(selected_file) + '</p>'
-    for row in rows:
-        content += file_panel(row, units_by_file[row['path']], shown['items'], link, active=row['path'] == selected_file)
+    for index, row in enumerate(rows):
+        neighbors = tuple((file_href(other['path']), other['path']) if 0 <= index + step < len(rows) and (other := rows[index + step]) else None
+                          for step in (-1, 1))
+        content += file_panel(row, units_by_file[row['path']], shown['items'], link, active=row['path'] == selected_file, neighbors=neighbors)
     if rows:
         content += '</div></div>'
     elif not pr['units']:
