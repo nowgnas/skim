@@ -1,5 +1,6 @@
 """페이지 사용성 보강: 복귀 경로, 확인 단계, 빈 상태, 보기 전환을 검증한다."""
 from contextlib import closing
+import re
 import unittest
 
 from test_web import WebTests
@@ -42,8 +43,12 @@ class UsabilityTests(unittest.TestCase):
                 start = body.index(f'<summary class="btn danger sm">{label}</summary>')
                 block = body[body.rindex('<details class="confirm-action">', 0, start):]
                 block = block[:block.index('</details>')]
-                self.assertIn(f'action="{action}"', block)
                 self.assertIn(f'{label} 확인</button>', block)
+                target = re.search(r'form="([^"]+)"', block)
+                if target:  # 범위 저장 폼 안의 버튼은 바깥의 숨은 폼을 제출한다.
+                    self.assertRegex(body, rf'<form class="action-form" id="{target[1]}" method="post" action="{action}" hidden>')
+                else:
+                    self.assertIn(f'action="{action}"', block)
 
     def test_empty_states_distinguish_filter_from_no_prs(self):
         body = self.request('/?importance=low&pr_q=없는검색어')[2]

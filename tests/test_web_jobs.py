@@ -156,7 +156,7 @@ class JobTests(unittest.TestCase):
             conn.execute("UPDATE repositories SET analysis_policy='inherit' WHERE owner='demo'")
         body = self.request('/pr/1')[2]
         self.assertNotIn('action="/jobs/analyze"', body)
-        self.assertIn('href="/repos?scope_host=github.com&amp;select_q=demo%2Fcheckout&amp;from_pr=1#analysis-scope"', body)
+        self.assertIn('href="/repos?scope_host=github.com&amp;tracked_q=demo%2Fcheckout&amp;from_pr=1#analysis-scope"', body)
         self.assertIn('분석 허용 범위 열기', body)
         self.assertNotIn('action="/jobs/analyze"', self.request('/pr/5')[2])
 

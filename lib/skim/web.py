@@ -364,7 +364,7 @@ def listing(prs, query, csrf, heading_toolbar=""):
         a, s = pr['analysis'], pr['snapshot']
         state = ''
         if not pr['allowed']:
-            target = urlencode([('scope_host', pr.get('host', 'github.com')), ('select_q', pr['owner'] + '/' + pr['name'])])
+            target = urlencode([('scope_host', pr.get('host', 'github.com')), ('tracked_q', pr['owner'] + '/' + pr['name'])])
             state = f'<p class="pr-state"><span>분석 허용 안 됨</span><a href="/repos?{esc(target)}#analysis-scope">분석 허용 범위 열기</a></p>'
         elif pr['status'] in ('failed', 'blocked', 'deferred') or pr['stale']:
             state = '<p class="pr-state"><span>' + esc(label('stale' if pr['stale'] else pr['status'])) + f'</span><a href="/pr/{pr["id"]}">상세에서 다시 분석</a></p>'

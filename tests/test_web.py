@@ -111,17 +111,14 @@ class WebTests(unittest.TestCase):
         body = self.request('/?pr_q=checkout&tab=high')[2]
         self.assertIn('href="/?pr_q=checkout&amp;tab=review"', body)
         self.assertIn('<input type="hidden" name="tab" value="high">', body)
-        body = self.request('/repos?tracked_q=missing&available_q=other')[2]
+        body = self.request('/repos?tracked_q=missing&scope_host=github.com')[2]
         tracked_form = next(form.split('</form>', 1)[0] for form in body.split('<form class="filters" method="get">')[1:]
                             if 'type="search" name="tracked_q"' in form.split('</form>', 1)[0])
-        self.assertIn('type="hidden" name="available_q" value="other"', tracked_form)
+        self.assertIn('type="hidden" name="scope_host" value="github.com"', tracked_form)
         self.assertIn('name="tracked_q" value="missing"', tracked_form)
         self.assertIn('검색 결과가 없습니다', body)
-        body = self.request('/repos?tracked_q=demo&select_q=other')[2]
-        select_form = next(form.split('</form>', 1)[0] for form in body.split('<form class="filters" method="get">')[1:]
-                           if 'type="search" name="select_q"' in form.split('</form>', 1)[0])
-        self.assertIn('type="hidden" name="tracked_q" value="demo"', select_form)
-        self.assertIn('name="select_q" value="other"', select_form)
+        # 예전 링크의 select_q도 같은 저장소 검색으로 동작한다.
+        self.assertIn('name="tracked_q" value="checkout"', self.request('/repos?select_q=checkout')[2])
         body = self.request('/pr/1?unit_q=payment&order=original')[2]
         self.assertIn('unit_q=payment', body)
         self.assertIn('name="order" value="original"', body)
