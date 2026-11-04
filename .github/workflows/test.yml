@@ -37,6 +37,10 @@ jobs:
           for file in setup.sh bin/skim lib/python.sh; do
             bash -n "$file"
           done
+      - name: Diag
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        run: python -m unittest -v -k codex_official tests.test_install_script
       - name: Unit tests
         env:
           PYTHONDONTWRITEBYTECODE: '1'
