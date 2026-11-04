@@ -1,12 +1,41 @@
 #!/usr/bin/env python3
 """Validate the recorded real-model release evaluation for the approved prompt."""
-from datetime import datetime
+from datetime import date, datetime
 import json
 from pathlib import Path
+import re
 import sys
 
 from eval_release import ROOT, PROMPT_VERSION, SCHEMA_VERSION, prompt_hash, sha256, assess, confirmation_hash, saved_requests, summarize
 from skim.analyze.units import parse_diff
+
+
+def accepted_misses(manifest):
+    """사람이 승인한 미스 허용 목록을 검증하고 case별 허용 파일 집합을 돌려준다."""
+    entries = manifest.get('accepted_misses', [])
+    if not isinstance(entries, list):
+        raise ValueError('accepted_misses 형식 오류')
+    high_files = {c['id']: c['high_files'] for c in manifest['cases']}
+    accepted = {}
+    for entry in entries:
+        if not isinstance(entry, dict) or any(
+                not isinstance(entry.get(key), str) or not entry[key].strip()
+                for key in ('case', 'file', 'reason', 'approved_by', 'date')):
+            raise ValueError('accepted_misses 필드 누락')
+        # fromisoformat은 다른 형식도 받으므로 YYYY-MM-DD 형태를 먼저 확인한다.
+        try:
+            if not re.fullmatch(r'\d{4}-\d{2}-\d{2}', entry['date']):
+                raise ValueError
+            date.fromisoformat(entry['date'])
+        except ValueError:
+            raise ValueError(f"accepted_misses 날짜 형식 오류: {entry['date']}") from None
+        if entry['file'] not in high_files.get(entry['case'], ()):
+            raise ValueError(f"accepted_misses 대상 아님: {entry['case']} {entry['file']}")
+        files = accepted.setdefault(entry['case'], set())
+        if entry['file'] in files:
+            raise ValueError(f"accepted_misses 중복: {entry['case']} {entry['file']}")
+        files.add(entry['file'])
+    return accepted
 
 
 def check(root=ROOT, version=PROMPT_VERSION):
@@ -18,6 +47,7 @@ def check(root=ROOT, version=PROMPT_VERSION):
         raise ValueError('confirmed_by 누락: high_files 사람 확인 필요')
     if manifest.get('confirmed_sha256') != confirmation_hash(manifest):
         raise ValueError('confirmed_sha256 불일치: high_files 재확인 필요')
+    accepted = accepted_misses(manifest)
     report = json.loads((corpus / 'results.json').read_text())
     if not isinstance(report.get('reviewed_by'), str) or not report['reviewed_by'].strip():
         raise ValueError('reviewed_by 누락: 결과와 원본 출력 사람 검토 필요')
@@ -55,14 +85,18 @@ def check(root=ROOT, version=PROMPT_VERSION):
             raise ValueError(f"{case['id']}: stored scores mismatch")
         if case['displayed']['status'] not in ('completed', 'partial'):
             raise ValueError(f"{case['id']}: 분석 실패")
-        if case['misses'] or case['hidden_unanalysed']:
+        if case['hidden_unanalysed']:
             raise ValueError(f"{case['id']}: high 누락 또는 미분석 숨김")
+        # 미스는 허용 목록과 정확히 일치해야 한다. 허용 외 미스와 실제로 미스가 아닌 허용 항목 모두 차단.
+        allowed = accepted.get(case['id'], set())
+        if len(case['misses']) != len(set(case['misses'])) or set(case['misses']) != allowed:
+            raise ValueError(f"{case['id']}: high 누락 또는 허용 목록 불일치")
         if (case['model'], case['cli_version']) != (report['model'], report['cli_version']):
             raise ValueError(f"{case['id']}: 모델 또는 CLI 버전 불일치")
         files = case['displayed']['files']
         if any(not case['captured'].get(path) or not any(f['file_path'] == path and
                    (f['importance'] == 'high' or f['candidates']) for f in files)
-               for path in expected['high_files']):
+               for path in expected['high_files'] if path not in allowed):
             raise ValueError(f"{case['id']}: 지정 high 미포착")
         for key in ('expect_redacted', 'expect_unanalysed_visible', 'watch'):
             if expected.get(key) and case['expectations'].get(key, {}).get('met') is not True:
@@ -74,7 +108,10 @@ def check(root=ROOT, version=PROMPT_VERSION):
     if recomputed['summary'] != report['summary']:
         raise ValueError('평가 요약 불일치')
     summary = report['summary']
-    if summary['total_misses'] != 0 or summary['hidden_count'] != 0 or summary['failures']:
+    # 다른 검사를 모두 통과했으므로 실패 case는 허용 미스만으로 실패한 case여야 한다.
+    allowed_failures = [c['id'] for c in report['cases'] if c['id'] in accepted]
+    if (summary['total_misses'] != sum(len(f) for f in accepted.values()) or summary['hidden_count'] != 0
+            or summary['failures'] != allowed_failures):
         raise ValueError('평가 요약 실패')
 
 
