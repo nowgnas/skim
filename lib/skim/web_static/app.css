@@ -618,3 +618,5 @@ input[type=search]{-webkit-appearance:none;appearance:none}
 .file-search-suggestions li{margin:0}
 .file-search-suggestions a{display:block;padding:9px 10px;border-radius:var(--radius-ctl);color:var(--text);font-size:13px;overflow-wrap:anywhere}
 .file-search-suggestions a:hover,.file-search-suggestions a[aria-selected=true]{background:var(--accent-weak);color:var(--accent-text)}
+.file-search-controls .file-search-form input{background:var(--surface);border:1.5px solid var(--accent);box-shadow:0 0 0 3px var(--accent-weak)}
+.file-search-controls .file-search-form input:focus{border-color:var(--accent);box-shadow:0 0 0 4px var(--accent-weak)}
