@@ -43,11 +43,15 @@ def label(value):
 # 카드에는 내부 플래그 이름 대신 읽을 수 있는 말을 쓴다. 상세 화면의 원래 표기는 그대로 둔다.
 FLAG_LABELS = {'auth': '인증', 'payments': '결제', 'db_schema_migration': 'DB 스키마', 'config': '설정',
                'ci_workflow': 'CI 워크플로', 'dependency': '의존성', 'secrets': '민감 정보',
-               'logic_without_tests': '테스트 변경 없음', 'install_script': '설치 스크립트'}
+               'logic_without_tests': '관련 테스트 변경 미확인', 'install_script': '설치 스크립트'}
 
 
 def file_anchor(path):
     return 'file-' + hashlib.sha256(path.encode()).hexdigest()[:12]
+
+
+def priority_rules(row):
+    return row['rule'] - {'logic_without_tests'}
 
 
 def file_rows(pr):
@@ -75,7 +79,7 @@ def file_rows(pr):
             row['rank'], row['reason'] = rank, item.get('reason') or ''
         row['model'].update(item.get('risk_flags', []))
     return sorted(files.values(), key=lambda r: (-r['rank'], r['focus_rank'] if r['focus_rank'] is not None else 999999,
-                                                  -bool(r['rule']), r['path']))
+                                                  -bool(priority_rules(r)), r['path']))
 
 
 def file_counts(rows):
@@ -86,8 +90,9 @@ def file_counts(rows):
 
 
 def top_file_rows(rows):
-    # 낮음·미분석 파일은 규칙 후보가 없으면 숫자로만 보여준다.
-    return [row for row in rows if row['rank'] >= 2 or row['rule']][:3]
+    # 목적 관련 파일과 별도 위험 규칙은 테스트 변경 미확인과 구분한다.
+    return [row for row in rows if row['rank'] >= 2 or priority_rules(row)
+            or (row['rank'] and row['focus_rank'] is not None)][:3]
 
 
 def file_card(pr):
@@ -102,12 +107,12 @@ def file_card(pr):
         name = '확인' if level == 'unanalyzed' else label(level)
         href = f'/pr/{int(pr["id"])}?' + urlencode([('file', row['path'])]) + '#' + file_anchor(row['path'])
         notes = ([('목적 관련: ' + row['focus_reason'])] if row['focus_reason'] else []) + ([row['reason']] if row['reason'] else []) + (
-            ['규칙 후보: ' + ', '.join(FLAG_LABELS.get(f, f) for f in sorted(row['rule']))] if row['rule'] else []) + (
+            ['규칙 후보: ' + ', '.join(FLAG_LABELS.get(f, f) for f in sorted(priority_rules(row)))] if priority_rules(row) else []) + (
             ['모델 판단: ' + ', '.join(FLAG_LABELS.get(f, f) for f in sorted(row['model']))] if row['model'] else [])
         body += (f'<a class="file-row" href="{esc(href)}"><span class="badge {level}">{name}</span>'
                  f'<span class="file-path">{esc(row["path"])}</span><span class="file-note">' + ''.join(f'<span>{esc(n)}</span>' for n in notes) + '</span></a>')
     rest = len(rows) - len(top)
-    other_candidates = sum(bool(row['rule']) for row in rows if row not in top)
+    other_candidates = sum(bool(priority_rules(row)) for row in rows if row not in top)
     if other_candidates:
         body += f'<p class="file-summary"><a href="/pr/{int(pr["id"])}?order=priority">그 외 규칙 기반 후보 {other_candidates}개 확인</a></p>'
     # CSP가 style 속성을 막으므로 비율을 20칸으로 나눠 그린다. 0이 아닌 값은 최소 한 칸을 받는다.
@@ -309,11 +314,68 @@ def priority_rank(pr):
     return RANK.get(pr['importance'], 0)
 
 
-def listing(prs, query, csrf, heading_toolbar=""):
+def home_team_filter(server, conn, prs, query, csrf, offline):
+    """팀 조회는 POST 작업으로 실행하고 유효한 결과만 메인 필터에 사용한다."""
+    from . import jobs
+    from .web_settings import form
+    hosts = [row[0] for row in conn.execute('SELECT host FROM github_hosts ORDER BY host')]
+    host = query.get('team_host', ['github.com'])[0]
+    if host not in hosts:
+        host = 'github.com'
+    team = query.get('team', [''])[0]
+    valid, truncated, teams = server.repo_lookup.team_snapshot(host)
+    latest = jobs.latest(conn, 'repos')
+    active = jobs.active(conn, 'repos')
+    params = json.loads(latest['params'] or '{}') if latest else {}
+    failed = bool(latest and params.get('home_teams') and params.get('host') == host
+                  and latest['status'] in ('failed', 'blocked', 'cancelled'))
+    if failed:
+        valid, teams = False, {}
+    description = (host + (' / ' + team if team else '') if query.get('team_host', [''])[0] else '모든 호스트')
+    body = '<details class="home-team-filter"' + (' open' if query.get('team_host', [''])[0] or team else '') + '><summary>호스트 및 팀 필터: ' + esc(description) + '</summary><form method="get" class="team-filter-form">'
+    body += ''.join(f'<input type="hidden" name="{key}" value="{esc(query[key][0])}">' for key in ('pr_q', 'repo', 'tab') if query.get(key))
+    host_selected = query.get('team_host', [''])[0]
+    body += '<label>호스트<select name="team_host"><option value="">모든 호스트</option>' + ''.join(
+        f'<option value="{esc(h)}"' + (' selected' if h == host_selected else '') + f'>{esc(h)}</option>' for h in hosts) + '</select></label>'
+    body += '<label>소속 팀<select name="team"><option value="">이 호스트의 모든 연결 저장소</option>'
+    if team and team not in teams:
+        body += f'<option value="{esc(team)}" selected>{esc(team)} (재조회 필요)</option>'
+    body += ''.join(f'<option value="{esc(name)}"' + (' selected' if team == name else '') + f'>{esc(name)}</option>'
+                    for name in sorted(teams, key=str.casefold)) + '</select></label>'
+    body += '<button class="btn secondary sm">팀 필터 적용</button></form>'
+    if not offline:
+        preserved = ''.join(f'<input type="hidden" name="{key}" value="{esc(query[key][0][:200])}">' for key in ('team', 'pr_q', 'repo', 'tab') if query.get(key))
+        body += form('/home/teams', csrf, f'<input type="hidden" name="host" value="{esc(host)}">' + preserved + f'<button>{esc(host)} 팀 목록 새로고침</button>')
+    if query.get('team_busy'):
+        body += '<p class="notice">다른 저장소 조회가 진행 중입니다. 완료 후 팀 목록을 다시 새로고침하세요.</p>'
+    if active:
+        body += web_jobs.job_box(active).replace('<div class="job"', '<div class="job" data-job-reload="1"', 1)
+    elif failed:
+        body += '<p class="muted">팀 조회에 실패했습니다. GitHub 권한과 조직 SSO를 확인한 뒤 다시 조회하세요.</p>'
+    elif not valid:
+        body += ('<p class="muted">오프라인 모드에서는 팀 목록을 조회할 수 없습니다.</p>' if offline else '<p class="muted">팀 목록이 없거나 만료됐습니다. 팀 목록을 새로고침하세요.</p>')
+    elif truncated:
+        body += '<p class="muted">조회 한도에 도달해 일부 팀 또는 저장소만 표시합니다.</p>'
+    else:
+        body += '<p class="muted">팀 목록은 60초 동안 유지됩니다.</p>'
+    if query.get('team_host'):
+        prs = [pr for pr in prs if pr.get('host', 'github.com') == host]
+    if team:
+        if not valid or team not in teams:
+            body += '<p class="notice">선택한 팀의 현재 저장소를 확인할 수 없습니다. 팀 목록을 다시 조회하세요.</p>'
+            prs = []
+        else:
+            names = teams[team]
+            prs = [pr for pr in prs if pr.get('host', 'github.com') == host
+                   and (pr['owner'] + '/' + pr['name']).casefold() in names]
+    return prs, body + '</details>'
+
+
+def listing(prs, query, csrf, heading_toolbar="", team_filter="", has_connected_prs=None):
     # 메인은 내가 연결(관리)한 저장소의 PR만 다룬다. 다른 저장소의 리뷰 요청은 상세 링크로만 열린다.
     prs = sorted((pr for pr in prs if pr.get('tracked', 1)),
                  key=lambda pr: (-priority_rank(pr), -bool(pr['review']), -pr['id']))
-    has_prs = bool(prs)
+    has_prs = bool(prs) if has_connected_prs is None else has_connected_prs
     repos = sorted({repository_label(p) for p in prs})
     content = ('<div class="heading home-heading"><div><h1>PR 리뷰</h1>'
                '<p class="home-description">연결한 저장소의 열린 PR을 중요도 순으로 확인하세요.</p></div>' + heading_toolbar + '</div>'
@@ -326,7 +388,8 @@ def listing(prs, query, csrf, heading_toolbar=""):
                '<p>중요도 순, 같은 중요도에서는 리뷰 요청 우선, 미확인은 마지막</p></div>')
     # 검색어와 저장소는 한 폼으로 제출하고, 탭 선택은 숨은 값으로 유지한다.
     tab = query.get('tab', [''])[0] if query.get('tab', [''])[0] in {key for key, _, _ in TABS} else ''
-    content += '<form class="filters pr-filters" method="get">' + (f'<input type="hidden" name="tab" value="{tab}">' if tab else '')
+    content += team_filter
+    content += '<form class="filters pr-filters" method="get">' + ''.join(f'<input type="hidden" name="{key}" value="{esc(query[key][0])}">' for key in ('team_host', 'team') if query.get(key)) + (f'<input type="hidden" name="tab" value="{tab}">' if tab else '')
     content += ('<label class="pr-search"><span class="sr-only">PR 검색</span><input type="search" name="pr_q" value="' + esc(query.get('pr_q', [''])[0][:200])
                 + '" maxlength="200" placeholder="제목, 저장소, 작성자로 검색"></label>')
     if len(repos) > 1:
@@ -338,7 +401,7 @@ def listing(prs, query, csrf, heading_toolbar=""):
     term = query.get('pr_q', [''])[0][:200].casefold()
     base = [pr for pr in prs if (not query.get('repo', [''])[0] or repository_label(pr) == query['repo'][0])
             and (not term or term in ' '.join([repository_label(pr), str(pr['number']), pr['title'] or '', pr['author'] or '']).casefold())]
-    keep = [(k, query[k][0]) for k in ('pr_q', 'repo') if query.get(k, [''])[0]]
+    keep = [(k, query[k][0]) for k in ('pr_q', 'repo', 'team_host', 'team') if query.get(k, [''])[0]]
     content += '<nav class="pr-tabs" aria-label="PR 보기">' + ''.join(
         f'<a href="/?{esc(urlencode(keep + ([("tab", key)] if key else [])))}"' + (' aria-current="page"' if key == tab else '')
         + f'><span>{title}</span><strong>{sum(map(test, base))}</strong></a>' for key, title, test in TABS) + '</nav>'
@@ -401,11 +464,112 @@ def github(pr):
     return None
 
 
-def render_diff(diff, numbered=False, line_numbers=True):
+# 변경 diff에 보이는 정의만 후보로 삼는다. 언어별 이름 해석이나 전체 저장소 색인은 하지 않는다.
+SYMBOL_CALL = re.compile(r'\b([A-Za-z_][A-Za-z0-9_]*)\s*(?=\()')
+SYMBOL_DEF = re.compile(r'^\s*(?:async\s+)?(?:def|function|func)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(|^\s*(?:(?:public|private|protected|static|final|async|override|virtual|internal|protected|abstract|synchronized)\s+)*(?:[A-Za-z_][\w.<>,?\[\]]*\s+)+([A-Za-z_][A-Za-z0-9_]*)\s*\(')
+SYMBOL_SKIP = frozenset(('if', 'for', 'while', 'switch', 'catch', 'return', 'new', 'throw', 'sizeof', 'print'))
+
+
+def definition_name(text):
+    if re.match(r'^\s*(?:return|await|throw|yield|raise|new|class|interface|enum|struct|with|assert|if|elif|else|for|while|try|except|finally|import|from|del|case|switch|catch|using)\b', text):
+        return None
+    match = SYMBOL_DEF.match(text)
+    return (match.group(1) or match.group(2)) if match else None
+
+
+# 같은 이름의 컬렉션·표준 라이브러리 메서드를 프로젝트 함수로 단정하지 않는다.
+BUILTIN_METHODS = frozenset(('add', 'append', 'clear', 'contains', 'count', 'extend', 'filter', 'find',
+                             'forEach', 'get', 'has', 'includes', 'indexOf', 'insert', 'join', 'keys',
+                             'length', 'map', 'pop', 'push', 'reduce', 'remove', 'replace', 'set',
+                             'size', 'sort', 'split', 'toString', 'values'))
+
+
+def code_symbols(line):
+    """한 줄에서 문자열·주석을 가리고 함수 이름의 위치를 찾는다."""
+    masked = list(line)
+    quote = None
+    escaped = False
+    for index, char in enumerate(line):
+        if quote:
+            masked[index] = ' '
+            if escaped:
+                escaped = False
+            elif char == chr(92):
+                escaped = True
+            elif char == quote:
+                quote = None
+        elif char in (chr(34), chr(39), '`'):
+            quote = char
+            masked[index] = ' '
+        elif char == '#' or line[index:index + 2] in ('//', '/*'):
+            masked[index:] = ' ' * (len(line) - index)
+            break
+    visible = ''.join(masked)
+    definition = definition_name(visible[1:] if visible[:1] in (' ', '+', '-') else visible)
+    found = []
+    definition_seen = False
+    for match in SYMBOL_CALL.finditer(visible):
+        name = match.group(1)
+        if name in SYMBOL_SKIP:
+            continue
+        is_definition = name == definition and not definition_seen
+        before = visible[:match.start(1)].rstrip()
+        if not is_definition and before.endswith('.') and name in BUILTIN_METHODS:
+            continue
+        found.append((match.start(1), match.end(1), name, 'definition' if is_definition else 'usage'))
+        definition_seen = definition_seen or is_definition
+    return found
+
+
+def symbol_candidates(units, file_href):
+    definitions, occurrences = {}, []
+    for unit in units:
+        change_id = unit.get('change_id', '')
+        if not re.fullmatch(r'h[0-9]+', change_id) or unit.get('excluded'):
+            continue
+        old_line = new_line = None
+        for number, line in enumerate(unit.get('diff', '').splitlines()):
+            if line.startswith('@@'):
+                match = re.match(r'@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@', line)
+                old_line, new_line = (int(match.group(1)), int(match.group(2))) if match else (None, None)
+                continue
+            if old_line is None or not line.startswith((' ', '+', '-')):
+                continue
+            side = 'old' if line[0] == '-' else 'new' if line[0] == '+' else 'both'
+            line_no = old_line if side == 'old' else new_line
+            if side != 'new': old_line += 1
+            if side != 'old': new_line += 1
+            target = file_href(unit['file_path']).split('#', 1)[0] + '&symbol_from=1#symbol-' + change_id + '-' + str(number)
+            for _, _, name, kind in code_symbols(line):
+                item = {'path': unit['file_path'], 'side': side, 'href': target, 'kind': kind,
+                        'line': None if unit.get('redacted') else line_no, 'unit': change_id}
+                occurrences.append((name, item))
+                if kind == 'definition': definitions.setdefault(name, []).append(item)
+    result = {name: [] for name in definitions}
+    for name, item in occurrences:
+        if name in result and item not in result[name]:
+            result[name].append(item)
+    return result
+
+
+def clickable_code(line, known_symbols, side):
+    known_symbols = known_symbols or {}
+    chunks, previous = [], 0
+    for start, end, name, kind in code_symbols(line):
+        definitions = known_symbols.get(name, [])
+        if not any(item['kind'] == 'definition' and (side == 'both' or item['side'] in ('both', side)) for item in definitions):
+            continue
+        chunks.append(esc(line[previous:start]))
+        chunks.append(f'<button type="button" class="symbol-call" data-symbol="{esc(name)}" aria-label="{esc(name)} 정의와 사용 위치 보기">{esc(name)}</button>')
+        previous = end
+    return ''.join(chunks) + esc(line[previous:])
+
+
+def render_diff(diff, numbered=False, line_numbers=True, symbol_unit=None, symbol_ids=True, known_symbols=()):
     lines = []
     in_hunk = False
     old_line = new_line = None
-    for line in diff.splitlines(keepends=True):
+    for line_index, line in enumerate(diff.splitlines(keepends=True)):
         if line.startswith('diff --git '):
             in_hunk = False
         if line.startswith('@@'):
@@ -430,8 +594,12 @@ def render_diff(diff, numbered=False, line_numbers=True):
                 left, old_line = old_line, old_line + 1
             if kind != 'delete' and new_line is not None:
                 right, new_line = new_line, new_line + 1
-        lines.append(f'<span class="diff-{kind} diff-line"><span class="diff-number">{left}</span>'
-                     f'<span class="diff-number">{right}</span><span class="diff-code">{esc(line.rstrip(chr(10)).rstrip(chr(13)))}</span></span>')
+        text = line.rstrip(chr(10)).rstrip(chr(13))
+        side = 'old' if kind == 'delete' else 'new' if kind == 'add' else 'both'
+        target = f' id="symbol-{symbol_unit}-{line_index}"' if symbol_unit and symbol_ids and in_hunk and any(name in known_symbols for _, _, name, _ in code_symbols(text)) else ''
+        code = clickable_code(text, known_symbols, side) if symbol_unit and in_hunk and kind in ('add', 'delete', 'context') else esc(text)
+        lines.append(f'<span class="diff-{kind} diff-line"{target} data-symbol-side="{side}"><span class="diff-number">{left}</span>'
+                     f'<span class="diff-number">{right}</span><span class="diff-code">{code}</span></span>')
     return '<pre class="diff' + (' numbered' if numbered else '') + '">' + ''.join(lines) + '</pre>'
 
 
@@ -464,14 +632,19 @@ def file_nav(neighbors):
             + '<span class="file-step-hint">단축키 j 다음, k 이전</span>' + link(following, '다음 파일 →', 'next') + '</nav>')
 
 
-def file_panel(row, members, items, github_link, *, active=True, neighbors=None):
+def file_panel(row, members, items, github_link, *, active=True, neighbors=None, inline=False, position=None, known_symbols=()):
     path = row['path']
     level = {3: 'high', 2: 'mid', 1: 'low'}.get(row['rank'], 'unanalyzed')
-    attributes = (f' id="{file_anchor(path)}" tabindex="-1" data-file-panel data-file-path="{esc(path)}"'
-                  + ('' if active else ' hidden'))
+    attributes = '' if inline else (f' id="{file_anchor(path)}" tabindex="-1" data-file-panel'
+                                    + (f' data-file-position="{position}"' if position else '')
+                                    + f' data-file-path="{esc(path)}"'
+                                    + ('' if active else ' hidden'))
     content = f'<section class="detail-file"{attributes}><header class="detail-file-heading"><h3 class="file-title">{full_path_title(path)}</h3><span class="badge {level}">중요도 {esc(label(level))}</span><span class="file-count">변경 {len(members)}개</span></header>'
     if row['focus_reason']:
         content += '<p class="file-focus-reason"><strong>중요한 이유</strong> ' + esc(row['focus_reason']) + '</p>'
+    if 'logic_without_tests' in row['rule'] and (row['rank'] >= 2 or row['focus_rank'] is not None):
+        content += ('<details class="test-change-note"><summary>관련 테스트 변경 미확인</summary>'
+                    '<p>이번 PR의 diff에서 이 파일과 연결되는 테스트 변경을 확인하지 못했습니다. 기존 테스트의 유무나 실행 결과는 확인하지 않았습니다.</p></details>')
     if github_link:
         digest = hashlib.sha256(path.encode()).hexdigest()
         content += f'<p><a href="{esc(github_link)}/files#diff-{digest}" target="_blank" rel="noopener noreferrer">GitHub에서 이 파일 보기 ↗<span class="sr-only"> (새 탭)</span></a></p>'
@@ -481,11 +654,11 @@ def file_panel(row, members, items, github_link, *, active=True, neighbors=None)
         content += '<div class="file-change"><p class="change-reason">' + esc(reason) + '</p>'
         if unit.get('redacted'):
             content += '<p class="muted">일부 민감 정보를 가려 줄 번호를 표시하지 않습니다. GitHub 원문에서 위치를 확인하세요.</p>'
-        if 'logic_without_tests' in unit.get('candidates', []):
-            content += '<p class="muted">제공된 diff에서 관련 테스트 변경을 확인하지 못했습니다.</p>'
         if unit.get('diff'):
-            content += render_diff(unit['diff'], numbered=True, line_numbers=not unit.get('redacted'))
-        flags = unit.get('candidates', [])
+            content += render_diff(unit['diff'], numbered=True, line_numbers=not unit.get('redacted'),
+                                   symbol_unit=unit['change_id'] if re.fullmatch(r'h[0-9]+', unit.get('change_id', '')) else None,
+                                   symbol_ids=not inline, known_symbols=known_symbols)
+        flags = [flag for flag in unit.get('candidates', []) if flag != 'logic_without_tests']
         model_flags = item.get('risk_flags', []) if item else []
         if flags or model_flags:
             content += '<details class="change-details"><summary>분석 근거 더보기</summary>'
@@ -508,13 +681,24 @@ def detail(pr, query, config, offline=False, analysis_panel=""):
     for unit in pr['units']:
         units_by_file.setdefault(unit['file_path'], []).append(unit)
     link = github(pr)
-    def file_href(path):
+    def file_href(path, preserve_search=False):
         params = [('file', path)]
         order = query.get('order', [''])[0]
         if order in ('priority', 'original'):
             params.append(('order', order))
+        if preserve_search and query.get('unit_q', [''])[0]:
+            params.append(('unit_q', query['unit_q'][0][:200]))
         return '?' + urlencode(params) + '#' + file_anchor(path)
-    content = f'<p><a href="/">← PR 목록</a></p><header class="detail-header"><h1>{esc(pr["title"])}</h1>'
+    candidates = symbol_candidates(pr['units'], file_href)
+    content = '<div id="symbol-index" data-symbol-index="' + esc(json.dumps(candidates, ensure_ascii=False)) + '"></div>'
+    content += ('<div class="symbol-chooser" id="symbol-chooser" hidden><div class="symbol-dialog" role="dialog" aria-modal="true" aria-labelledby="symbol-title" aria-describedby="symbol-description">'
+                '<div class="symbol-dialog-heading"><div><span class="symbol-dialog-kicker">PR 변경 코드</span>'
+                '<h2 id="symbol-title">함수 정의와 사용 위치</h2></div>'
+                '<button type="button" class="symbol-close" data-symbol-close aria-label="함수 위치 닫기">×</button></div>'
+                '<p class="symbol-dialog-description" id="symbol-description">이 PR에서 이름이 일치하는 위치입니다. 실제 연결 여부를 확인하세요.</p>'
+                '<div class="symbol-groups" data-symbol-results></div>'
+                '<p class="symbol-dialog-footer">이동 후 이전 위치로 돌아올 수 있습니다.</p></div></div>')
+    content += f'<p><a href="/">← PR 목록</a></p><header class="detail-header"><h1>{esc(pr["title"])}</h1>'
     content += meta(repository_label(pr) + ' #' + str(pr['number']), pr['author'])
     if link:
         content += f'<p><a href="{esc(link)}" target="_blank" rel="noopener noreferrer">GitHub 원문 ↗<span class="sr-only"> (새 탭)</span></a></p>'
@@ -529,26 +713,34 @@ def detail(pr, query, config, offline=False, analysis_panel=""):
         content += '<aside class="detail-warning"><strong>분석 허용 필요</strong><p>이 저장소의 분석이 허용되지 않았습니다.</p></aside>'
     elif a and pr['status'] not in ('completed', 'partial'):
         content += '<aside class="detail-warning"><strong>' + esc(label(pr['status'])) + '</strong><p>' + esc(a['error'] or '분석을 다시 요청하거나 상태를 확인하세요.') + '</p></aside>'
+    if current and 'prompt_version' in a.keys():
+        from .analyze.protocol import PROMPT_VERSION
+        if a['prompt_version'] != PROMPT_VERSION:
+            content += '<p class="notice">이 결과는 이전 중요도 기준으로 분석했습니다. 현재 기준을 적용하려면 다시 분석하세요.</p>'
     intent = a['intent'] if current and a['intent'] else '아직 최신 변경의 분석 결과가 없습니다.'
     content += '<section class="detail-overview" aria-label="PR 검토 요약"><article class="detail-insight"><p class="detail-kicker">PR 이해</p><h2>변경 의도</h2>'
     content += f'<p class="detail-intent">{esc(intent)}</p>'
     body = sanitize(pr.get('body') or '')
     if body.strip():
         content += '<details class="detail-description"><summary>PR 원래 설명 보기</summary><p>' + esc(body) + '</p></details>'
+    missing_tests = sum('logic_without_tests' in row['rule'] for row in rows)
+    if missing_tests:
+        content += (f'<p class="test-summary">관련 테스트 변경 미확인 파일 {missing_tests}개</p>'
+                    '<p class="muted test-summary-help">이번 PR의 diff 기준이며 기존 테스트의 유무나 실행 결과는 확인하지 않았습니다.</p>')
     content += '</article></section>' + analysis_panel
     top = [row for row in rows if row['rank'] >= 2 or
-           (row['rank'] and (row['rule'] or row['focus_rank'] is not None))][:3] if current else []
+           (row['rank'] and (priority_rules(row) or row['focus_rank'] is not None))][:3] if current else []
     content += '<section class="detail-focus"><div class="section-heading"><h2>먼저 볼 파일</h2><p>PR 목적과 중요도를 기준으로 확인할 변경입니다.</p></div>'
     if top:
         content += '<div class="focus-list">'
         for row in top:
             level = {3: 'high', 2: 'mid', 1: 'low'}.get(row['rank'], 'unanalyzed')
             reason = row['focus_reason'] or row['reason'] or '규칙에 따라 확인이 필요한 변경입니다.'
-            # 같은 diff를 두 번 그리지 않고 아래 작업 공간의 해당 파일을 연다.
-            content += (f'<a class="focus-entry focus-file" href="{esc(file_href(row["path"]))}" data-select-file="{file_anchor(row["path"])}">'
+            content += (f'<details class="focus-entry"><summary class="focus-file">'
                         f'<span class="badge {level}">{esc(label(level))}</span>'
                         f'<span class="focus-text">{file_label(row["path"])}<span class="focus-reason">{esc(reason)}</span></span>'
-                        '<span class="focus-toggle" aria-hidden="true">→</span></a>')
+                        '<span class="focus-toggle" aria-hidden="true">⌄</span></summary>'
+                        '<div class="focus-inline">' + file_panel(row, units_by_file[row['path']], shown['items'], link, inline=True, known_symbols=candidates) + '</div></details>')
         content += '</div>'
     else:
         content += '<p class="muted">' + ('높음 또는 보통으로 분석된 파일이 없습니다.' if current else '분석 후 중요한 파일과 선정 이유를 확인할 수 있습니다.') + '</p>'
@@ -560,33 +752,38 @@ def detail(pr, query, config, offline=False, analysis_panel=""):
     uncertainties = (pr.get('result') or {}).get('uncertainties', []) if current else []
     redacted_paths = list(dict.fromkeys(u['file_path'] for u in pr['units'] if u.get('redacted')))
     if issues or extras or uncertainties or redacted_paths or (current and pr['status'] == 'partial'):
-        content += '<aside class="detail-caution"><strong>직접 확인이 필요한 범위</strong>'
+        paths = list(dict.fromkeys(unit['file_path'] for unit in issues))
+        valid_uncertainties = [u for u in uncertainties if isinstance(u, dict) and isinstance(u.get('reason'), str)]
+        content += '<aside class="detail-caution"><div class="scope-heading"><strong>분석 범위 확인</strong><p>분석하지 못했거나 추가 확인이 필요한 부분입니다.</p></div><div class="scope-summary">'
+        for title, count in [('제외 또는 미분석 파일', len(paths)), ('민감 정보 가림 파일', len(redacted_paths)), ('추가 확인', len(valid_uncertainties) + sum(stats[key] for key, _ in extras))]:
+            if count:
+                content += f'<span>{esc(title)} <strong>{count}</strong></span>'
+        content += '</div>'
         if not (issues or extras or uncertainties or redacted_paths):
             content += '<p>일부 변경을 분석하지 못했습니다. <a href="/status">상태 확인</a></p>'
-        if issues:
-            paths = list(dict.fromkeys(unit['file_path'] for unit in issues))
-            content += '<p>제외되었거나 분석하지 못한 파일 ' + str(len(paths)) + '개</p><div class="caution-files">'
+        if paths:
+            content += '<details class="scope-details"><summary>제외 또는 미분석 파일 보기</summary><div class="caution-files">'
             for path in paths:
-                href = file_href(path)
-                content += f'<a href="{esc(href)}" data-select-file="{file_anchor(path)}">{esc(path)}</a>'
-            content += '</div>'
+                reasons = list(dict.fromkeys(unit.get('exclusion_reason') or unit.get('omission_reason') or '분석 결과 없음'
+                                             for unit in issues if unit['file_path'] == path))
+                content += (f'<span><a href="{esc(file_href(path))}" data-select-file="{file_anchor(path)}">{esc(path)}</a>'
+                            f' <span class="muted">{esc(", ".join(reasons))}</span></span>')
+            content += '</div></details>'
         if redacted_paths:
-            content += '<p>민감 정보를 가린 파일</p><div class="caution-files">'
+            content += '<details class="scope-details"><summary>민감 정보를 가린 파일 보기</summary><div class="caution-files">'
             for path in redacted_paths:
-                href = file_href(path)
-                content += f'<a href="{esc(href)}" data-select-file="{file_anchor(path)}">{esc(path)}</a>'
-            content += '</div>'
-        for key, title in extras:
-            content += f'<p>{esc(title)} {esc(stats[key])} <a href="?order=priority#file-changes">전체 파일 확인</a></p>'
-        paths_by_id = {unit['change_id']: unit['file_path'] for unit in pr['units']}
-        for uncertainty in uncertainties:
-            if not isinstance(uncertainty, dict):
-                continue
-            path = paths_by_id.get(uncertainty.get('change_id'))
-            reason = uncertainty.get('reason')
-            if path and isinstance(reason, str):
-                href = file_href(path)
-                content += f'<p><a href="{esc(href)}" data-select-file="{file_anchor(path)}">{esc(path)}</a>: {esc(reason)}</p>'
+                content += f'<a href="{esc(file_href(path))}" data-select-file="{file_anchor(path)}">{esc(path)}</a>'
+            content += '</div></details>'
+        if extras or valid_uncertainties:
+            content += '<details class="scope-details"><summary>추가 확인 내용 보기</summary>'
+            for key, title in extras:
+                content += f'<p>{esc(title)} {esc(stats[key])} <a href="?order=priority#file-changes">전체 파일 확인</a></p>'
+            paths_by_id = {unit['change_id']: unit['file_path'] for unit in pr['units']}
+            for uncertainty in valid_uncertainties:
+                path = paths_by_id.get(uncertainty.get('change_id'))
+                if path:
+                    content += f'<p><a href="{esc(file_href(path))}" data-select-file="{file_anchor(path)}">{esc(path)}</a>: {esc(uncertainty["reason"])}</p>'
+            content += '</details>'
         content += '</aside>'
     if a or snapshot:
         content += '<details class="detail-diagnostics"><summary>수집 및 분석 상태 보기</summary>'
@@ -600,7 +797,9 @@ def detail(pr, query, config, offline=False, analysis_panel=""):
                 content += meta('전체 맥락 발췌 ' + str(stats.get('overview_sampled', 0)) + '/' + str(stats['overview_eligible']))
             content += meta('수집 ' + human_time(snapshot['collected_at']), '분석 ' + (human_time(a['created_at']) if a else '대기'))
         content += '</details>'
-    content += '<section class="detail-changes" id="file-changes"><div class="section-heading"><h2>파일별 변경</h2><p>파일을 열어 변경 내용과 검토 근거를 확인하세요.</p></div><nav class="toolbar segments" aria-label="변경 보기">'
+    if query.get('symbol_from') == ['1']:
+        content += '<button type="button" class="btn secondary sm symbol-return" data-symbol-return>← 이전 위치로 돌아가기</button>'
+    content += '<section class="detail-changes" id="file-changes"><div class="section-heading"><h2>파일별 변경</h2><p>목록에서 파일을 선택하고 변경 내용과 검토 근거를 확인하세요.</p></div><nav class="toolbar segments" aria-label="변경 보기">'
     for href, title, selected in [('?order=original', '원래 파일 순서', query.get('order', [''])[0] == 'original' and query.get('diff') != ['1']),
                                   ('?order=priority', '검토 우선순위', query.get('order', [''])[0] != 'original' and query.get('diff') != ['1']),
                                   ('?diff=1', '전체 diff', query.get('diff', [''])[0] == '1')]:
@@ -646,7 +845,11 @@ def detail(pr, query, config, offline=False, analysis_panel=""):
     controls = controls.replace('</label><button', '</label><div class="file-search-suggestions" data-file-suggestions hidden><p class="file-search-caption">이 PR의 파일</p><ul id="file-search-options" role="listbox">' + choices + '</ul><p data-file-no-match hidden>일치하는 파일이 없습니다.</p></div><button', 1)
     content += '<div class="file-search-controls" data-file-search>' + controls + '</div>'
     if rows:
-        content += '<div class="detail-file-layout" data-file-workspace><nav class="detail-file-nav" aria-label="현재 페이지 파일 목록"><strong>파일 목록</strong>'
+        positions = {row['path']: index + 1 for index, row in enumerate(filtered)}
+        total = len(filtered)
+        selected_position = positions[selected_file]
+        content += ('<div class="detail-file-layout" data-file-workspace><nav class="detail-file-nav" aria-label="현재 페이지 파일 목록">'
+                    f'<div class="file-nav-heading"><strong>파일 목록</strong><span>{total}개</span></div>')
         content += '<label class="mobile-file-select">파일 선택<select data-file-select>'
         for row in rows:
             active = row['path'] == selected_file
@@ -659,12 +862,19 @@ def detail(pr, query, config, offline=False, analysis_panel=""):
             params.append(('file', row['path']))
             href = '?' + urlencode(params) + '#' + file_anchor(row['path'])
             content += (f'<a href="{esc(href)}" data-select-file="{file_anchor(row["path"])}"' + (' aria-current="true"' if active else '')
-                        + f'>{file_label(row["path"])}<span class="badge {level}">{esc(label(level))}</span></a>')
-        content += '</div>' + navigation + '</nav><div class="detail-file-list"><p class="sr-only" role="status" aria-live="polite" data-selected-file>선택한 파일: ' + esc(selected_file) + '</p>'
-    for index, row in enumerate(rows):
-        neighbors = tuple((file_href(other['path']), other['path']) if 0 <= index + step < len(rows) and (other := rows[index + step]) else None
+                        + f'>{file_label(row["path"])}<span class="file-nav-meta"><span class="badge {level}">{esc(label(level))}</span>'
+                        + f'<span>변경 단위 {len(units_by_file[row["path"]])}개</span></span></a>')
+        content += ('</div>' + navigation + '</nav><div class="detail-file-list">'
+                    f'<p class="file-position" data-file-position-label>파일 {selected_position} / {total}</p>'
+                    '<p class="sr-only" role="status" aria-live="polite" data-selected-file>선택한 파일: ' + esc(selected_file) + '</p>')
+    for row in rows:
+        index = positions[row['path']] - 1
+        neighbors = tuple((file_href(other['path'], preserve_search=True), other['path'])
+                          if 0 <= index + step < len(filtered) and (other := filtered[index + step]) else None
                           for step in (-1, 1))
-        content += file_panel(row, units_by_file[row['path']], shown['items'], link, active=row['path'] == selected_file, neighbors=neighbors)
+        content += file_panel(row, units_by_file[row['path']], shown['items'], link,
+                              active=row['path'] == selected_file, neighbors=neighbors,
+                              position=f'{index + 1} / {len(filtered)}', known_symbols=candidates)
     if rows:
         content += '</div></div>'
     elif not pr['units']:
@@ -741,7 +951,9 @@ class Handler(BaseHTTPRequestHandler):
                 prs = load_prs(conn, self.server.config)
                 if url.path == '/':
                     query = parse_qs(url.query)
-                    body = listing(prs, query, csrf, web_jobs.collect_panel(conn, csrf, offline, compact=True)) + web_jobs.script()
+                    has_connected_prs = any(pr.get('tracked', 1) for pr in prs)
+                    prs, team_filter = home_team_filter(self.server, conn, prs, query, csrf, offline)
+                    body = listing(prs, query, csrf, web_jobs.collect_panel(conn, csrf, offline, compact=True), team_filter, has_connected_prs) + web_jobs.script()
                 else:
                     match = re.fullmatch(r'/pr/([1-9][0-9]*)', url.path)
                     pr = next((p for p in prs if match and p['id'] == int(match[1])), None)
