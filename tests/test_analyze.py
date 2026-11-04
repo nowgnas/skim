@@ -284,6 +284,51 @@ class AnalysisTests(unittest.TestCase):
         self.assertTrue(all('overview' in json.loads(call.split('\n', 1)[1])['data']
                             for call in self.fake.calls if json.loads(call.split('\n', 1)[1])['stage'] == 'chunk'))
 
+    def test_multichunk_foreign_uncertainties_and_strict_items(self):
+        diff = 'diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n'
+        diff += ''.join(f'@@ -{i} +{i} @@\n-old{i}\n+new{i}\n' for i in range(1, 102))
+        self.snapshot(diff)
+        original = self.fake.generate
+        local = dict(change_id='h1', reason='청크 안의 미확인 내용')
+        foreign = dict(change_id='h101', reason='다른 청크의 미확인 내용')
+
+        for mismatch in (None, 'missing', 'duplicate', 'foreign'):
+            with self.subTest(mismatch=mismatch):
+                with self.conn:
+                    self.conn.execute('UPDATE pull_requests SET title=?', (str(mismatch),))
+                self.fake.calls.clear()
+
+                def generate(request, schema):
+                    payload = json.loads(request.split('\n', 1)[1])
+                    value = json.loads(original(request, schema))
+                    if payload['stage'] == 'overview':
+                        self.assertIn('h101', {u['change_id'] for u in payload['data']['samples']})
+                        value['focus'] = [dict(change_id='h101', reason='전체 변경의 핵심')]
+                    elif payload['stage'] == 'chunk' and payload['data']['units'][0]['change_id'] == 'h1':
+                        self.assertEqual(payload['data']['overview']['focus'][0]['change_id'], 'h101')
+                        self.assertNotIn('h101', {u['change_id'] for u in payload['data']['units']})
+                        value['uncertainties'] = [foreign, local]
+                        if mismatch == 'missing':
+                            value['items'].pop()
+                        elif mismatch == 'duplicate':
+                            value['items'][-1] = value['items'][0]
+                        elif mismatch == 'foreign':
+                            value['items'][-1]['change_id'] = 'h101'
+                    return json.dumps(value)
+
+                self.fake.generate = generate
+                result = self.analyzer.run(budgeted=False)[0]
+                payloads = [json.loads(call.split('\n', 1)[1]) for call in self.fake.calls]
+                if mismatch is None:
+                    self.assertEqual(result['status'], 'completed')
+                    self.assertEqual([p['stage'] for p in payloads], ['overview', 'chunk', 'chunk', 'synthesis'])
+                    self.assertEqual(result['coverage']['analyzed'], 101)
+                    self.assertEqual(result['uncertainties'], [local])
+                    self.assertEqual(payloads[-1]['data']['uncertainties'], [local])
+                else:
+                    self.assertEqual(result['status'], 'failed')
+                    self.assertEqual([p['stage'] for p in payloads], ['overview', 'chunk', 'chunk'])
+
     def test_synthesis_rejects_foreign_and_duplicate_ids(self):
         from skim.analyze.protocol import validate_synthesis
         for focus in ([{'change_id': 'h9', 'reason': '외부 ID'}],
@@ -343,8 +388,14 @@ new mode 100755
                 validate_chunk(json.dumps(dict(items=items, uncertainties=[])), {'h1'})
         with self.assertRaises(ValueError):
             validate_chunk('{"items":[],"items":[],"uncertainties":[]}', set())
-        with self.assertRaises(ValueError):
-            validate_chunk(json.dumps(dict(items=[item], uncertainties=[dict(change_id='h2', reason='모름')])), {'h1'})
+
+    def test_chunk_uncertainties_keep_only_chunk_ids(self):
+        item = dict(change_id='h1', importance='mid', reason='변경', risk_flags=[])
+        local = dict(change_id='h1', reason='청크 안의 미확인 내용')
+        foreign = dict(change_id='h2', reason='다른 청크의 미확인 내용')
+        value = validate_chunk(json.dumps(dict(items=[item], uncertainties=[foreign, local])), {'h1'})
+        self.assertEqual(value['items'], [item])
+        self.assertEqual(value['uncertainties'], [local])
 
     def test_install_script_stays_rule_only(self):
         self.assertNotIn('install_script', FLAGS)
