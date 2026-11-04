@@ -80,9 +80,10 @@ def prepare_log(data_dir):
     return log
 
 
-def validate_existing(app, agent, root, config, check_environment=True):
+def validate_existing(app, agent, root, config, check_environment=True, use_installed_environment=False):
     expected = {'root': real_path(str(root)), 'data_dir': str(config.data_dir.resolve()),
                 'environment': environment_settings()}
+    installed_environment = None
     if app.exists() or app.is_symlink():
         trusted(app, directory=True)
         marker = app / 'Contents/Resources/skim-managed.plist'
@@ -93,8 +94,11 @@ def validate_existing(app, agent, root, config, check_environment=True):
         trusted(marker)
         with marker.open('rb') as stream:
             saved = plistlib.load(stream)
-        if any(real_path(saved.get(k)) != expected[k] for k in ('root', 'data_dir')) or (check_environment and normalized_environment(saved.get('environment')) != expected['environment']):
+        installed_environment = normalized_environment(saved.get('environment'))
+        if any(real_path(saved.get(k)) != expected[k] for k in ('root', 'data_dir')) or (check_environment and not use_installed_environment and installed_environment != expected['environment']):
             raise ValueError('기존 앱의 마커 또는 환경이 현재 설치와 다릅니다.')
+        if use_installed_environment and not isinstance(installed_environment, dict):
+            raise ValueError('기존 앱의 실행 환경을 확인할 수 없습니다.')
     if agent.exists() or agent.is_symlink():
         trusted(agent, private=True)
         with agent.open('rb') as stream:
@@ -106,8 +110,9 @@ def validate_existing(app, agent, root, config, check_environment=True):
             raise ValueError('기존 LaunchAgent는 다른 설치에 속합니다.')
         if check_environment and (real_path(saved.get('StandardOutPath')) != real_path('/dev/null') or real_path(saved.get('StandardErrorPath')) != real_path(str(config.data_dir / 'launchagent.stderr.log'))):
             raise ValueError('기존 LaunchAgent의 로그 설정이 현재 설치와 다릅니다.')
-        if check_environment and normalized_environment(saved.get('EnvironmentVariables')) != expected['environment']:
-            raise ValueError('기존 LaunchAgent와 현재 환경이 다릅니다. 같은 환경에서 실행하세요.')
+        required_environment = installed_environment if use_installed_environment else expected['environment']
+        if check_environment and normalized_environment(saved.get('EnvironmentVariables')) != required_environment:
+            raise ValueError('기존 앱과 LaunchAgent의 실행 환경이 다릅니다. 설치 상태를 확인하세요.' if use_installed_environment else '기존 LaunchAgent와 현재 환경이 다릅니다. 같은 환경에서 실행하세요.')
 
 
 def managed_app_unavailable(root=None):
@@ -207,7 +212,9 @@ def install_app(config, *, restart=False):
     agent = home / 'Library/LaunchAgents/com.skim.web.plist'
     label = f'gui/{os.getuid()}/com.skim.web'
     try:
-        validate_existing(app, agent, root, config)
+        # 완전한 기존 설치는 설치 당시 환경을 사용한다. 일부만 있으면 새 파일과 기존 파일의 환경을 비교한다.
+        use_installed_environment = app.exists() and agent.exists()
+        validate_existing(app, agent, root, config, use_installed_environment=use_installed_environment)
         prepare_log(config.data_dir.resolve())
         status = subprocess.run(['/bin/launchctl', 'print', label], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
         if status == 0:
