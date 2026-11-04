@@ -27,14 +27,36 @@ class UpdateCommandTests(unittest.TestCase):
             self.assertEqual(cli.main(['update']), 0)
         self.assertIn('정식 릴리스가 없습니다', output.getvalue())
 
-    def test_release_exists_does_not_claim_update(self):
+    def run_update(self, argv, tag):
         from skim import cli
         output, errors = io.StringIO(), io.StringIO()
-        with patch('skim.releases.fetch_latest_authenticated', return_value=SimpleNamespace(tag='v1.2.3')), \
+        release = releases.parse_release(ReleaseTests().release(tag))
+        with patch('skim.releases.fetch_latest_authenticated', return_value=release), \
+                patch('skim.cli.Config.load', side_effect=AssertionError('설정 변경 금지')), \
+                patch('skim.releases.download_private_asset', side_effect=AssertionError('다운로드 금지')), \
                 redirect_stdout(output), redirect_stderr(errors):
-            self.assertEqual(cli.main(['update']), 1)
-        self.assertIn('v1.2.3', output.getvalue())
-        self.assertIn('아직 준비 중', errors.getvalue())
+            code = cli.main(argv)
+        return code, output.getvalue(), errors.getvalue()
+
+    def test_update_check_reports_newer_release(self):
+        code, output, _ = self.run_update(['update', '--check'], 'v9.0.0')
+        self.assertEqual(code, 0)
+        self.assertIn('사용 가능한 정식 릴리스: v9.0.0', output)
+
+    def test_update_same_version_is_current(self):
+        for argv in (['update'], ['update', '--yes']):
+            code, output, _ = self.run_update(argv, 'v1.0.0')
+            self.assertEqual(code, 0)
+            self.assertIn('최신 버전입니다: v1.0.0', output)
+
+    def test_ownership_development_checkout_only_guides(self):
+        code, output, errors = self.run_update(['update', '--yes'], 'v9.0.0')
+        self.assertEqual(code, 1)
+        self.assertIn('v9.0.0', output)
+        self.assertIn('정식 설치본이 아니어서', errors)
+        for text in (output, errors):
+            self.assertNotIn('·', text)
+            self.assertNotIn('—', text)
 
     def test_auth_failure_is_reported(self):
         from skim import cli
@@ -569,9 +591,9 @@ class BackupTests(unittest.TestCase):
 
 
 class BootstrapTests(unittest.TestCase):
-    def payloads(self):
+    def payloads(self, tag='v1.0.0', version=None):
         fixture = ReleaseTests()
-        release = releases.parse_release(fixture.release('v1.0.0'))
+        release = releases.parse_release(fixture.release(tag))
         manifest = json.dumps({'version': release.tag, 'archive': 'skim-macos.tar.gz'}).encode()
         output = io.BytesIO()
         repo = Path(__file__).resolve().parents[1]
@@ -579,6 +601,9 @@ class BootstrapTests(unittest.TestCase):
                  'skim/lib/python.sh': (repo / 'lib/python.sh').read_bytes()}
         for path in (repo / 'lib/skim').rglob('*.py'):
             files['skim/lib/skim/' + str(path.relative_to(repo / 'lib/skim'))] = path.read_bytes()
+        if version:
+            files['skim/lib/skim/__init__.py'] = files['skim/lib/skim/__init__.py'].replace(
+                b'__version__ = "1.0.0"', b'__version__ = "' + version.encode() + b'"')
         with tarfile.open(fileobj=output, mode='w:gz') as archive:
             for name, data in files.items():
                 info = tarfile.TarInfo(name)
@@ -786,6 +811,337 @@ class BootstrapTests(unittest.TestCase):
                 self.assertEqual(macos_bundle.uninstall_app(None), 1)
             self.assertFalse((home / 'Applications').exists())
             self.assertFalse((home / 'Library').exists())
+
+
+class Crash(BaseException):
+    """프로세스 강제 종료를 흉내 낸다. 일반 예외 처리로 복구되지 않는다."""
+
+
+class UpdateApplyTests(unittest.TestCase):
+    """정식 설치본 v1.0.0에서 v1.0.1로의 적용을 임시 홈과 가짜 릴리스로 검증한다."""
+
+    def setUp(self):
+        from skim import bootstrap
+        # launcher는 sticky 공유 임시 경로를 거부하므로 저장소 아래 임시 경로를 쓴다.
+        temporary = tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1])
+        self.addCleanup(temporary.cleanup)
+        self.home = Path(temporary.name)
+        environment = patch.dict(os.environ, {'HOME': str(self.home), 'SKIM_HOME': str(self.home / 'userdata')})
+        environment.start()
+        self.addCleanup(environment.stop)
+        fixture = BootstrapTests()
+        installed, payloads = fixture.payloads()
+        with patch('skim.releases.fetch_latest_authenticated', return_value=installed), redirect_stdout(io.StringIO()):
+            self.store = bootstrap.install(self.home, download=lambda r, n, limit: payloads[n])
+        self.release, self.payloads = fixture.payloads('v1.0.1', '1.0.1')
+        self.data = self.home / 'userdata/data'
+        self.data.mkdir(parents=True, mode=0o700)
+        with closing(sqlite3.connect(self.data / 'skim.db')) as connection, connection:
+            connection.execute('CREATE TABLE item(value TEXT)')
+            connection.execute("INSERT INTO item VALUES('saved')")
+        (self.data / 'skim.db').chmod(0o600)
+        self.module = self.store.root / 'versions/v1.0.0/lib/skim/update_apply.py'
+
+    def update(self, release=None, **options):
+        from skim import update_apply
+        options.setdefault('download', lambda r, n, limit: self.payloads[n])
+        options.setdefault('sleep', lambda seconds: None)
+        options.setdefault('assume_yes', True)
+        output, errors = io.StringIO(), io.StringIO()
+        with patch('skim.releases.fetch_latest_authenticated', return_value=release or self.release), \
+                redirect_stdout(output), redirect_stderr(errors):
+            code = update_apply.run(home=self.home, module=self.module, **options)
+        return code, output.getvalue(), errors.getvalue()
+
+    def items(self):
+        with closing(sqlite3.connect(self.data / 'skim.db')) as connection:
+            return connection.execute('SELECT value FROM item').fetchall()
+
+    def journal(self):
+        return releases.UpdateJournal(self.data).read()
+
+    def launcher_version(self):
+        import subprocess
+        result = subprocess.run([str(self.home / '.local/bin/skim'), '--version'], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.strip()
+
+    def assert_preserved(self):
+        self.assertEqual(self.store.current(), 'v1.0.0')
+        self.assertEqual(self.items(), [('saved',)])
+        self.assertEqual(self.launcher_version(), 'skim 1.0.0')
+        with maintenance.guard(self.data):
+            pass
+
+    def test_happy_path_install_and_update_applies_release(self):
+        code, output, errors = self.update()
+        self.assertEqual(code, 0, errors)
+        self.assertIn('v1.0.1 업데이트를 마쳤습니다', output)
+        self.assertEqual(self.store.current(), 'v1.0.1')
+        record = self.journal()
+        self.assertEqual((record['state'], record['tag'], record['previous']['tag']), ('committed', 'v1.0.1', 'v1.0.0'))
+        self.assertTrue((self.data / 'update-backups' / (record['id'] + '.sqlite')).is_file())
+        self.assertEqual(self.items(), [('saved',)])
+        self.assertEqual(self.launcher_version(), 'skim 1.0.1')
+        self.assertTrue((self.store.root / 'versions/v1.0.0').is_dir())
+        with maintenance.guard(self.data):
+            pass
+
+    def test_update_confirmation_declined_changes_nothing(self):
+        refuse = lambda r, n, limit: self.fail('다운로드 금지')
+        for answer, expected in (('n', 0), ('', 0), (EOFError(), 1)):
+            def ask(prompt):
+                self.assertIn('v1.0.0에서 v1.0.1로', prompt)
+                if isinstance(answer, BaseException):
+                    raise answer
+                return answer
+            with self.subTest(answer=answer):
+                code, _, errors = self.update(assume_yes=False, ask=ask, download=refuse)
+                self.assertEqual(code, expected)
+                if expected:
+                    self.assertIn('--yes', errors)
+                self.assertIsNone(self.journal())
+                self.assert_preserved()
+
+    def test_invalid_release_preserves_installed_on_update(self):
+        _, wrong_manifest = BootstrapTests().payloads('v1.0.0', '1.0.1')
+        corrupted = dict(self.payloads, **{'skim-macos.tar.gz': self.payloads['skim-macos.tar.gz'] + b'broken'})
+        for name, payloads in (('checksum', corrupted), ('manifest', wrong_manifest)):
+            with self.subTest(name=name):
+                code, _, errors = self.update(download=lambda r, n, limit: payloads[n])
+                self.assertEqual(code, 1)
+                self.assertIn('오류', errors)
+                self.assertIsNone(self.journal())
+                self.assertFalse((self.store.root / 'versions/v1.0.1').exists())
+                self.assert_preserved()
+        def unavailable(release, name, limit):
+            raise releases.ReleaseUnavailable('릴리스 파일을 받지 못했습니다. gh 로그인·권한을 확인하세요.')
+        code, _, errors = self.update(download=unavailable)
+        self.assertEqual(code, 1)
+        self.assertNotIn('·', errors)
+        self.assert_preserved()
+
+    def test_readiness_blocks_writes_on_actual_server(self):
+        from skim import cli, update_apply
+        import subprocess
+        # 태그는 v1.0.1이지만 코드가 1.0.0을 보고하는 배포물은 실제 launcher 실행 확인에서 거부된다.
+        _, mismatched = BootstrapTests().payloads('v1.0.1')
+        observed = []
+        def runner(command, **kwargs):
+            observed.append(self.journal()['state'])
+            with self.assertRaises(maintenance.UpdateInProgress), maintenance.guard(self.data):
+                pass
+            with patch('skim.cli.connect', side_effect=AssertionError('DB 접근 금지')), redirect_stderr(io.StringIO()):
+                self.assertEqual(cli.main(['repo', 'list']), 1)
+            # 새 버전이 시작하며 DB를 바꾼 상황을 흉내 낸다.
+            with closing(sqlite3.connect(self.data / 'skim.db')) as connection, connection:
+                connection.execute("INSERT INTO item VALUES('migration')")
+            return subprocess.run(command, **kwargs)
+        code, _, errors = self.update(download=lambda r, n, limit: mismatched[n], runner=runner)
+        self.assertEqual(code, 1)
+        self.assertEqual(observed, ['switched'])
+        self.assertIn('이전 버전 v1.0.0과 데이터를 복구했습니다', errors)
+        self.assertEqual(self.journal()['state'], 'rolled_back')
+        self.assert_preserved()
+
+    def test_readiness_failure_never_commits(self):
+        from skim import update_apply
+        with patch.object(update_apply, 'check_ready', side_effect=update_apply.UpdateFailed('준비 안 됨')):
+            self.assertEqual(self.update()[0], 1)
+        self.assertEqual(self.journal()['state'], 'rolled_back')
+        self.assert_preserved()
+
+    def test_recovery_after_process_failure_rolls_back_switch(self):
+        from skim import update_apply
+        def migrate_then_crash(*args):
+            with closing(sqlite3.connect(self.data / 'skim.db')) as connection, connection:
+                connection.execute("INSERT INTO item VALUES('migration')")
+            raise Crash()
+        with patch.object(update_apply, 'check_ready', side_effect=migrate_then_crash), \
+                patch.object(update_apply, 'restore', side_effect=Crash()), self.assertRaises(Crash):
+            self.update()
+        self.assertEqual(self.journal()['state'], 'switched')
+        self.assertEqual(self.store.current(), 'v1.0.1')
+        with self.assertRaises(maintenance.UpdateInProgress), maintenance.guard(self.data):
+            pass
+        code, output, _ = self.update(assume_yes=False, ask=lambda prompt: 'n')
+        self.assertEqual(code, 0)
+        self.assertIn('되돌려 이전 버전과 데이터를 복구했습니다', output)
+        self.assertEqual(self.journal()['state'], 'rolled_back')
+        self.assert_preserved()
+        code, _, errors = self.update()
+        self.assertEqual(code, 0, errors)
+        self.assertEqual(self.store.current(), 'v1.0.1')
+
+    def test_recovery_after_process_failure_commits_ready(self):
+        original = releases.UpdateJournal.advance
+        def advance(journal, update_id, state):
+            if state == 'committed':
+                raise Crash()
+            return original(journal, update_id, state)
+        with patch.object(releases.UpdateJournal, 'advance', advance), self.assertRaises(Crash):
+            self.update()
+        self.assertEqual(self.journal()['state'], 'ready')
+        code, output, errors = self.update()
+        self.assertEqual(code, 1)
+        self.assertIn('완료로 기록했습니다', output)
+        self.assertIn('다시 실행하세요', errors)
+        self.assertEqual(self.journal()['state'], 'committed')
+        self.assertEqual(self.launcher_version(), 'skim 1.0.1')
+        with maintenance.guard(self.data):
+            pass
+
+    def test_concurrent_update_drains_jobs(self):
+        from contextlib import ExitStack
+        running = ExitStack()
+        running.enter_context(maintenance.guard(self.data))
+        waits = []
+        def sleep(seconds):
+            waits.append(seconds)
+            self.assertEqual(self.items(), [('saved',)])
+            if len(waits) == 2:
+                running.close()
+        code, output, errors = self.update(sleep=sleep)
+        self.assertEqual(code, 0, errors)
+        self.assertEqual(len(waits), 2)
+        self.assertIn('끝나기를 기다립니다', output)
+        self.assertEqual(self.store.current(), 'v1.0.1')
+
+    def test_concurrent_update_drains_jobs_without_killing_them(self):
+        from contextlib import ExitStack
+        with maintenance.guard(self.data):
+            code, _, errors = self.update(seconds=3)
+            self.assertEqual(code, 1)
+            self.assertIn('종료한 뒤 다시 실행하세요', errors)
+            self.assertIsNone(self.journal())
+        self.assert_preserved()
+        # 확인 직후 시작한 작업은 중단하지 않고, 이후의 새 작업은 업데이트 기록이 막는다.
+        running = ExitStack()
+        original = releases.UpdateJournal.start
+        def start(journal, *args):
+            running.enter_context(maintenance.guard(self.data))
+            return original(journal, *args)
+        with patch.object(releases.UpdateJournal, 'start', start):
+            code, _, errors = self.update(seconds=3)
+        self.assertEqual(code, 1)
+        self.assertIn('skim update를 다시 실행하면', errors)
+        self.assertEqual(self.journal()['state'], 'prepared')
+        with self.assertRaises(maintenance.UpdateInProgress), maintenance.guard(self.data):
+            pass
+        running.close()
+        code, output, _ = self.update(assume_yes=False, ask=lambda prompt: 'n')
+        self.assertIn('되돌려', output)
+        self.assertEqual(self.journal()['state'], 'rolled_back')
+        self.assert_preserved()
+
+    def test_concurrent_update_and_uninstall_do_not_touch_running_update(self):
+        from skim import uninstall
+        import subprocess
+        observed = []
+        def runner(command, **kwargs):
+            # 첫 업데이트가 전환을 마친 시점에 두 번째 업데이트와 데이터까지 지우는 제거가 들어온다.
+            code, _, errors = self.update()
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as removal:
+                removed = uninstall.run(yes=True, purge_data=True, interactive=False)
+            observed.append((code, errors, removed, removal.getvalue(), self.journal()['state'], self.store.current()))
+            return subprocess.run(command, **kwargs)
+        code, _, errors = self.update(runner=runner)
+        self.assertEqual(code, 0, errors)
+        [(second, second_errors, removed, removal, state, current)] = observed
+        self.assertEqual((second, removed, state, current), (1, 1, 'switched', 'v1.0.1'))
+        for text in (second_errors, removal):
+            self.assertIn('다른 skim 업데이트 또는 제거가 진행 중', text)
+        self.assertEqual(self.journal()['state'], 'committed')
+        self.assertEqual(self.launcher_version(), 'skim 1.0.1')
+        self.assertTrue((self.data / 'update-backups' / (self.journal()['id'] + '.sqlite')).is_file())
+        self.assertEqual(self.items(), [('saved',)])
+
+    def test_uninstall_blocked_by_unfinished_update(self):
+        from skim import uninstall
+        from contextlib import ExitStack
+        original = releases.UpdateJournal.advance
+        def advance(journal, update_id, state):
+            if state == 'ready':
+                raise Crash()
+            return original(journal, update_id, state)
+        with patch.object(releases.UpdateJournal, 'advance', advance), \
+                patch('skim.update_apply.restore', side_effect=Crash()), self.assertRaises(Crash):
+            self.update()
+        record = self.journal()
+        self.assertEqual(record['state'], 'switched')
+        with redirect_stdout(io.StringIO()) as output, redirect_stderr(io.StringIO()) as errors:
+            self.assertEqual(uninstall.run(yes=True, purge_data=True, interactive=False), 1)
+        self.assertEqual(output.getvalue(), '')
+        self.assertIn('skim update를 실행해 복구', errors.getvalue())
+        self.assertEqual(self.journal(), record)
+        self.assertTrue((self.data / 'update-backups' / (record['id'] + '.sqlite')).is_file())
+        self.assertTrue((self.home / '.local/bin/skim').is_file())
+        self.assertTrue((self.store.root / 'versions/v1.0.0').is_dir())
+        # 제거 확인 질문을 기다리는 동안에도 업데이트는 설치를 바꾸지 않는다.
+        held = ExitStack()
+        held.enter_context(self.store.exclusive())
+        code, _, errors = self.update()
+        held.close()
+        self.assertEqual(code, 1)
+        self.assertIn('다른 skim 업데이트 또는 제거가 진행 중', errors)
+        self.assertEqual(self.journal(), record)
+        code, output, _ = self.update(assume_yes=False, ask=lambda prompt: 'n')
+        self.assertIn('되돌려', output)
+        self.assert_preserved()
+
+    def test_uninstall_checks_bound_data_from_other_home(self):
+        from skim import uninstall
+        original = releases.UpdateJournal.advance
+        def advance(journal, update_id, state):
+            if state == 'ready':
+                raise Crash()
+            return original(journal, update_id, state)
+        with patch.object(releases.UpdateJournal, 'advance', advance), \
+                patch('skim.update_apply.restore', side_effect=Crash()), self.assertRaises(Crash):
+            self.update()
+        record = self.journal()
+        self.assertEqual(record['state'], 'switched')
+        # 현재 SKIM_HOME에는 기록이 없지만 설치에 연결된 데이터에는 미완료 기록이 있다.
+        with patch.dict(os.environ, {'SKIM_HOME': str(self.home / 'otherdata')}), \
+                redirect_stdout(io.StringIO()) as output, redirect_stderr(io.StringIO()) as errors:
+            self.assertEqual(uninstall.run(yes=True, purge_data=True, interactive=False), 1)
+        self.assertEqual(output.getvalue(), '')
+        self.assertIn('skim update를 실행해 복구', errors.getvalue())
+        self.assertEqual(self.journal(), record)
+        self.assertTrue((self.home / '.local/bin/skim').is_file())
+        self.assertTrue((self.store.root / 'versions/v1.0.0').is_dir())
+        # 연결 기록을 읽을 수 없어도 복구 가능성을 지키기 위해 제거하지 않는다.
+        binding = self.store.root / '.data-binding.json'
+        binding.unlink()
+        binding.write_text('{', encoding='utf-8')
+        with patch.dict(os.environ, {'SKIM_HOME': str(self.home / 'otherdata')}), \
+                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as errors:
+            self.assertEqual(uninstall.run(yes=True, purge_data=True, interactive=False), 1)
+        self.assertIn('skim update를 실행해 복구', errors.getvalue())
+        self.assertTrue((self.store.root / 'versions/v1.0.0').is_dir())
+
+    def test_entrypoints_report_same_result(self):
+        from skim import cli
+        record = releases.UpdateJournal(self.data).start(self.store.installation_id, 'v1.0.1', 'a' * 64,
+                                                         self.store.payload('v1.0.0'))
+        reported = set()
+        with patch('skim.cli.connect', side_effect=AssertionError('DB 접근 금지')), \
+                patch('skim.web.serve', side_effect=AssertionError('서버 시작 금지')):
+            for argv in (['collect'], ['analyze'], ['repo', 'list'], ['web', '--no-browser', '--offline'], []):
+                errors = io.StringIO()
+                with self.subTest(argv=argv), redirect_stderr(errors):
+                    self.assertEqual(cli.main(argv), 1)
+                reported.add(errors.getvalue())
+        self.assertEqual(len(reported), 1)
+        self.assertIn('완료되지 않은 업데이트', reported.pop())
+        # 업데이트 명령은 같은 기록을 복구한 뒤 결과를 보고한다.
+        code, output, _ = self.update(assume_yes=False, ask=lambda prompt: 'n')
+        self.assertIn('v1.0.1 업데이트를 되돌려', output)
+        self.assertEqual(self.journal()['id'], record['id'])
+        code, _, errors = self.update()
+        self.assertEqual(code, 0, errors)
+        # 자동 시작 앱과 터미널이 쓰는 영구 launcher가 새 버전을 실행한다.
+        self.assertEqual(self.launcher_version(), 'skim 1.0.1')
 
 
 if __name__ == '__main__':
