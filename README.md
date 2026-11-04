@@ -226,8 +226,9 @@ skim uninstall --yes --purge-data   # 사용자 데이터까지 삭제
 - 관리 마커가 확인된 `~/Applications/skim PR.app`과 자동 시작 LaunchAgent (`skim app --uninstall`과 같은 검사)
 - 설치 정보가 확인된 관리 설치 프로그램 경로 `~/.local/share/skim-program`
 - 현재 skim 또는 위 관리 설치를 가리키는 `~/.local/bin/skim` 링크
+- 정식 설치가 만든 `~/.local/bin/skim` 실행 파일 (설치 ID와 내용이 위 관리 설치와 일치하고 삭제 직전에도 같은 파일일 때만)
 
-다른 앱, 다른 설치를 가리키는 링크, 일반 파일, 소유를 확인할 수 없는 경로는 목록에 보존으로 표시하고 지우지 않습니다.
+다른 앱, 다른 설치를 가리키는 링크, 내용이 다른 일반 파일, 소유를 확인할 수 없는 경로는 목록에 보존으로 표시하고 지우지 않습니다.
 `git clone`한 개발 checkout은 삭제하지 않습니다. 필요 없으면 제거 후 직접 삭제하세요.
 `~/.local/share/skim-tools`의 Codex CLI도 별도로 설치한 도구이므로 그대로 둡니다.
 

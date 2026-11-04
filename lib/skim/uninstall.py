@@ -9,7 +9,7 @@ import sqlite3
 import stat
 import sys
 
-from . import macos_bundle
+from . import bootstrap, macos_bundle
 from .config import Config
 from .program_store import ProgramStore, default_root
 
@@ -22,6 +22,7 @@ class Item:
     path: Path
     kind: str = ''
     detail: str = ''
+    identity: tuple = ()
 
 
 @dataclass
@@ -70,6 +71,27 @@ def overlaps(first, second):
     return first.is_relative_to(second) or second.is_relative_to(first)
 
 
+def read_launcher(path):
+    """본인 소유 일반 파일만 읽고 (장치, inode)와 내용을 돌려준다."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, 'rb') as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1 or info.st_size > 1 << 20:
+            raise ValueError('본인 소유 일반 파일이 아닙니다')
+        return (info.st_dev, info.st_ino), stream.read()
+
+
+def launcher_matches(path, store):
+    """bootstrap.install이 이 관리 설치용으로 만든 launcher인지 설치 ID와 내용으로 확인한다."""
+    installation_id = ProgramStore.open(store).installation_id
+    identity, content = read_launcher(path)
+    # install은 해석한 홈 기준 경로를 launcher에 기록한다.
+    roots = {str(store), str(store.parent.resolve() / store.name)}
+    if not any(content == bootstrap.launcher_source(Path(root), installation_id).encode() for root in roots):
+        raise ValueError('이 관리 설치가 만든 실행 파일이 아닙니다')
+    return identity
+
+
 def build_plan(config_dir, data_dir):
     plan = Plan([], [], [])
     checkout = git_checkout(SOURCE_ROOT, skim_only=True)
@@ -103,7 +125,6 @@ def build_plan(config_dir, data_dir):
             plan.keep.append(Item('관리 설치 프로그램', store, detail=reason))
         else:
             store_owned = True
-            plan.remove.append(Item('관리 설치 프로그램', store, 'store'))
 
     link = Path.home() / '.local/bin/skim'
     if link.is_symlink():
@@ -114,7 +135,18 @@ def build_plan(config_dir, data_dir):
         else:
             plan.keep.append(Item('실행 링크', link, detail=f'다른 설치를 가리킵니다 ({target})'))
     elif os.path.lexists(link):
-        plan.keep.append(Item('실행 링크', link, detail='skim이 만든 링크가 아닙니다'))
+        reason = '관리 설치가 없어 소유를 확인할 수 없습니다'
+        if store_owned:
+            try:
+                plan.remove.append(Item('실행 파일', link, 'launcher', str(store), launcher_matches(link, store)))
+                reason = None
+            except (OSError, ValueError) as exc:
+                reason = str(exc)
+        if reason:
+            plan.keep.append(Item('실행 파일', link, detail=f'skim이 만든 실행 파일로 확인되지 않습니다 ({reason})'))
+    # launcher 재검증에 설치 정보가 필요하므로 프로그램 경로는 launcher 다음에 지운다.
+    if store_owned:
+        plan.remove.append(Item('관리 설치 프로그램', store, 'store'))
 
     for label, path in (('설정', config_dir), ('데이터(DB, 캐시, Codex 전용 홈)', data_dir)):
         if not os.path.lexists(path):
@@ -190,6 +222,11 @@ def remove_item(item):
             raise ValueError(f'실행 링크가 바뀌어 삭제하지 않았습니다: {item.path}')
         item.path.unlink()
         return
+    if item.kind == 'launcher':
+        if launcher_matches(item.path, Path(item.detail)) != item.identity:
+            raise ValueError(f'실행 파일이 바뀌어 삭제하지 않았습니다: {item.path}')
+        item.path.unlink()
+        return
     if reason := protected(item.path):
         raise ValueError(f'{reason}: {item.path}')
     if item.kind == 'store':
@@ -245,6 +282,7 @@ def run(*, purge_data=False, yes=False, interactive=None, ask=input):
         return 0
 
     status = 0
+    launcher_failed = False
     if any(item.kind == 'app' for item in plan.remove):
         if macos_bundle.uninstall_app(Config(config_dir, data_dir)):
             print('macOS 앱을 제거하지 못해 나머지 항목도 보존했습니다.', file=sys.stderr)
@@ -259,12 +297,16 @@ def run(*, purge_data=False, yes=False, interactive=None, ask=input):
             print(f'실행 중인 skim 작업이 있어 삭제하지 않았습니다: {item.path}. 서버와 작업을 종료한 뒤 다시 실행하세요.', file=sys.stderr)
             status = 1
             continue
+        if item.kind == 'store' and launcher_failed:
+            print(f'실행 파일을 삭제하지 못해 관리 설치 프로그램도 보존했습니다: {item.path}', file=sys.stderr)
+            continue
         try:
             remove_item(item)
             print(f'삭제했습니다: {item.path}')
         except (OSError, ValueError) as exc:
             print(f'삭제하지 못했습니다: {exc}', file=sys.stderr)
             status = 1
+            launcher_failed = launcher_failed or item.kind == 'launcher'
     kept = [item for item in plan.data if item not in plan.remove]
     if kept:
         print('사용자 데이터는 보존했습니다. 필요 없으면 다음 경로를 직접 삭제하세요: ' + ', '.join(str(item.path) for item in kept))

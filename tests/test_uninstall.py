@@ -3,6 +3,7 @@ import fcntl
 import io
 import os
 from pathlib import Path
+import shutil
 import sys
 import tempfile
 from contextlib import redirect_stderr, redirect_stdout
@@ -11,7 +12,8 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))
-from skim import cli, macos_bundle as bundle, uninstall
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from skim import bootstrap, cli, macos_bundle as bundle, uninstall
 from skim.program_store import ProgramStore
 
 
@@ -128,8 +130,16 @@ class UninstallTests(unittest.TestCase):
         self.link.unlink()
         self.link.write_text('#!/bin/sh\n')
         status, out, _, _ = self.run_uninstall(yes=True, interactive=False)
-        self.assertIn('skim이 만든 링크가 아닙니다', out)
+        self.assertIn('skim이 만든 실행 파일로 확인되지 않습니다', out)
         self.assertEqual(self.link.read_text(), '#!/bin/sh\n')
+        # 관리 설치가 확인되어도 내용이 다른 일반 파일은 보존한다.
+        shutil.rmtree(self.store)
+        self.store.mkdir(mode=0o700)
+        ProgramStore.initialize(self.store)
+        status, out, _, _ = self.run_uninstall(yes=True, interactive=False)
+        self.assertIn('이 관리 설치가 만든 실행 파일이 아닙니다', out)
+        self.assertEqual(self.link.read_text(), '#!/bin/sh\n')
+        self.assertFalse(self.store.exists())
 
     def test_checkout_is_never_removed(self):
         checkout = self.home / 'checkout'
@@ -167,6 +177,86 @@ class UninstallTests(unittest.TestCase):
             self.assertEqual(cli.main(['uninstall']), 1)
         self.assertFalse(self.data_dir.exists())
         self.assertFalse(self.config_dir.exists())
+
+
+class ReleaseInstallUninstallTests(unittest.TestCase):
+    """bootstrap.install로 만든 정식 설치를 임시 HOME에서 제거한다. 네트워크는 사용하지 않는다."""
+
+    def setUp(self):
+        from test_install_update import BootstrapTests
+        self.temp = tempfile.TemporaryDirectory(prefix='skim-uninstall-release-')
+        self.addCleanup(self.temp.cleanup)
+        self.home = Path(self.temp.name).resolve()
+        for context in (patch.object(Path, 'home', return_value=self.home),
+                        patch.dict(os.environ, {'PATH': '/usr/bin:/bin'}, clear=True),
+                        patch.object(uninstall.sys, 'platform', 'linux')):
+            context.start()
+            self.addCleanup(context.stop)
+        release, payloads = BootstrapTests().payloads()
+        with patch('skim.releases.fetch_latest_authenticated', return_value=release), redirect_stdout(io.StringIO()):
+            self.store = bootstrap.install(self.home, download=lambda r, n, limit: payloads[n])
+        self.root = self.home / '.local/share/skim-program'
+        self.launcher = self.home / '.local/bin/skim'
+        self.data = self.home / '.local/share/skim'
+        self.data.mkdir(parents=True, mode=0o700)
+        (self.data / 'skim.db').write_text('demo')
+
+    def run_uninstall(self, **kwargs):
+        with redirect_stdout(io.StringIO()) as out, redirect_stderr(io.StringIO()) as err:
+            status = uninstall.run(yes=True, interactive=False, **kwargs)
+        return status, out.getvalue(), err.getvalue()
+
+    def test_release_install_is_removed_and_data_kept(self):
+        self.assertFalse(self.launcher.is_symlink())
+        status, out, err = self.run_uninstall()
+        self.assertEqual(status, 0, err)
+        removing = out.split('보존할 항목:')[0]
+        self.assertIn(str(self.launcher), removing)
+        self.assertIn(str(self.root), removing)
+        self.assertFalse(os.path.lexists(self.launcher))
+        self.assertFalse(self.root.exists())
+        self.assertEqual((self.data / 'skim.db').read_text(), 'demo')
+
+    def test_launcher_for_other_installation_is_preserved(self):
+        content = self.launcher.read_text()
+        self.launcher.unlink()
+        self.launcher.write_text(bootstrap.launcher_source(self.root, '0' * 32))
+        status, out, _ = self.run_uninstall()
+        self.assertEqual(status, 0)
+        self.assertIn('이 관리 설치가 만든 실행 파일이 아닙니다', out)
+        self.assertNotEqual(self.launcher.read_text(), content)
+        self.assertTrue(self.launcher.exists())
+
+    def test_launcher_changed_before_removal_keeps_launcher_and_store(self):
+        original = uninstall.build_plan
+        def build_plan(*args):
+            plan = original(*args)
+            # 확인 뒤 삭제 직전에 다른 파일로 바뀐 경우.
+            self.launcher.unlink()
+            self.launcher.write_text('사용자 파일')
+            return plan
+        with patch.object(uninstall, 'build_plan', side_effect=build_plan):
+            status, _, err = self.run_uninstall()
+        self.assertEqual(status, 1)
+        self.assertIn('삭제하지 못했습니다', err)
+        self.assertEqual(self.launcher.read_text(), '사용자 파일')
+        self.assertTrue((self.root / 'install.json').exists())
+
+    def test_replaced_launcher_with_same_content_is_preserved(self):
+        original = uninstall.build_plan
+        def build_plan(*args):
+            plan = original(*args)
+            # 기존 파일이 남아 있는 동안 만들어 다른 inode를 보장한다.
+            replacement = self.launcher.with_name('replacement')
+            replacement.write_bytes(self.launcher.read_bytes())
+            os.replace(replacement, self.launcher)
+            return plan
+        with patch.object(uninstall, 'build_plan', side_effect=build_plan):
+            status, _, err = self.run_uninstall()
+        self.assertEqual(status, 1)
+        self.assertIn('실행 파일이 바뀌어', err)
+        self.assertTrue(self.launcher.exists())
+        self.assertTrue(self.root.exists())
 
 
 class MacUninstallTests(unittest.TestCase):
