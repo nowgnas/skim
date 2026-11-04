@@ -4,6 +4,7 @@ import argparse
 import re
 import sqlite3
 import sys
+from . import __version__
 from .config import Config
 from .db import SCOPES, analysis_allowed, analysis_scope, connect
 from .hosts import hostname, registered
@@ -23,6 +24,7 @@ def repository(value):
 
 def parser():
     root = argparse.ArgumentParser(prog='skim', description='로컬 PR 검토 도우미')
+    root.add_argument('--version', action='version', version=f'skim {__version__}')
     commands = root.add_subparsers(dest='command', required=True)
     repo = commands.add_parser('repo', help='추적 저장소 관리')
     actions = repo.add_subparsers(dest='action', required=True)

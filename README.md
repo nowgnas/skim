@@ -171,6 +171,7 @@ GitHub·모델 서비스에 접속하지 않습니다. 이 README의 스크린�
 | `skim doctor` | 모델 호출 없이 상태 점검 |
 | `skim codex-home init` | 분석 전용 인증 링크 초기화 |
 | `skim doctor --probe` | 코드 없이 실제 모델 격리 검사 |
+| `skim --version` | skim 버전 출력 |
 | `skim --help` | 전체 명령 도움말 |
 
 ## 보안과 데이터
