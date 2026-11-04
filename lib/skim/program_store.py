@@ -14,6 +14,11 @@ from . import maintenance
 from .releases import MAX_ARCHIVE_BYTES, MAX_FILES, UpdateJournal, stage_release, version_tuple
 
 
+def default_root():
+    """관리 설치 프로그램 경로. 사용자 데이터(~/.local/share/skim, SKIM_HOME)와 분리한다."""
+    return Path.home() / '.local/share/skim-program'
+
+
 def private_directory(path):
     info = path.lstat()
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:

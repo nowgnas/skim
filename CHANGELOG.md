@@ -18,6 +18,7 @@
   - `setup.sh`로 `~/.local/bin/skim` 심볼릭 링크를 만들고, 래퍼가 Python 3.11 이상 인터프리터를 자동으로 고릅니다 (`SKIM_PYTHON`으로 지정 가능).
   - `skim app`으로 macOS 앱(`~/Applications/skim PR.app`)과 로그인 시 자동 시작을 설정합니다. `--restart`로 서버 재시작, `--uninstall`로 관리 마커가 확인된 앱과 자동 시작만 제거합니다.
   - `skim update --check`로 GitHub Releases에 게시된 정식 릴리스를 조회합니다.
+  - `skim uninstall`로 skim이 만든 것으로 확인된 앱, 관리 설치, 실행 파일만 제거하고 사용자 데이터는 기본 보존합니다 (`--purge-data`로 데이터도 삭제, 비대화형 실행은 `--yes` 필요).
   - `skim --version`으로 skim 버전을 확인합니다.
   - 설정·DB·diff 캐시를 전용 디렉터리(0700)와 파일(0600)에 저장하고, `SKIM_HOME`으로 위치를 바꿀 수 있습니다. DB 스키마는 `PRAGMA user_version`으로 관리하며 변경 전에 백업합니다.
 - 저장소와 수집

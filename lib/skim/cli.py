@@ -52,6 +52,9 @@ def parser():
     app_actions = app.add_mutually_exclusive_group()
     app_actions.add_argument('--uninstall', action='store_true')
     app_actions.add_argument('--restart', action='store_true', help='서버를 재시작하고 브라우저 열기 (진행 중인 작업이 중단됩니다)')
+    uninstall = commands.add_parser('uninstall', help='skim 프로그램 제거 (사용자 데이터는 기본 보존)')
+    uninstall.add_argument('--yes', action='store_true', help='확인 질문 없이 제거 (비대화형 실행에 필요)')
+    uninstall.add_argument('--purge-data', action='store_true', help='설정, DB, 캐시, Codex 전용 홈도 삭제')
     update = commands.add_parser('update', help='정식 릴리스 업데이트 확인')
     update.add_argument('--check', action='store_true', help='사용 가능한 정식 릴리스만 확인')
     analyze = commands.add_parser('analyze', help='허용한 저장소의 최신 스냅샷 분석')
@@ -90,6 +93,9 @@ def main(argv=None):
                 print('자동 업데이트 적용 기능은 아직 준비 중입니다.', file=sys.stderr)
                 return 1
             return 0
+        if args.command == 'uninstall':
+            from .uninstall import run
+            return run(purge_data=args.purge_data, yes=args.yes)
         if args.command == 'doctor':
             from .doctor import run, paths
             return run(paths(), probe=args.probe)
