@@ -105,8 +105,7 @@ def validate_chunk(raw, ids):
     output = [item['change_id'] for item in value['items']]
     if len(output) != len(set(output)) or set(output) != set(ids):
         raise ValueError('입출력 단위가 일대일로 일치하지 않습니다')
-    if any(u['change_id'] not in ids for u in value['uncertainties']):
-        raise ValueError('불확실성 ID가 청크 밖에 있습니다')
+    value['uncertainties'] = [u for u in value['uncertainties'] if u['change_id'] in ids]
     return value
 
 
