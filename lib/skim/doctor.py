@@ -59,7 +59,7 @@ def run(config, runner=None, which=None, adapter=None, probe=False, out=print):
         model = config.doctor_codex_model()
     except (OSError, ValueError):
         model, model_ok = None, False
-        report(False, 'model', 'config.json 객체·JSON·권한과 codex_model / SKIM_CODEX_MODEL을 수정하세요.')
+        report(False, 'model', 'config.json 객체, JSON, 권한과 codex_model / SKIM_CODEX_MODEL을 수정하세요.')
     adapter = adapter or CodexAdapter(runner=runner, data_dir=config.data_dir, model=model)
     ready = True
     for label, method in (('codex-home', adapter.check_home), ('version', adapter.check_version),
@@ -83,10 +83,10 @@ def run(config, runner=None, which=None, adapter=None, probe=False, out=print):
         except (IsolationError, OSError, ValueError, subprocess.TimeoutExpired):
             ready = False
             details = {
-                'codex-home': '초기화 때와 같은 CODEX_HOME 환경인지 확인하세요. 본인 소유 디렉터리는 skim codex-home init --reset으로 복구하세요. 링크·일반 파일·타인 소유 경로는 직접 확인해야 합니다.',
+                'codex-home': '초기화 때와 같은 CODEX_HOME 환경인지 확인하세요. 본인 소유 디렉터리는 skim codex-home init --reset으로 복구하세요. 링크, 일반 파일, 타인 소유 경로는 직접 확인해야 합니다.',
                 'version': 'Codex 안정 버전 0.165.0 이상과 버전 출력 형식을 확인하세요.',
                 'flags': 'exec --help의 필수 격리 플래그와 features list 형식을 확인하세요.',
-                'probe': 'skim doctor --probe로 격리를 재검증하세요. 도구 실행·지침·파일 생성 시 차단됩니다.',
+                'probe': 'skim doctor --probe로 격리를 재검증하세요. 도구 실행, 지침, 파일 생성 시 차단됩니다.',
             }
             if label == 'version' and isinstance(getattr(adapter, 'prerelease_version', None), str):
                 details[label] = '감지된 버전 ' + adapter.prerelease_version + '은 사전 공개 버전입니다. npm install --prefix "$HOME/.local/share/skim-tools" @openai/codex@latest로 안정 버전을 설치하세요. 서버를 종료한 뒤 skim web으로 다시 시작하세요.'
@@ -95,7 +95,7 @@ def run(config, runner=None, which=None, adapter=None, probe=False, out=print):
     if inflight == 'uncertain':
         report(False, '중단된 모델 실행', '이전 실행 종료를 직접 확인한 후 analysis-inflight 표식을 제거하세요. 상태 점검의 복구 안내를 확인하세요.')
     elif inflight == 'running':
-        out('안내: 모델 실행 — 진행 중인 모델 호출이 끝나기를 기다립니다.')
+        out('안내: 모델 실행 중: 진행 중인 모델 호출이 끝나기를 기다립니다.')
     if model_ok:
         if adapter.model != 'unknown':
             report(True, 'model', adapter.model)
@@ -127,9 +127,9 @@ def run(config, runner=None, which=None, adapter=None, probe=False, out=print):
             if (stat.S_ISLNK(info.st_mode) or info.st_uid != os.getuid()
                     or stat.S_IMODE(info.st_mode) != expected):
                 unsafe = True
-        report(not unsafe, '로컬 권한', f'{root}: ' + ('소유자·심볼릭 링크·0700/0600 권한을 확인하세요.' if unsafe else '사용자 전용'))
-    out('안내: 조직 SSO는 gh 자격 증명의 SSO 승인을 확인하세요. 비공개 저장소 읽기 권한과 팀 멤버십·리뷰 요청 접근 권한도 필요합니다.')
-    out('안내: gh 인증 성공만으로 모든 조직·팀 접근을 보장하지 않습니다. PATH와 로그인 키체인 접근은 실행 터미널에서 확인하세요.')
+        report(not unsafe, '로컬 권한', f'{root}: ' + ('소유자, 심볼릭 링크, 0700/0600 권한을 확인하세요.' if unsafe else '사용자 전용'))
+    out('안내: 조직 SSO는 gh 자격 증명의 SSO 승인을 확인하세요. 비공개 저장소 읽기 권한과 팀 멤버십 및 리뷰 요청 접근 권한도 필요합니다.')
+    out('안내: gh 인증 성공만으로 모든 조직과 팀 접근을 보장하지 않습니다. PATH와 로그인 키체인 접근은 실행 터미널에서 확인하세요.')
     return int(failed)
 
 

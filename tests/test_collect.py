@@ -208,7 +208,7 @@ class CollectionTests(unittest.TestCase):
             return self.fake(command, **kwargs)
         self.collector.gh.runner = runner
         self.fake.state = 'closed'
-        with self.assertRaisesRegex(CollectionError, '인증·권한'):
+        with self.assertRaisesRegex(CollectionError, '인증 또는 권한'):
             self.collector.collect()
         self.assertEqual(self.count('pr_sources'), 1)
         coverage = json.loads(self.conn.execute('SELECT coverage FROM snapshots WHERE id=?', (before['id'],)).fetchone()[0])

@@ -26,7 +26,7 @@ def error_message(exc):
     if isinstance(exc, CollectionError):
         return str(exc)
     if isinstance(exc, OSError):
-        return '네트워크·파일 접근 실패: 연결과 로컬 저장소를 확인하세요'
+        return '네트워크 또는 파일 접근 실패: 연결과 로컬 저장소를 확인하세요'
     return '수집 내부 오류: 응답 형식과 로컬 DB를 확인하세요'
 
 
@@ -61,7 +61,7 @@ class GitHub:
         try:
             result = self.runner(command, capture_output=True, text=True, timeout=120)
         except (OSError, subprocess.TimeoutExpired) as exc:
-            raise CollectionError('gh 실행·연결 실패: 설치와 네트워크 연결을 확인하세요') from exc
+            raise CollectionError('gh 실행 또는 연결 실패: 설치와 네트워크 연결을 확인하세요') from exc
         raw = result.stdout
         headers = {}
         status = 200
@@ -95,7 +95,7 @@ class GitHub:
             if status == 404:
                 raise Inaccessible('GitHub 접근 불가: 저장소 삭제 또는 접근 권한을 확인하세요')
             if status in (401, 403):
-                raise CollectionError('GitHub 인증·권한 실패: gh auth login과 저장소 권한을 확인하세요')
+                raise CollectionError('GitHub 인증 또는 권한 실패: gh auth login과 저장소 권한을 확인하세요')
             raise CollectionError('GitHub 조회 실패: 네트워크 연결과 GitHub 상태를 확인하세요')
         if self.require_complete_sso and 'partial-results' in headers.get('x-github-sso', '').lower():
             raise CollectionError('GitHub 조직 SSO 승인 필요: 일부 결과가 누락되어 이전 목록을 유지합니다')

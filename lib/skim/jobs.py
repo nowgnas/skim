@@ -177,7 +177,7 @@ class Runner:
                 error = '분석 실패 항목이 있습니다. PR별 결과와 상태 점검을 확인하세요.'
             summary = ', '.join(f'{STATUS.get(key, "부분 완료" if key == "partial" else key)} {value}'
                                 for key, value in sorted(counts.items()))
-            return status, f'분석 대상 {len(results)}개' + (f' ({summary})' if summary else ' — 허용된 미분석 스냅샷 없음'), error
+            return status, f'분석 대상 {len(results)}개' + (f' ({summary})' if summary else ': 허용된 미분석 스냅샷 없음'), error
         params = json.loads(job['params'] or '{}')
         snapshot_id = params.get('snapshot_id')
         # 실행 직전에 대상·SHA·동의를 다시 확인한다.
@@ -215,7 +215,7 @@ class Runner:
                 with self.collector.lock('analysis.lock'):
                     CodexAdapter(data_dir=self.config.data_dir).init_home(reset=False)
             except (IsolationError, OSError, ValueError):
-                return 'failed', None, '초기화 실패: Codex 로그인과 전용 홈의 소유권·경로를 확인하세요. 기존 파일은 자동 삭제하지 않습니다.'
+                return 'failed', None, '초기화 실패: Codex 로그인과 전용 홈의 소유권과 경로를 확인하세요. 기존 파일은 자동 삭제하지 않습니다.'
             lines = []
             code = (self.doctor or doctor.run)(self.config, probe=False, out=lines.append)
             message = ('분석 준비 상태 점검 실패. 아래 점검 항목을 해결한 뒤 다시 초기화하세요.' if code
@@ -246,7 +246,7 @@ def safe_error(kind, exc):
         return KINDS[kind] + ' 실패: ' + error_message(exc)
     if isinstance(exc, sqlite3.Error):
         return KINDS[kind] + ' 실패: 로컬 DB를 확인하세요'
-    return KINDS[kind] + ' 실패: 설정·로컬 파일과 상태 점검 결과를 확인하세요'
+    return KINDS[kind] + ' 실패: 설정, 로컬 파일, 상태 점검 결과를 확인하세요'
 
 
 def worker(config, stop, lookup=None):
