@@ -196,6 +196,7 @@ GitHub·모델 서비스에 접속하지 않습니다. 이 README의 스크린�
 | `skim` | 로컬 서버 시작과 브라우저 열기 (`skim web`과 동일) |
 | `skim app` / `skim app --restart` / `skim app --uninstall` | macOS 앱 설치·열기 / 서버 재시작 / 자동 시작과 앱 제거 |
 | `skim update --check` | 게시된 정식 릴리스 확인 (자동 설치 미지원) |
+| `skim uninstall` / `skim uninstall --purge-data` | 프로그램 제거 (데이터 보존) / 사용자 데이터까지 삭제 |
 | `skim web --no-browser` | 브라우저 자동 열기 없이 실행 (`--port`, `--offline` 지원) |
 | `skim repo add owner/repo` / `skim repo list` / `skim repo remove owner/repo` | 추적 저장소 관리 |
 | `skim analysis scope none\|all\|selected [--host H]` | 호스트 분석 범위 변경 |
@@ -208,6 +209,35 @@ GitHub·모델 서비스에 접속하지 않습니다. 이 README의 스크린�
 | `skim doctor --probe` | 코드 없이 실제 모델 격리 검사 |
 | `skim --version` | skim 버전 출력 |
 | `skim --help` | 전체 명령 도움말 |
+
+## 삭제와 데이터 삭제
+
+`skim uninstall`은 지울 경로와 보존할 경로를 먼저 보여 주고 `y`를 입력해야 삭제합니다.
+스크립트처럼 확인할 수 없는 환경에서는 `--yes`를 함께 지정해야 하며, 없으면 아무것도 지우지 않고 중단합니다.
+
+```bash
+skim uninstall               # 목록 확인 후 y/N
+skim uninstall --yes         # 확인 질문 없이 프로그램만 제거
+skim uninstall --yes --purge-data   # 사용자 데이터까지 삭제
+```
+
+삭제 대상은 skim이 만들었다고 확인된 파일뿐입니다.
+
+- 관리 마커가 확인된 `~/Applications/skim PR.app`과 자동 시작 LaunchAgent (`skim app --uninstall`과 같은 검사)
+- 설치 정보가 확인된 관리 설치 프로그램 경로 `~/.local/share/skim-program`
+- 현재 skim 또는 위 관리 설치를 가리키는 `~/.local/bin/skim` 링크
+
+다른 앱, 다른 설치를 가리키는 링크, 일반 파일, 소유를 확인할 수 없는 경로는 목록에 보존으로 표시하고 지우지 않습니다.
+`git clone`한 개발 checkout은 삭제하지 않습니다. 필요 없으면 제거 후 직접 삭제하세요.
+`~/.local/share/skim-tools`의 Codex CLI도 별도로 설치한 도구이므로 그대로 둡니다.
+
+설정, DB, 수집 캐시, 분석 전용 Codex 홈 등 사용자 데이터는 기본으로 보존합니다.
+기본 경로는 `~/.config/skim`과 `~/.local/share/skim`이며, `SKIM_HOME`을 지정했다면 `$SKIM_HOME/config`와 `$SKIM_HOME/data`입니다. `SKIM_HOME` 폴더 자체는 지우지 않습니다.
+데이터를 지우려면 `--purge-data`를 지정하거나, 대화형 실행에서 프로그램 삭제를 승인한 뒤 이어지는 데이터 삭제 질문에 `y`로 답하세요. 삭제한 데이터는 되돌릴 수 없으니 필요하면 먼저 백업하세요.
+Codex 전용 홈에는 원본 `auth.json`으로 연결된 링크만 있으며, 삭제해도 원본 Codex 로그인은 유지됩니다.
+
+서버나 수집, 분석 작업이 진행 중이면 경고를 표시합니다. 자동 시작 서버는 제거 과정에서 중단되므로 작업이 끝난 뒤 실행하세요.
+제거 후에도 작업 잠금이 남아 있으면 사용자 데이터는 삭제하지 않습니다. 수동으로 실행한 서버를 종료한 뒤 다시 실행하세요.
 
 ## 보안과 데이터
 
