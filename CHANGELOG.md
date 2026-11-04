@@ -7,6 +7,25 @@
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-05
+
+### Added
+
+- 메인 화면에서 호스트와 소속 팀으로 연결된 저장소의 PR을 필터링합니다.
+- PR 상세에서 파일 위치와 변경 단위를 확인하고 추천 파일의 diff를 바로 펼칩니다.
+- PR diff에 나타난 함수의 정의와 사용 위치 후보를 살펴보고 해당 줄로 이동합니다.
+
+### Changed
+
+- 파일별 분석 범위와 테스트 변경 미확인 정보를 간결하게 표시합니다.
+- 화면 너비와 라벤더 포인트 색상을 조정했습니다.
+- 기존 개발 checkout 앱의 재시작에 설치 당시 환경을 사용합니다.
+
+### 알려진 한계
+
+- 함수 위치는 이 PR의 정제된 diff에 나타난 이름을 기반으로 찾는 후보이며 언어별 의미 분석이나 저장소 전체 검색이 아닙니다.
+- 기존 `skim-ko-5` 평가의 `fx-multichunk` 중요 파일 미스 1건은 알려진 한계로 유지합니다.
+
 ## [1.0.0] - 2026-11-04
 
 첫 정식 릴리스입니다.
@@ -55,5 +74,6 @@
 
 - 실제 모델 회귀 평가(`skim-ko-5`, `gpt-6.1-sol`)에서 `fx-multichunk`의 `app/order_routes.py`를 기준은 high, 모델은 mid로 판단한 미스가 1건 있습니다. nowgnas가 2026-11-04에 알려진 한계로 허용했습니다.
 
-[Unreleased]: https://github.com/nowgnas/skim/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/nowgnas/skim/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/nowgnas/skim/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/nowgnas/skim/releases/tag/v1.0.0

@@ -34,7 +34,7 @@ def build(root, destination, tag, release_gate=check_release):
         if dirty.stdout:
             raise ValueError('변경된 추적 파일이 있어 배포할 수 없습니다.')
         archived = subprocess.run(['git', 'archive', '--format=tar', '--prefix=skim/', 'HEAD',
-                                   'bin', 'lib', 'README.md'],
+                                   'bin', 'lib', 'README.md', 'LICENSE'],
                                   cwd=root, capture_output=True, timeout=60, check=True).stdout
         if len(archived) > MAX_ARCHIVE_BYTES:
             raise ValueError('배포 파일이 너무 큽니다.')

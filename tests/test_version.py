@@ -15,8 +15,8 @@ from skim.cli import main
 
 
 class VersionTests(unittest.TestCase):
-    def test_version_is_1_0_0(self):
-        self.assertEqual(skim.__version__, '1.0.0')
+    def test_version_is_1_1_0(self):
+        self.assertEqual(skim.__version__, '1.1.0')
 
     def test_cli_version_flag(self):
         out = io.StringIO()
@@ -46,7 +46,7 @@ class VersionTests(unittest.TestCase):
     def test_changelog_has_current_version(self):
         changelog = (ROOT / 'CHANGELOG.md').read_text(encoding='utf-8')
         self.assertIn('## [Unreleased]', changelog)
-        self.assertIn(f'## [{skim.__version__}] - 2026-11-04', changelog)
+        self.assertIn(f'## [{skim.__version__}] - 2026-11-05', changelog)
         self.assertIn(f'[{skim.__version__}]: https://github.com/nowgnas/skim/releases/tag/v{skim.__version__}', changelog)
 
 
