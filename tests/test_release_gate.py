@@ -22,6 +22,8 @@ class ReleaseGateTests(unittest.TestCase):
         self.corpus = self.root / 'eval/skim-ko-5'
         self.corpus.mkdir(parents=True)
         self.manifest = json.loads((ROOT / 'eval/skim-ko-5/manifest.json').read_text())
+        # 기본 합성 결과에는 미스가 없으므로 허용 목록은 각 테스트에서 명시적으로 넣는다.
+        self.manifest.pop('accepted_misses', None)
         self.manifest['confirmed_by'] = 'test reviewer'
         self.manifest['confirmed_sha256'] = confirmation_hash(self.manifest)
         (self.corpus / 'manifest.json').write_text(json.dumps(self.manifest))
@@ -46,14 +48,20 @@ class ReleaseGateTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.check()
 
-    def realistic(self):
+    def realistic(self, mid=None, case_id='fx-multichunk', status='partial', hide=False):
+        """mid({case: 파일 집합})의 파일은 모델이 mid로 판단한 것처럼 만들어 미스를 재현한다.
+        status·hide는 case_id에만 적용한다."""
+        mid = mid or {}
         for expected, recorded in zip(self.manifest['cases'], self.report['cases']):
             diff = (self.corpus / expected['diff']).read_text()
             units, _ = parse_diff(diff)
             for unit in units:
                 unit['status'] = 'unanalysed'
-            result = dict(status='partial', units=units, items=[], files=[
-                dict(file_path=p, importance='high', candidates=[])
+            target = expected['id'] == case_id
+            if target and hide:
+                units[0].pop('status')
+            result = dict(status=status if target else 'partial', units=units, items=[], files=[
+                dict(file_path=p, importance='mid' if p in mid.get(expected['id'], ()) else 'high', candidates=[])
                 for p in dict.fromkeys(u['file_path'] for u in units)])
             recorded.update(raw_outputs=[dict(stage='chunk', raw='{}'), dict(stage='synthesis', raw='{"intent":"offline fixture"}')],
                             requests=[prompt('chunk', dict(units=units, metadata={})),
@@ -162,3 +170,108 @@ class ReleaseGateTests(unittest.TestCase):
             summarize(self.report)
             with self.assertRaises(ValueError):
                 self.check()
+
+    ACCEPTED = dict(case='fx-multichunk', file='app/order_routes.py', reason='알려진 한계',
+                    approved_by='nowgnas', date='2026-11-04')
+
+    def accept(self, *entries):
+        self.manifest['accepted_misses'] = list(entries)
+        (self.corpus / 'manifest.json').write_text(json.dumps(self.manifest))
+
+    ROUTES = {'fx-multichunk': {'app/order_routes.py'}}
+
+    def test_accepted_miss_passes(self):
+        self.accept(self.ACCEPTED)
+        self.realistic(mid=self.ROUTES)
+        self.assertEqual(self.report['summary'], dict(total_misses=1, hidden_count=0, failures=['fx-multichunk']))
+        self.check()
+
+    def test_unaccepted_or_extra_miss_blocks(self):
+        self.accept(self.ACCEPTED)
+        for files in ({'app/order_core.py'}, {'app/order_routes.py', 'app/order_core.py'}):
+            with self.subTest(files=files):
+                self.realistic(mid={'fx-multichunk': files})
+                with self.assertRaisesRegex(ValueError, 'fx-multichunk: high 누락 또는 허용 목록 불일치'):
+                    self.check()
+
+    def test_miss_in_other_case_blocks(self):
+        # 허용된 미스는 그대로 두고, 같은 파일 경로라도 다른 case의 미스는 허용하지 않는다.
+        self.accept(self.ACCEPTED)
+        self.realistic(mid=dict(self.ROUTES, **{'fx-pr-purpose': {'infra/deployment.yaml'}}))
+        with self.assertRaisesRegex(ValueError, 'fx-pr-purpose: high 누락'):
+            self.check()
+
+    def test_stale_accepted_miss_blocks(self):
+        self.accept(self.ACCEPTED)
+        self.realistic()
+        with self.assertRaisesRegex(ValueError, 'fx-multichunk: high 누락 또는 허용 목록 불일치'):
+            self.check()
+
+    def test_invalid_accepted_entries_block(self):
+        self.realistic(mid=self.ROUTES)
+        invalid = [dict(self.ACCEPTED, **{key: value}) for key in self.ACCEPTED for value in (None, '', ' ', 1)]
+        invalid += [{k: v for k, v in self.ACCEPTED.items() if k != key} for key in self.ACCEPTED]
+        invalid += [dict(self.ACCEPTED, date=d) for d in ('2026-13-01', '2026-11-4', '20261104', '2026-11-04T00:00')]
+        invalid += [dict(self.ACCEPTED, file='app/other.py'), dict(self.ACCEPTED, case='nope'),
+                    dict(self.ACCEPTED, file='lib/skim/db.py')]
+        for entry in invalid:
+            with self.subTest(entry=entry):
+                self.accept(entry)
+                with self.assertRaisesRegex(ValueError, 'accepted_misses'):
+                    self.check()
+        self.accept(self.ACCEPTED, self.ACCEPTED)
+        with self.assertRaisesRegex(ValueError, 'accepted_misses 중복'):
+            self.check()
+        self.manifest['accepted_misses'] = self.ACCEPTED
+        (self.corpus / 'manifest.json').write_text(json.dumps(self.manifest))
+        with self.assertRaisesRegex(ValueError, 'accepted_misses'):
+            self.check()
+
+    def test_accepted_case_still_requires_status_and_visibility(self):
+        self.accept(self.ACCEPTED)
+        for kwargs, error in ((dict(status='failed'), '분석 실패'), (dict(hide=True), '미분석 숨김')):
+            with self.subTest(**kwargs):
+                self.realistic(mid=self.ROUTES, **kwargs)
+                with self.assertRaisesRegex(ValueError, f'fx-multichunk: .*{error}'):
+                    self.check()
+
+    def test_miss_without_accepted_list_blocks(self):
+        for entries in (None, []):
+            with self.subTest(entries=entries):
+                if entries is None:
+                    self.manifest.pop('accepted_misses', None)
+                    (self.corpus / 'manifest.json').write_text(json.dumps(self.manifest))
+                else:
+                    self.accept(*entries)
+                self.realistic(mid=self.ROUTES)
+                with self.assertRaisesRegex(ValueError, 'high 누락'):
+                    self.check()
+
+    def test_accepted_miss_does_not_allow_forged_summary(self):
+        self.accept(self.ACCEPTED)
+        self.realistic(mid=self.ROUTES)
+        original = copy.deepcopy(self.report)
+        for change in (dict(failures=[]), dict(total_misses=0), dict(total_misses=0, failures=[])):
+            with self.subTest(change=change):
+                self.report = copy.deepcopy(original)
+                self.report['summary'].update(change)
+                with self.assertRaisesRegex(ValueError, '평가 요약 불일치'):
+                    self.check()
+
+    def test_accepted_miss_does_not_mask_other_case_failures(self):
+        self.accept(self.ACCEPTED)
+        for case_id, error in (('pr2', '분석 실패'), ('fx-secret', 'expect_redacted 기대 불충족')):
+            with self.subTest(case=case_id):
+                self.realistic(mid=self.ROUTES)
+                expected = next(c for c in self.manifest['cases'] if c['id'] == case_id)
+                case = next(c for c in self.report['cases'] if c['id'] == case_id)
+                diff = (self.corpus / expected['diff']).read_text()
+                if case_id == 'pr2':
+                    case['displayed']['status'] = 'failed'
+                else:
+                    case['requests'] = [diff]
+                # 점수와 요약을 다시 계산해 위조가 아닌 실제 실패로 만든다.
+                case.update(assess(expected, case['displayed'], case['requests'], diff))
+                summarize(self.report)
+                with self.assertRaisesRegex(ValueError, f'{case_id}: {error}'):
+                    self.check()

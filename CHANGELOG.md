@@ -51,5 +51,9 @@
 - 웹은 `127.0.0.1`에만 바인딩하고, 60초 1회용 진입 토큰, `HttpOnly; SameSite=Strict` 세션 쿠키, CSP를 사용합니다.
 - 변경 요청은 POST만 허용하며 세션별 CSRF 토큰과 정확한 `Origin`·`Host` 검사로 보호합니다. GET 조회는 작업을 시작하지 않습니다.
 
+### 알려진 한계
+
+- 실제 모델 회귀 평가(`skim-ko-5`, `gpt-6.1-sol`)에서 `fx-multichunk`의 `app/order_routes.py`를 기준은 high, 모델은 mid로 판단한 미스가 1건 있습니다. nowgnas가 2026-11-04에 알려진 한계로 허용했습니다.
+
 [Unreleased]: https://github.com/nowgnas/skim/compare/v1.0.0...HEAD
 [1.0.0]: https://github.com/nowgnas/skim/releases/tag/v1.0.0

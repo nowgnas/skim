@@ -152,5 +152,14 @@
       "high_files": [],
       "expect_unanalysed_visible": true
     }
+  ],
+  "accepted_misses": [
+    {
+      "case": "fx-multichunk",
+      "file": "app/order_routes.py",
+      "reason": "기준은 high, 모델(gpt-6.1-sol)은 mid로 판단한 1건 미스. 알려진 한계로 허용",
+      "approved_by": "nowgnas",
+      "date": "2026-11-04"
+    }
   ]
 }
