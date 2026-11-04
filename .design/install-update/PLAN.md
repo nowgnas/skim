@@ -76,3 +76,13 @@
 - 일반 예외와 KeyboardInterrupt는 해당 실행이 만든 프로그램 디렉터리를 정리하여 재시도할 수 있다. SIGKILL이나 전원 중단으로 남은 설치는 자동 삭제하지 않는다. 기존 파일 및 경합 중 생성된 다른 launcher는 보존한다.
 - 이번 수정은 업데이트 적용, 관리자 복구, readiness 및 앱 연결 완료를 의미하지 않는다. G2, G3, G5, G6, G8의 전체 완료 판정은 계속 보류한다. 실제 배포판 설치, macOS 기본 bash 3.2 실행 및 실제 GitHub 다운로드는 수행하지 않는다.
 - 검증 결과: `PYTHONPATH=lib python3 -m unittest discover -s tests` 전체 519개 통과. 설치 스크립트 회귀 테스트 15개와 설치 및 업데이트 테스트 55개를 포함한다. `bash -n scripts/install.sh`와 `git diff --check`도 통과했다. 테스트는 가짜 도구, mock 및 임시 디렉터리를 사용했으며 실제 릴리스 생성과 네트워크 설치는 수행하지 않았다.
+
+## 10. 설치 재리뷰 수정 2회차
+
+- 재리뷰 1, 3, 4, 5, 6, 7번을 수정했다. rebase는 이번 작업에서 수행하지 않았다.
+- 설치 경로 검사와 영구 launcher는 현재 사용자 이름의 전용 기본 그룹이고 다른 기본 및 보조 멤버가 없을 때만 그룹 쓰기를 허용한다. 공유 그룹이면 `chmod g-w` 해결 방법을 안내하며 기존 권한은 자동 변경하지 않는다. macOS 앱과 제거의 기존 소유 마커 검사는 유지한다.
+- launcher의 `/tmp` 예외를 제거했다. launcher 실행 테스트는 안전한 상위 경로의 임시 디렉터리를 사용하며 공유 임시 경로와 sticky 디렉터리도 별도로 거부하는지 검사한다.
+- gh는 `gh help auth`의 하위 명령 목록에서 `token` 지원을 확인한다. Codex 부재, 구버전 및 필수 플래그 미지원은 분석 준비 경고와 설치 안내를 출력하며 skim 설치를 막지 않는다.
+- 릴리스 API 인자의 glob 확장을 막고 README에 bash의 `~/.bashrc` 안내를 추가했다.
+- 검증은 mock, 가짜 CLI 및 임시 디렉터리만 사용한다. 실제 GitHub 릴리스와 태그 생성, 네트워크 설치 및 커밋은 수행하지 않는다. 업데이트 적용, 복구 관리자, readiness 및 정식 설치본 앱 연결의 기존 미완료 게이트는 이번 수정으로 완료되지 않는다.
+- 검증 결과: `python3 -m unittest discover -s tests` 전체 528개 통과. `bash -n scripts/install.sh`와 `git diff --check`도 통과했다. 실제 Ubuntu 기본 환경과 macOS 기본 bash 3.2에서의 실행은 검증하지 않았다.

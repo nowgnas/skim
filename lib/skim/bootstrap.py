@@ -1,5 +1,6 @@
 """정식 릴리스 최초 설치. 기존 설치와 사용자 데이터는 변경하지 않는다."""
 import argparse
+import inspect
 import os
 from pathlib import Path
 import plistlib
@@ -47,7 +48,7 @@ def safe_parents(path, home):
 
 def launcher_source(root, installation_id):
     # -I는 외부 PYTHONPATH와 현재 디렉터리의 모듈 주입을 막는다.
-    code = f'''import os, sys, stat, json
+    code = f'''import os, sys, stat, json, grp, pwd, shlex
 from pathlib import Path
 sys.dont_write_bytecode = True
 root = Path({str(root)!r})
@@ -58,14 +59,17 @@ for program in (root, Path.home() / '.local/bin/skim'):
         path = path.resolve()
         if program == path or program in path.parents or path in program.parents:
             raise SystemExit('프로그램 경로와 사용자 데이터 경로를 분리하세요.')
+{inspect.getsource(macos_bundle.private_user_group)}
 def private(path):
     info = path.lstat()
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
         raise SystemExit('프로그램 디렉터리의 소유자 또는 권한을 확인하세요.')
 for parent in root.parents:
     info = parent.lstat()
-    if not stat.S_ISDIR(info.st_mode) or (parent != Path('/tmp') and info.st_mode & 0o022):
-        raise SystemExit('프로그램 상위 경로가 안전하지 않습니다.')
+    unsafe_group = info.st_mode & 0o020 and not private_user_group(info.st_gid)
+    if not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o002 or unsafe_group:
+        hint = '. 그룹 쓰기 권한은 chmod g-w ' + shlex.quote(str(parent)) + ' 명령으로 제거하세요.' if unsafe_group else ''
+        raise SystemExit('프로그램 상위 경로가 안전하지 않습니다: ' + str(parent) + hint)
 private(root)
 private(root / 'versions')
 fd = os.open(root / 'install.json', os.O_RDONLY | os.O_NOFOLLOW)

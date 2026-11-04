@@ -36,7 +36,6 @@ command -v gh >/dev/null || missing+=(gh)
 codex_bin="${SKIM_CODEX_BIN:-$HOME/.local/share/skim-tools/node_modules/.bin/codex}"
 if ! [[ -x "$codex_bin" ]]; then
   codex_bin="${SKIM_CODEX_BIN:-codex}"
-  command -v "$codex_bin" >/dev/null || missing+=(codex)
 fi
 if ((${#missing[@]})); then
   echo "필요한 도구가 없습니다: ${missing[*]}"
@@ -60,7 +59,6 @@ if ((${#missing[@]})); then
     case "$tool" in
       python3) echo '  brew install python@3.11' ;;
       gh) echo '  brew install gh' ;;
-      codex) echo '  brew install --cask codex' ;;
     esac
   done
   if (( ! yes )); then
@@ -84,12 +82,11 @@ if ((${#missing[@]})); then
     case "$tool" in
       python3) brew install python@3.11 ;;
       gh) brew install gh ;;
-      codex) brew install --cask codex ;;
     esac
   done
 fi
 py="$(find_python)" || { echo 'Python 3.11 이상을 설치하고 SKIM_PYTHON을 지정하세요.' >&2; return 1; }
-gh auth token --help >/dev/null 2>&1 || { echo 'gh를 최신 버전으로 갱신하세요. auth token 지원이 필요합니다.' >&2; return 1; }
+gh help auth | "$py" -I -c 'import re, sys; sys.exit(not re.search(r"(?m)^\s+token\s", sys.stdin.read()))' || { echo 'gh를 최신 버전으로 갱신하세요. auth token 지원이 필요합니다.' >&2; return 1; }
 gh auth status --hostname github.com >/dev/null 2>&1 || {
   echo '다운로드 전에 gh auth login --hostname github.com을 실행하고 저장소 읽기 권한을 확인하세요.' >&2
   return 1
@@ -110,12 +107,12 @@ try:
     if any(not re.search(re.escape(flag) + r'(?![\w-])', help_text) for flag in flags):
         raise ValueError()
 except (OSError, ValueError, subprocess.SubprocessError):
-    raise SystemExit('필수 격리 플래그가 있는 Codex 안정 버전 0.165.0 이상을 설치하세요: https://developers.openai.com/codex/cli/')
+    print('경고: PR 분석에는 필수 격리 플래그가 있는 Codex 안정 버전 0.165.0 이상이 필요합니다. 설치 또는 갱신하세요: https://developers.openai.com/codex/cli/', file=sys.stderr)
 CHECK
 # Latest 표시와 무관하게 정식 semver 최대 태그를 선택한다.
 temporary="$(mktemp -d)"
 trap 'rm -rf -- "$temporary"' EXIT
-gh api --paginate repos/nowgnas/skim/releases?per_page=100 > "$temporary/releases.json"
+gh api --paginate 'repos/nowgnas/skim/releases?per_page=100' > "$temporary/releases.json"
 tag="$("$py" -I - "$temporary/releases.json" <<'TAG'
 import json, re, sys
 # gh --paginate 출력의 연속 JSON 배열을 읽는다.

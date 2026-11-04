@@ -594,7 +594,7 @@ class BootstrapTests(unittest.TestCase):
         from skim import bootstrap
         import subprocess
         release, payloads = self.payloads()
-        with tempfile.TemporaryDirectory() as temporary, patch.dict(os.environ, {}, clear=False):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as temporary, patch.dict(os.environ, {}, clear=False):
             home = Path(temporary)
             with patch('skim.releases.fetch_latest_authenticated', return_value=release):
                 store = bootstrap.install(home, download=lambda r, n, limit: payloads[n])
@@ -740,7 +740,7 @@ class BootstrapTests(unittest.TestCase):
         from skim import bootstrap
         import subprocess
         release, payloads = self.payloads()
-        with tempfile.TemporaryDirectory(prefix='skim home ') as temporary:
+        with tempfile.TemporaryDirectory(prefix='skim home ', dir=Path(__file__).resolve().parents[1]) as temporary:
             home = Path(temporary)
             with patch('skim.releases.fetch_latest_authenticated', return_value=release):
                 store = bootstrap.install(home, download=lambda r, n, limit: payloads[n])

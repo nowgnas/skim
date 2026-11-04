@@ -43,6 +43,7 @@ fi''')
 
     def gh(self):
         self.tool('gh', f'''echo "gh $*" >> '{self.log}'
+if [[ "$1" == help ]]; then echo '  token  인증 토큰'; exit 0; fi
 if [[ "$1" == auth ]]; then exit 0; fi
 if [[ "$1" == api ]]; then
   echo '[{{"tag_name":"v1.0.0"}},{{"tag_name":"v2.0.0","prerelease":true}},{{"tag_name":"v0.9.0"}}]'
@@ -76,7 +77,7 @@ exit 1''')
         (self.bin / 'codex').unlink()
         result = self.run_script()
         self.assertNotEqual(result.returncode, 0)
-        for value in ('python3', 'gh', 'codex', 'https://brew.sh/'):
+        for value in ('python3', 'gh', 'https://brew.sh/'):
             self.assertIn(value, result.stdout)
         self.assertFalse(self.log.exists())
 
@@ -146,13 +147,16 @@ exit 1''')
     def test_codex_official_install_command(self):
         self.gh()
         (self.bin / 'codex').unlink()
-        self.tool('uname', 'echo Linux')
         self.tool('dnf', 'exit 99')
         self.tool('npm', 'exit 99')
-        result = self.run_script(tty=True)
-        self.assertIn('0.165.0', result.stdout)
-        self.assertIn('developers.openai.com/codex/cli/', result.stdout)
-        self.assertNotEqual(result.returncode, 0)
+        for system in ('Linux', 'Darwin'):
+            with self.subTest(system=system):
+                self.tool('uname', 'echo ' + system)
+                result = self.run_script()
+                self.assertIn('0.165.0', result.stderr)
+                self.assertIn('developers.openai.com/codex/cli/', result.stderr)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn('가짜 bootstrap 완료', result.stdout)
 
     def test_versioned_python_after_brew_install(self):
         self.gh()
@@ -174,19 +178,19 @@ exit 1''')
         self.assertIn('release download v1.0.0 ', self.log.read_text())
 
     def test_auth_required_before_download(self):
-        self.tool('gh', f'echo "$*" >> "{self.log}"\n[[ "$2" == token ]]')
+        self.tool('gh', f'echo "$*" >> "{self.log}"\nif [[ "$1" == help ]]; then echo "  token  인증 토큰"; exit 0; fi\nexit 1')
         result = self.run_script()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('gh auth login', result.stderr)
         self.assertNotIn('download', self.log.read_text())
 
-    def test_old_tools_rejected(self):
+    def test_old_codex_warns_and_continues(self):
         self.gh()
         self.tool('codex', "echo 'codex 0.164.0'")
         result = self.run_script()
-        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('0.165.0', result.stderr)
-        self.assertNotIn('download', self.log.read_text())
+        self.assertIn('download', self.log.read_text())
 
     def test_truncated_pipe_never_runs_body(self):
         self.tool('brew', f'echo unexpected >> "{self.log}"')
@@ -198,16 +202,16 @@ exit 1''')
             self.assertFalse(self.log.exists())
 
     def test_old_gh_and_missing_isolation_flags(self):
-        self.tool('gh', 'exit 1')
+        self.tool('gh', 'if [[ "$1" == help ]]; then echo "  login  로그인"; fi\nexit 0')
         result = self.run_script()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('auth token', result.stderr)
         self.gh()
         self.tool('codex', "echo 'codex 0.165.0'")
         result = self.run_script()
-        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('격리 플래그', result.stderr)
-        self.assertNotIn('download', self.log.read_text())
+        self.assertIn('download', self.log.read_text())
 
     def test_linux_old_python_manual_guide_without_sudo(self):
         self.tool('uname', 'echo Linux')
@@ -218,3 +222,14 @@ exit 1''')
         self.assertIn('python3.11', result.stdout)
         self.assertIn('SKIM_PYTHON', result.stdout)
         self.assertFalse(self.log.exists())
+
+    def test_release_api_argument_does_not_expand_glob(self):
+        self.gh()
+        with tempfile.TemporaryDirectory() as directory:
+            collision = Path(directory) / 'repos/nowgnas/skim/releasesXper_page=100'
+            collision.parent.mkdir(parents=True)
+            collision.touch()
+            result = subprocess.run(['/bin/bash', str(SCRIPT)], env=self.env,
+                                    cwd=directory, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('releases?per_page=100', self.log.read_text())
