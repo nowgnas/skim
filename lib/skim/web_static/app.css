@@ -605,3 +605,16 @@ input[type=search]{-webkit-appearance:none;appearance:none}
 .job-row.job-failed{background:var(--danger-weak)}
 .job-error{margin:6px 0 0;font-size:13px;color:var(--danger)}
 .status-section .job-row{flex-direction:column;align-items:stretch;gap:4px}
+
+/* 파일 검색을 목록의 진입점으로 구분한다. */
+.file-search-controls{position:relative;margin:16px 0;padding:16px;border:1px solid var(--line);border-radius:var(--radius-box);background:var(--surface-sub)}
+.file-search-form{position:relative;align-items:end;margin:0;gap:10px}
+.file-search-form label{display:grid;gap:7px;flex:1 1 320px;min-width:0;font-weight:600}
+.file-search-form input{width:100%;min-width:0}
+.file-search-suggestions{position:absolute;top:100%;left:0;z-index:15;width:min(100%,650px);margin-top:6px;padding:8px;border:1px solid var(--line);border-radius:var(--radius-box);background:var(--surface);box-shadow:var(--shadow)}
+.file-search-suggestions[hidden]{display:none}
+.file-search-caption,.file-search-suggestions [data-file-no-match]{margin:4px 8px;color:var(--text-sub);font-size:13px}
+.file-search-suggestions ul{max-height:280px;overflow:auto;list-style:none;margin:4px 0 0;padding:0}
+.file-search-suggestions li{margin:0}
+.file-search-suggestions a{display:block;padding:9px 10px;border-radius:var(--radius-ctl);color:var(--text);font-size:13px;overflow-wrap:anywhere}
+.file-search-suggestions a:hover,.file-search-suggestions a[aria-selected=true]{background:var(--accent-weak);color:var(--accent-text)}
