@@ -629,10 +629,22 @@ def detail(pr, query, config, offline=False, analysis_panel=""):
         selected_index = next((i for i, row in enumerate(filtered) if row['path'] == selected_file), None)
         if selected_index is not None:
             page_query['unit_page'] = [str(selected_index // 20 + 1)]
+    file_choices = rows
     rows, controls, navigation = list_controls(rows, page_query, 'unit', '파일', file_text, fragment='#file-changes')
     if rows and not any(row['path'] == selected_file for row in rows):
         selected_file = rows[0]['path']
-    content += controls
+    # 후보는 페이지나 현재 검색 결과가 아닌 PR 전체 파일에서 만든다.
+    choices = ''
+    for index, row in enumerate(file_choices):
+        params = [(key, value) for key, values in query.items()
+                  if key not in ('file', 'diff', 'unit_q', 'unit_page') for value in values]
+        params.append(('file', row['path']))
+        href = '?' + urlencode(params) + '#file-changes'
+        choices += f'<li><a id="file-option-{index}" role="option" tabindex="-1" href="{esc(href)}">{esc(row["path"])}</a></li>'
+    controls = controls.replace('<form class="filters"', '<form class="filters file-search-form"', 1)
+    controls = controls.replace('파일 검색 <input type="search"', '파일 또는 변경 내용 검색 <input type="search" autocomplete="off" placeholder="파일명이나 경로, 변경 내용 검색" role="combobox" aria-autocomplete="list" aria-controls="file-search-options" aria-expanded="false"', 1)
+    controls = controls.replace('</label><button', '</label><div class="file-search-suggestions" data-file-suggestions hidden><p class="file-search-caption">이 PR의 파일</p><ul id="file-search-options" role="listbox">' + choices + '</ul><p data-file-no-match hidden>일치하는 파일이 없습니다.</p></div><button', 1)
+    content += '<div class="file-search-controls" data-file-search>' + controls + '</div>'
     if rows:
         content += '<div class="detail-file-layout" data-file-workspace><nav class="detail-file-nav" aria-label="현재 페이지 파일 목록"><strong>파일 목록</strong>'
         content += '<label class="mobile-file-select">파일 선택<select data-file-select>'
