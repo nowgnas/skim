@@ -73,11 +73,16 @@ def overlaps(first, second):
 
 def read_launcher(path):
     """본인 소유 일반 파일만 읽고 (장치, inode)와 내용을 돌려준다."""
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-    with os.fdopen(fd, 'rb') as stream:
-        info = os.fstat(stream.fileno())
+    # FIFO 등에서 멈추지 않도록 비차단으로 열고, 읽기 전에 일반 파일인지 확인한다.
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1 or info.st_size > 1 << 20:
             raise ValueError('본인 소유 일반 파일이 아닙니다')
+    except BaseException:
+        os.close(fd)
+        raise
+    with os.fdopen(fd, 'rb') as stream:
         return (info.st_dev, info.st_ino), stream.read()
 
 

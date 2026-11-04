@@ -227,6 +227,14 @@ class ReleaseInstallUninstallTests(unittest.TestCase):
         self.assertNotEqual(self.launcher.read_text(), content)
         self.assertTrue(self.launcher.exists())
 
+    def test_fifo_launcher_is_preserved_without_blocking(self):
+        self.launcher.unlink()
+        os.mkfifo(self.launcher)
+        status, out, _ = self.run_uninstall()
+        self.assertEqual(status, 0)
+        self.assertIn('본인 소유 일반 파일이 아닙니다', out)
+        self.assertTrue(self.launcher.is_fifo())
+
     def test_launcher_changed_before_removal_keeps_launcher_and_store(self):
         original = uninstall.build_plan
         def build_plan(*args):
