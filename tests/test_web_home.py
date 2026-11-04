@@ -64,7 +64,7 @@ class HomeTests(unittest.TestCase):
                 self.assertEqual(filtered.count('<article class="issue-row">'), int(tabs[name]))
                 self.assertIn('aria-current="page"><span>' + name, filtered)
         self.assertEqual(self.request('/?tab=bogus')[0], 200)
-        self.assertNotIn('팀', self.request('/')[2].split('<main', 1)[1])
+        self.assertIn('소속 팀', self.request('/')[2].split('<main', 1)[1])
 
     def test_top_three_files_and_low_only_counted(self):
         base = self.set_items(2, {})[0]

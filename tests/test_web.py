@@ -18,6 +18,7 @@ sys.path.insert(0, str(ROOT / 'scripts'))
 from skim.config import Config
 from skim.db import connect
 from skim.web import Auth, Handler, CSP, Server, badges, load_prs, worker, read_diff, render_diff, serve
+from skim.web_settings import RepoLookup
 from demo_seed import seed
 
 
@@ -50,6 +51,7 @@ class WebTests(unittest.TestCase):
         self.auth = Auth(clock=lambda: self.now)
         self.server = SimpleNamespace(config=self.config, auth=self.auth,
                                       authority='127.0.0.1:8123', origin='http://127.0.0.1:8123')
+        self.server.repo_lookup = RepoLookup(self.config, clock=lambda: self.now)
         # fixture조차 실제 외부 실행을 호출하면 테스트가 즉시 실패한다.
         with patch('subprocess.run', side_effect=AssertionError('외부 실행 금지')), patch('socket.socket', side_effect=AssertionError('소켓 금지')):
             with redirect_stdout(io.StringIO()):
@@ -291,7 +293,7 @@ class WebTests(unittest.TestCase):
         self.assertIn('data-file-path="auth/session.py"', body)
         self.assertIn('data-file-path=".env"', body)
         self.assertIn('data-file-path="README.md"', body)
-        self.assertIn('직접 확인이 필요한 범위', body)
+        self.assertIn('분석 범위 확인', body)
         self.assertIn('미분석', body)
         self.assertIn('https://github.com/demo/checkout/pull/1', body)
         self.assertIn('전체 원본 diff', self.request('/pr/1?diff=1')[2])
@@ -314,13 +316,14 @@ class WebTests(unittest.TestCase):
         body = self.request('/pr/1')[2]
         panel = next(part.split('</section>')[0] for part in body.split('<section class="detail-file"')
                      if 'data-file-path="' + unit['file_path'] + '"' in part)
-        self.assertIn('<p>규칙 후보: 테스트 변경 없음, 설치 스크립트</p>', panel)
+        self.assertIn('<p>규칙 후보: 설치 스크립트</p>', panel)
+        self.assertIn('관련 테스트 변경 미확인 파일', body)
         self.assertIn('<p>모델 판단: 설정</p>', panel)
         self.assertIn('분석 근거 더보기', panel)
 
     def test_unanalyzed_model_label_and_empty_badges(self):
         body = self.request('/pr/1')[2]
-        self.assertIn('제외되었거나 분석하지 못한 파일', body)
+        self.assertIn('제외 또는 미분석 파일', body)
         base = dict(importance='low', rule_flags=[], model_flags=[],
                     unanalysed=False, items={'h1': {}}, stale=False, draft=False)
         self.assertNotIn('규칙 후보:', badges(base))

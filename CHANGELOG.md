@@ -75,5 +75,5 @@
 - 실제 모델 회귀 평가(`skim-ko-5`, `gpt-6.1-sol`)에서 `fx-multichunk`의 `app/order_routes.py`를 기준은 high, 모델은 mid로 판단한 미스가 1건 있습니다. nowgnas가 2026-11-04에 알려진 한계로 허용했습니다.
 
 [Unreleased]: https://github.com/nowgnas/skim/compare/v1.1.0...HEAD
-[1.1.0]: https://github.com/nowgnas/skim/compare/v1.0.0...v1.1.0
+[1.1.0]: https://github.com/nowgnas/skim/releases/tag/v1.1.0
 [1.0.0]: https://github.com/nowgnas/skim/releases/tag/v1.0.0

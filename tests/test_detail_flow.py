@@ -1,4 +1,4 @@
-"""PR 상세의 검토 흐름: 중복 없는 먼저 볼 파일, 앞뒤 파일 이동, 버튼 위계, 전체 경로."""
+"""PR 상세의 검토 흐름: 먼저 볼 파일 펼침, 앞뒤 파일 이동, 버튼 위계, 전체 경로."""
 from contextlib import closing
 from pathlib import Path
 import re
@@ -20,11 +20,12 @@ class DetailFlowTests(unittest.TestCase):
         self.setup_http()
         self.server.repo_lookup = RepoLookup(self.config, clock=lambda: self.now)
 
-    def test_focus_files_link_to_workspace_without_duplicating_diff(self):
+    def test_focus_files_expand_inline_with_unique_workspace_id(self):
         body = self.request('/pr/1')[2]
         focus = body.split('class="detail-focus"', 1)[1].split('</section>', 1)[0]
-        self.assertNotIn('<pre', focus)
-        self.assertIn(f'data-select-file="{file_anchor("auth/session.py")}"', focus)
+        self.assertIn('<details class="focus-entry">', focus)
+        self.assertIn('<pre', focus)
+        self.assertNotIn('data-select-file=', focus)
         self.assertEqual(body.count('id="' + file_anchor('auth/session.py') + '"'), 1)
 
     def test_each_panel_links_previous_and_next_in_list_order(self):
