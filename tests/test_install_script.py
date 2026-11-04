@@ -7,6 +7,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 import zipfile
 
@@ -59,16 +60,42 @@ while [[ $# -gt 0 ]]; do
 done
 exit 1''')
 
+    @staticmethod
+    def open_tty():
+        """pty를 열고 답 'n'을 넣는다. master를 계속 비운다.
+
+        macOS는 pty 출력(입력 에코)이 master에서 읽히기 전까지 자식이 종료 단계에서
+        대기하고 SIGKILL로도 끝나지 않는다. 읽는 스레드로 이를 막는다.
+        """
+        master, slave = pty.openpty()
+
+        def drain():
+            while True:
+                try:
+                    if not os.read(master, 1024):
+                        return
+                except OSError:
+                    return
+
+        reader = threading.Thread(target=drain, daemon=True)
+        reader.start()
+        os.write(master, b'n\n')
+        return master, slave, reader
+
+    @staticmethod
+    def close_tty(master, slave, reader):
+        os.close(slave)
+        reader.join(timeout=5)
+        os.close(master)
+
     def run_script(self, args=(), tty=False):
         if tty:
-            master, slave = pty.openpty()
-            os.write(master, b'n\n')
+            master, slave, reader = self.open_tty()
             try:
                 return subprocess.run(['/bin/bash', str(SCRIPT), *args], env=self.env, stdin=slave,
                                       capture_output=True, text=True, timeout=10, start_new_session=True)
             finally:
-                os.close(master)
-                os.close(slave)
+                self.close_tty(master, slave, reader)
         return subprocess.run(['/bin/bash', str(SCRIPT), *args], env=self.env, stdin=subprocess.DEVNULL,
                               capture_output=True, text=True, timeout=10, start_new_session=True)
 
@@ -100,12 +127,11 @@ exit 1''')
         import fcntl
         import termios
         self.tool('brew', f'echo brew >> "{self.log}"')
-        master, slave = pty.openpty()
+        master, slave, reader = self.open_tty()
         def attach_tty():
             os.setsid()
             fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
         try:
-            os.write(master, b'n\n')
             result = subprocess.run(['/bin/bash'], env=self.env,
                                     input=SCRIPT.read_text(), capture_output=True, text=True,
                                     pass_fds=(slave,), preexec_fn=attach_tty, timeout=10)
@@ -114,8 +140,7 @@ exit 1''')
             self.assertNotIn('터미널이 없어', result.stderr)
             self.assertFalse(self.log.exists())
         finally:
-            os.close(master)
-            os.close(slave)
+            self.close_tty(master, slave, reader)
 
     def test_yes_installs_without_tty(self):
         self.gh()

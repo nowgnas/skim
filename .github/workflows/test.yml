@@ -40,7 +40,7 @@ jobs:
       - name: Diag
         if: runner.os == 'macOS'
         continue-on-error: true
-        run: python -m unittest -v -k codex_official tests.test_install_script
+        run: python -m unittest -v tests.test_install_script
       - name: Unit tests
         env:
           PYTHONDONTWRITEBYTECODE: '1'
