@@ -929,7 +929,7 @@ class UpdateApplyTests(unittest.TestCase):
         from skim import cli, update_apply
         import subprocess
         # 태그는 v1.0.1이지만 코드가 1.0.0을 보고하는 배포물은 실제 launcher 실행 확인에서 거부된다.
-        _, mismatched = BootstrapTests().payloads('v1.0.1')
+        _, mismatched = BootstrapTests().payloads('v1.0.1', '1.0.0')
         observed = []
         def runner(command, **kwargs):
             observed.append(self.journal()['state'])
