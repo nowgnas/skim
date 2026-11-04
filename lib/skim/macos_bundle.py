@@ -93,7 +93,17 @@ def validate_existing(app, agent, root, config, check_environment=True):
             raise ValueError('기존 LaunchAgent와 현재 환경이 다릅니다. 같은 환경에서 실행하세요.')
 
 
+def managed_app_unavailable(root=None):
+    root = Path(root) if root is not None else Path(__file__).resolve().parents[2]
+    if (root / '.skim-payload.json').exists():
+        print('정식 설치본의 skim app 연결은 준비 중입니다. 터미널에서 skim을 실행하세요. 기존 앱과 LaunchAgent는 보존합니다.', file=sys.stderr)
+        return True
+    return False
+
+
 def uninstall_app(config):
+    if managed_app_unavailable():
+        return 1
     if sys.platform != 'darwin':
         print('skim app은 macOS에서 사용할 수 있습니다.', file=sys.stderr)
         return 1
@@ -122,6 +132,8 @@ def main(argv=None, quiet=False):
     args = parser.parse_args(argv)
     if sys.platform != 'darwin':
         print('macOS에서 실행하세요.', file=sys.stderr)
+        return 1
+    if managed_app_unavailable(args.root):
         return 1
     binary = (args.root.resolve() / 'bin/skim')
     output = args.output.resolve()
@@ -171,6 +183,8 @@ def install_app(config, *, restart=False):
         print('skim app은 macOS에서 사용할 수 있습니다.', file=sys.stderr)
         return 1
     root = Path(__file__).resolve().parents[2]
+    if managed_app_unavailable(root):
+        return 1
     home = Path.home()
     app = home / 'Applications' / APP_NAME
     agent = home / 'Library/LaunchAgents/com.skim.web.plist'
