@@ -86,7 +86,7 @@ if ((${#missing[@]})); then
   done
 fi
 py="$(find_python)" || { echo 'Python 3.11 이상을 설치하고 SKIM_PYTHON을 지정하세요.' >&2; return 1; }
-gh help auth | "$py" -I -c 'import re, sys; sys.exit(not re.search(r"(?m)^\s+token\s", sys.stdin.read()))' || { echo 'gh를 최신 버전으로 갱신하세요. auth token 지원이 필요합니다.' >&2; return 1; }
+gh help auth | "$py" -I -c 'import re, sys; sys.exit(not re.search(r"(?m)^\s+token:?\s", sys.stdin.read()))' || { echo 'gh를 최신 버전으로 갱신하세요. auth token 지원이 필요합니다.' >&2; return 1; }
 gh auth status --hostname github.com >/dev/null 2>&1 || {
   echo '다운로드 전에 gh auth login --hostname github.com을 실행하고 저장소 읽기 권한을 확인하세요.' >&2
   return 1

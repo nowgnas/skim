@@ -43,7 +43,7 @@ fi''')
 
     def gh(self):
         self.tool('gh', f'''echo "gh $*" >> '{self.log}'
-if [[ "$1" == help ]]; then echo '  token  인증 토큰'; exit 0; fi
+if [[ "$1" == help ]]; then echo '  token:  인증 토큰'; exit 0; fi
 if [[ "$1" == auth ]]; then exit 0; fi
 if [[ "$1" == api ]]; then
   echo '[{{"tag_name":"v1.0.0"}},{{"tag_name":"v2.0.0","prerelease":true}},{{"tag_name":"v0.9.0"}}]'
@@ -178,7 +178,7 @@ exit 1''')
         self.assertIn('release download v1.0.0 ', self.log.read_text())
 
     def test_auth_required_before_download(self):
-        self.tool('gh', f'echo "$*" >> "{self.log}"\nif [[ "$1" == help ]]; then echo "  token  인증 토큰"; exit 0; fi\nexit 1')
+        self.tool('gh', f'echo "$*" >> "{self.log}"\nif [[ "$1" == help ]]; then echo "  token:  인증 토큰"; exit 0; fi\nexit 1')
         result = self.run_script()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('gh auth login', result.stderr)
