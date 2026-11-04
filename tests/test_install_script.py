@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import pty
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -27,7 +28,8 @@ class InstallScriptTests(unittest.TestCase):
         self.tool('uname', 'echo Darwin')
         self.tool('python3', 'exec ' + shlex.quote(sys.executable) + ' "$@"')
         for name in ('mktemp', 'rm'):
-            (self.bin / name).symlink_to('/usr/bin/' + name)
+            # macOS는 rm이 /bin, mktemp가 /usr/bin에 있어 경로를 고정하지 않는다.
+            (self.bin / name).symlink_to(shutil.which(name, path='/usr/bin:/bin'))
         self.tool('codex', '''if [[ "$1" == --version ]]; then echo 'codex 0.165.0'; else
 echo '--skip-git-repo-check --ephemeral --ignore-user-config --ignore-rules --sandbox --output-schema --output-last-message --disable'
 fi''')

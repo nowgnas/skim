@@ -37,11 +37,7 @@ jobs:
           for file in setup.sh bin/skim lib/python.sh; do
             bash -n "$file"
           done
-      - name: Diag
-        if: runner.os == 'macOS'
-        continue-on-error: true
-        run: python -m unittest -v tests.test_install_script
       - name: Unit tests
         env:
           PYTHONDONTWRITEBYTECODE: '1'
-        run: python -X faulthandler -c "import faulthandler,sys,unittest; faulthandler.dump_traceback_later(420, exit=True); sys.argv=['unittest','discover','-s','tests','-v']; unittest.main(module=None)"
+        run: python -m unittest discover -s tests -v
