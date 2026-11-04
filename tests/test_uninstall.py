@@ -184,9 +184,14 @@ class ReleaseInstallUninstallTests(unittest.TestCase):
 
     def setUp(self):
         from test_install_update import BootstrapTests
-        self.temp = tempfile.TemporaryDirectory(prefix='skim-uninstall-release-')
+        self.temp = tempfile.TemporaryDirectory(prefix='skim-test-uninstall-release-',
+                                                dir=Path(__file__).resolve().parents[1])
         self.addCleanup(self.temp.cleanup)
         self.home = Path(self.temp.name).resolve()
+        # 안전한 저장소 아래 임시 HOME을 정식 설치처럼 검사한다.
+        checkout = patch.object(uninstall, 'git_checkout', return_value=None)
+        checkout.start()
+        self.addCleanup(checkout.stop)
         for context in (patch.object(Path, 'home', return_value=self.home),
                         patch.dict(os.environ, {'PATH': '/usr/bin:/bin'}, clear=True),
                         patch.object(uninstall.sys, 'platform', 'linux')):

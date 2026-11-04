@@ -16,3 +16,6 @@ id_ed25519*
 .netrc
 credentials*.json
 secrets/
+
+# Repository-local test temporary directories
+/skim-test-*/
