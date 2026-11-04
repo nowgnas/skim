@@ -79,7 +79,7 @@ def file_rows(pr):
             row['rank'], row['reason'] = rank, item.get('reason') or ''
         row['model'].update(item.get('risk_flags', []))
     return sorted(files.values(), key=lambda r: (-r['rank'], r['focus_rank'] if r['focus_rank'] is not None else 999999,
-                                                  -bool(priority_rules(r)), r['path']))
+                                                  -bool(r['rule']), r['path']))
 
 
 def file_counts(rows):
@@ -90,9 +90,8 @@ def file_counts(rows):
 
 
 def top_file_rows(rows):
-    # 목적 관련 파일과 별도 위험 규칙은 테스트 변경 미확인과 구분한다.
-    return [row for row in rows if row['rank'] >= 2 or priority_rules(row)
-            or (row['rank'] and row['focus_rank'] is not None)][:3]
+    # 낮음·미분석 파일은 규칙 후보가 없으면 숫자로만 보여준다.
+    return [row for row in rows if row['rank'] >= 2 or row['rule']][:3]
 
 
 def file_card(pr):
