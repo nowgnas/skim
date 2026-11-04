@@ -6,6 +6,7 @@ from pathlib import Path
 import plistlib
 import shlex
 import shutil
+import stat
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -13,6 +14,7 @@ from types import SimpleNamespace
 from . import macos_bundle, releases
 from .collect import GitHub
 from .program_store import ProgramStore
+from .macos_bundle import private_user_group
 
 
 def data_paths(home):
@@ -46,7 +48,26 @@ def safe_parents(path, home):
         directory.mkdir(mode=0o700)
 
 
+def unsafe_ancestor(path):
+    """경로를 해석하지 않고 모든 조상의 링크와 권한을 검사한다."""
+    for parent in path.parents:
+        try:
+            info = parent.lstat()
+        except OSError:
+            return '프로그램 상위 경로가 안전하지 않습니다: ' + str(parent)
+        unsafe_group = info.st_mode & 0o020 and not private_user_group(info.st_gid)
+        if not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o002 or unsafe_group:
+            hint = ''
+            if info.st_mode & 0o002:
+                hint = '. 다른 위치의 HOME을 사용하세요.'
+            elif unsafe_group:
+                hint = '. 그룹 쓰기 권한은 chmod g-w ' + shlex.quote(str(parent)) + ' 명령으로 제거하세요.'
+            return '프로그램 상위 경로가 안전하지 않습니다: ' + str(parent) + hint
+    return None
+
+
 def launcher_source(root, installation_id):
+    root = root.resolve()
     # -I는 외부 PYTHONPATH와 현재 디렉터리의 모듈 주입을 막는다.
     code = f'''import os, sys, stat, json, grp, pwd, shlex
 from pathlib import Path
@@ -60,16 +81,14 @@ for program in (root, Path.home() / '.local/bin/skim'):
         if program == path or program in path.parents or path in program.parents:
             raise SystemExit('프로그램 경로와 사용자 데이터 경로를 분리하세요.')
 {inspect.getsource(macos_bundle.private_user_group)}
+{inspect.getsource(unsafe_ancestor)}
 def private(path):
     info = path.lstat()
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
         raise SystemExit('프로그램 디렉터리의 소유자 또는 권한을 확인하세요.')
-for parent in root.parents:
-    info = parent.lstat()
-    unsafe_group = info.st_mode & 0o020 and not private_user_group(info.st_gid)
-    if not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o002 or unsafe_group:
-        hint = '. 그룹 쓰기 권한은 chmod g-w ' + shlex.quote(str(parent)) + ' 명령으로 제거하세요.' if unsafe_group else ''
-        raise SystemExit('프로그램 상위 경로가 안전하지 않습니다: ' + str(parent) + hint)
+problem = unsafe_ancestor(root)
+if problem:
+    raise SystemExit(problem)
 private(root)
 private(root / 'versions')
 fd = os.open(root / 'install.json', os.O_RDONLY | os.O_NOFOLLOW)
@@ -150,6 +169,15 @@ def install(home=None, github=None, download=None):
             raise ValueError(f'기존 설치 또는 파일을 보존합니다: {path}. 개발 checkout 링크는 자동 이전하지 않습니다.')
     custom = os.environ.get('SKIM_HOME')
     data = Path(custom).expanduser().resolve() / 'data' if custom else home / '.local/share/skim'
+    for path in (root, launcher):
+        # 아직 만들지 않은 디렉터리는 제외하고 기존 조상 전체를 검사한다.
+        # 실행기는 저장된 실제 경로를 그대로 검사해 이후 링크 교체를 거부한다.
+        ancestor = path.parent
+        while not ancestor.exists() and not ancestor.is_symlink():
+            ancestor = ancestor.parent
+        problem = unsafe_ancestor(ancestor.resolve() / path.name)
+        if problem:
+            raise ValueError(problem)
     macos_bundle.validate_existing(home / 'Applications' / macos_bundle.APP_NAME,
                                   home / 'Library/LaunchAgents/com.skim.web.plist',
                                   root, SimpleNamespace(data_dir=data), check_environment=False)
@@ -167,6 +195,7 @@ def install(home=None, github=None, download=None):
         releases.stage_release(latest, Path(temporary), cached)
     safe_parents(root.parent, home)
     safe_parents(launcher.parent, home)
+    root = root.resolve()
     root.mkdir(mode=0o700)  # 배타적 생성으로 다른 설치와의 경합을 거부한다.
     identity = root.lstat()
     try:

@@ -619,7 +619,7 @@ class BootstrapTests(unittest.TestCase):
         from skim import bootstrap
         import subprocess
         release, payloads = self.payloads()
-        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as temporary, patch.dict(os.environ, {}, clear=False):
+        with tempfile.TemporaryDirectory(prefix='skim-test-', dir=Path(__file__).resolve().parents[1]) as temporary, patch.dict(os.environ, {}, clear=False):
             home = Path(temporary)
             with patch('skim.releases.fetch_latest_authenticated', return_value=release):
                 store = bootstrap.install(home, download=lambda r, n, limit: payloads[n])
@@ -639,7 +639,7 @@ class BootstrapTests(unittest.TestCase):
     def test_ownership_preserves_existing_install(self):
         from skim import bootstrap
         for kind in ('file', 'checkout_link', 'broken_link', 'program', 'app', 'agent'):
-            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temporary:
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory(prefix='skim-test-', dir=Path(__file__).resolve().parents[1]) as temporary:
                 home = Path(temporary)
                 launcher = home / '.local/bin/skim'
                 launcher.parent.mkdir(parents=True)
@@ -676,7 +676,7 @@ class BootstrapTests(unittest.TestCase):
         from skim import bootstrap
         release, payloads = self.payloads()
         for selected, broken in ((None, False), (release, True)):
-            with tempfile.TemporaryDirectory() as temporary:
+            with tempfile.TemporaryDirectory(prefix='skim-test-', dir=Path(__file__).resolve().parents[1]) as temporary:
                 home = Path(temporary)
                 data = home / 'data'
                 data.write_text('보존')
@@ -690,7 +690,7 @@ class BootstrapTests(unittest.TestCase):
     def test_bootstrap_data_overlap_and_symlink_parent(self):
         from skim import bootstrap
         release, payloads = self.payloads()
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory(prefix='skim-test-', dir=Path(__file__).resolve().parents[1]) as temporary:
             home = Path(temporary)
             with patch.dict(os.environ, {'SKIM_HOME': str(home / '.local')}), self.assertRaises(ValueError):
                 bootstrap.install(home)
@@ -722,7 +722,7 @@ class BootstrapTests(unittest.TestCase):
 
     def test_bootstrap_lookup_failure_and_unsupported_platform(self):
         from skim import bootstrap
-        with tempfile.TemporaryDirectory() as temporary, patch('skim.releases.fetch_latest_authenticated',
+        with tempfile.TemporaryDirectory(prefix='skim-test-', dir=Path(__file__).resolve().parents[1]) as temporary, patch('skim.releases.fetch_latest_authenticated',
                 side_effect=releases.ReleaseUnavailable('네트워크 확인')):
             with self.assertRaises(releases.ReleaseUnavailable):
                 bootstrap.install(Path(temporary))
@@ -740,7 +740,7 @@ class BootstrapTests(unittest.TestCase):
         from skim import bootstrap
         release, payloads = self.payloads()
         for failure in (OSError('stage 실패'), KeyboardInterrupt()):
-            with self.subTest(failure=type(failure)), tempfile.TemporaryDirectory() as temporary:
+            with self.subTest(failure=type(failure)), tempfile.TemporaryDirectory(prefix='skim-test-', dir=Path(__file__).resolve().parents[1]) as temporary:
                 home = Path(temporary)
                 root = home / '.local/share/skim-program'
                 with patch('skim.releases.fetch_latest_authenticated', return_value=release):
@@ -749,7 +749,7 @@ class BootstrapTests(unittest.TestCase):
                             bootstrap.install(home, download=lambda r, n, limit: payloads[n])
                     self.assertFalse(root.exists())
                     bootstrap.install(home, download=lambda r, n, limit: payloads[n])
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory(prefix='skim-test-', dir=Path(__file__).resolve().parents[1]) as temporary:
             home = Path(temporary)
             launcher = home / '.local/bin/skim'
             def competing_link(*args):
@@ -801,7 +801,7 @@ class BootstrapTests(unittest.TestCase):
     def test_installed_app_and_uninstall_never_modify_files(self):
         from skim import bootstrap, macos_bundle
         release, payloads = self.payloads()
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory(prefix='skim-test-', dir=Path(__file__).resolve().parents[1]) as temporary:
             home = Path(temporary)
             with patch('skim.releases.fetch_latest_authenticated', return_value=release):
                 store = bootstrap.install(home, download=lambda r, n, limit: payloads[n])
@@ -823,7 +823,7 @@ class UpdateApplyTests(unittest.TestCase):
     def setUp(self):
         from skim import bootstrap
         # launcher는 sticky 공유 임시 경로를 거부하므로 저장소 아래 임시 경로를 쓴다.
-        temporary = tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1])
+        temporary = tempfile.TemporaryDirectory(prefix='skim-test-', dir=Path(__file__).resolve().parents[1])
         self.addCleanup(temporary.cleanup)
         self.home = Path(temporary.name)
         environment = patch.dict(os.environ, {'HOME': str(self.home), 'SKIM_HOME': str(self.home / 'userdata')})
