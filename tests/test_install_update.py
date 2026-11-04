@@ -830,6 +830,9 @@ class UpdateApplyTests(unittest.TestCase):
         environment = patch.dict(os.environ, {'HOME': str(self.home), 'SKIM_HOME': str(self.home / 'userdata')})
         environment.start()
         self.addCleanup(environment.stop)
+        running_version = patch('skim.update_apply.__version__', '1.0.0')
+        running_version.start()
+        self.addCleanup(running_version.stop)
         fixture = BootstrapTests()
         installed, payloads = fixture.payloads()
         with patch('skim.releases.fetch_latest_authenticated', return_value=installed), redirect_stdout(io.StringIO()):
