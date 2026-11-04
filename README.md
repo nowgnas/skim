@@ -12,12 +12,42 @@ GitHub PR을 모아 변경 목적과 중요도를 보여주는 로컬 검토 도
 
 ## 설치와 시작
 
-Python 3.11 이상, Git, GitHub CLI(`gh`)가 필요합니다. 별도 Python 패키지는 필요하지 않습니다.
-분석에는 로그인된 Codex CLI 안정 버전 0.165.0 이상과 필수 격리 플래그 지원이 필요합니다.
-`~/.local/share/skim-tools/node_modules/.bin/codex`가 설치되어 있으면 `skim` 실행 시 자동으로 우선 사용합니다.
-`SKIM_CODEX_BIN`으로 실행 파일을 지정할 수도 있습니다. 도구 디렉터리 전체를 PATH에 추가하지 않습니다. 해당 경로에 없으면 기존 PATH의 Codex를 사용합니다. 두 경우 모두 버전과 격리 검사를 통과해야 합니다.
+정식 배포 대상은 macOS와 Linux입니다. Python 3.11 이상과 GitHub CLI(`gh`)가 필요하며,
+PR 분석에는 로그인된 Codex CLI 안정 버전 0.165.0 이상과 필수 격리 플래그 지원이 필요합니다.
+Codex가 없거나 요구 조건을 충족하지 못하면 설치 및 갱신 안내를 표시하고 skim 설치는 계속합니다.
+Python 패키지는 추가로 설치하지 않습니다. 릴리스 설치에는 Git이 필요하지 않습니다.
+Linux도 같은 순수 Python 아카이브를 사용합니다. 자산 이름 `skim-macos.tar.gz`는 호환성을 위해 유지합니다.
+Linux에서는 `skim app` 대신 터미널에서 `skim`을 실행하세요.
 
-Mac 터미널에서 실행합니다.
+정식 릴리스가 게시되고 저장소가 공개된 뒤에는 다음 명령으로 설치할 수 있습니다.
+현재는 정식 릴리스가 없으므로 설치를 완료할 수 없습니다.
+
+```bash
+gh auth login --hostname github.com
+curl -fsSL https://raw.githubusercontent.com/nowgnas/skim/main/scripts/install.sh | bash
+export PATH="$HOME/.local/bin:$PATH"
+skim
+```
+
+현재 비공개 저장소에서는 읽기 권한이 있는 `gh` 로그인이 필요합니다.
+저장소를 이미 받았다면 `bash scripts/install.sh`로 같은 설치를 시작할 수 있습니다.
+스크립트는 없는 도구와 설치 명령을 보여 주고 `[y/N]`으로 확인합니다.
+파이프로 실행할 때는 `/dev/tty`로 확인하며, 터미널도 없으면 설치하지 않고 종료합니다.
+확인을 생략하려면 파일로 받은 뒤 `bash scripts/install.sh --yes`를 사용하세요.
+macOS에 Homebrew가 없으면 먼저 https://brew.sh/ 안내를 따라 설치해야 합니다.
+Linux에서 도구가 부족하면 수동 설치 안내를 표시합니다. 배포판 Python이 3.11 미만이면
+사용 가능한 python3.11 이상 패키지를 확인하거나 Python을 직접 설치하고 `SKIM_PYTHON`을 지정하세요.
+`gh`는 `auth token` 지원 버전이 필요합니다. 다운로드 전에 `gh auth status`를 검사하므로,
+처음 `gh`를 설치한 경우 `gh auth login --hostname github.com` 후 스크립트를 다시 실행하세요.
+
+프로그램은 `~/.local/share/skim-program`에, 영구 실행 파일은 `~/.local/bin/skim`에 설치합니다.
+설정과 DB는 아래 데이터 저장 위치에 별도로 보존하며 `SKIM_HOME`은 프로그램 경로를 바꾸지 않습니다.
+정식 릴리스의 SHA256SUMS를 확인하고 설치합니다. 체크섬은 전송 오류 확인용이며 서명 검증을 대신하지 않습니다.
+기존 실행 파일, 개발 checkout 링크, 다른 설치의 앱이나 LaunchAgent가 있으면 덮어쓰지 않고 중단합니다.
+자동 이전은 지원하지 않으므로 표시된 경로를 확인하세요.
+PATH를 계속 적용하려면 위 `export` 줄을 `~/.zshrc` 또는 bash의 `~/.bashrc`에 추가하세요.
+
+개발용으로 소스를 직접 실행하려면 기존 방식을 사용할 수 있습니다. 이 경우에는 Git이 필요합니다.
 
 ```bash
 git clone https://github.com/nowgnas/skim.git
@@ -25,17 +55,22 @@ cd skim
 ./setup.sh
 export PATH="$HOME/.local/bin:$PATH"
 gh auth login
-skim app
+skim
 ```
 
-설치 스크립트는 `~/.local/bin/skim`에서 저장소의 `bin/skim`으로 심볼릭 링크를 만듭니다.
-저장소 폴더를 유지하세요. PATH를 계속 적용하려면 위 `export` 줄을 `~/.zshrc`에 추가하세요.
-GitHub.com 로그인과 대상 저장소 읽기 권한이 필요하며, 조직은 SSO 승인과 팀 접근 권한도 확인하세요. 자동 시작을 사용하지 않으면 `skim`으로 실행할 수 있습니다.
+개발 설치는 저장소의 `bin/skim`으로 링크를 만들므로 저장소 폴더를 유지하세요.
+`~/.local/share/skim-tools/node_modules/.bin/codex`가 있으면 자동으로 우선 사용합니다.
+`SKIM_CODEX_BIN`으로 별도 실행 파일을 지정할 수 있으며, 없으면 PATH의 Codex를 사용합니다.
+분석 전 `codex login`과 아래 분석 준비 절차를 진행하세요.
+GitHub.com 로그인과 대상 저장소 읽기 권한이 필요하며, 조직은 SSO 승인과 팀 접근 권한도 확인하세요.
 
 브라우저가 열리지 않으면 터미널에 출력된 URL로 접속하세요. 이미 실행 중이면 기존 서버에서 새 진입 URL을 발급합니다.
 서버를 종료하려면 실행한 터미널에서 Ctrl-C를 누르세요.
 
 ### macOS에서 백그라운드 실행
+
+정식 설치본에서는 앱 연결이 준비될 때까지 `skim app`과 `skim app --uninstall`이 안내만 표시합니다.
+아래 앱 기능은 개발 설치에서 사용할 수 있습니다.
 
 `skim app`을 실행하면 `~/Applications/skim PR.app`과 로그인 시 자동 시작을 설치하고 브라우저를 엽니다.
 이미 설치했다면 같은 명령으로 브라우저를 열 수 있습니다. 앱을 Dock에 추가하면 터미널 없이 열 수 있습니다.
@@ -47,7 +82,7 @@ GitHub.com 로그인과 대상 저장소 읽기 권한이 필요하며, 조직�
 
 ### 소스 코드 갱신
 
-현재 설치는 저장소의 코드를 직접 사용합니다. 변경 사항을 가져온 뒤 백그라운드 서버를 재시작하세요.
+개발 설치는 저장소의 코드를 직접 사용합니다. 변경 사항을 가져온 뒤 백그라운드 서버를 재시작하세요.
 
 ```bash
 cd /path/to/skim
@@ -58,7 +93,7 @@ skim app --restart
 
 `/path/to/skim`은 처음 clone한 경로입니다. 로컬에 수정한 파일이 있으면 브랜치 전환이나 갱신이 중단될 수 있으니 먼저 확인하세요. `skim app --restart`는 진행 중인 작업을 중단할 수 있습니다.
 
-`skim update --check`는 GitHub에 게시된 정식 릴리스를 조회합니다. 정식 릴리스는 GitHub Releases에 게시된 버전이며, `main`에 푸시한 코드와는 별개입니다. 비공개 저장소에 접근할 수 있는 `gh` 로그인이 필요합니다. 릴리스 자동 설치와 업데이트 적용은 아직 지원하지 않습니다.
+`skim update --check`는 GitHub에 게시된 정식 릴리스를 조회합니다. 정식 릴리스는 GitHub Releases에 게시된 버전이며, `main`에 푸시한 코드와는 별개입니다. 비공개 저장소에 접근할 수 있는 `gh` 로그인이 필요합니다. 이 명령의 업데이트 적용은 아직 지원하지 않습니다. 최초 설치는 위 설치 스크립트를 사용하세요.
 
 ## 웹에서 사용하기
 

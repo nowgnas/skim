@@ -1,6 +1,8 @@
 """Prepare a user LaunchAgent and a Dock launcher without activating them."""
 import argparse
 import fcntl
+import grp
+import pwd
 import os
 from pathlib import Path
 import plistlib
@@ -45,11 +47,26 @@ def environment_settings():
     return normalized_environment(environment)
 
 
+def private_user_group(gid):
+    """현재 사용자 이름의 그룹이며 다른 기본 및 보조 멤버가 없는지 확인한다."""
+    try:
+        user = pwd.getpwuid(os.getuid())
+        group = grp.getgrgid(gid)
+        return (group.gr_name == user.pw_name and user.pw_gid == gid
+                and set(group.gr_mem) <= {user.pw_name}
+                and all(entry.pw_name == user.pw_name or entry.pw_gid != gid
+                        for entry in pwd.getpwall()))
+    except (KeyError, OSError):
+        return False
+
+
 def trusted(path, directory=False, private=False):
     info = path.lstat()
     kind = stat.S_ISDIR if directory else stat.S_ISREG
-    if info.st_uid != os.getuid() or not kind(info.st_mode) or info.st_mode & 0o022 or (private and stat.S_IMODE(info.st_mode) != 0o600):
-        raise ValueError(f'소유자·권한·종류가 안전하지 않습니다: {path}')
+    unsafe_group = info.st_mode & 0o020 and not private_user_group(info.st_gid)
+    if info.st_uid != os.getuid() or not kind(info.st_mode) or info.st_mode & 0o002 or unsafe_group or (private and stat.S_IMODE(info.st_mode) != 0o600):
+        hint = f'. 그룹 쓰기 권한은 chmod g-w {shlex.quote(str(path))} 명령으로 제거하세요.' if unsafe_group else ''
+        raise ValueError(f'소유자, 권한, 종류가 안전하지 않습니다: {path}{hint}')
 
 
 def prepare_log(data_dir):
@@ -93,7 +110,17 @@ def validate_existing(app, agent, root, config, check_environment=True):
             raise ValueError('기존 LaunchAgent와 현재 환경이 다릅니다. 같은 환경에서 실행하세요.')
 
 
+def managed_app_unavailable(root=None):
+    root = Path(root) if root is not None else Path(__file__).resolve().parents[2]
+    if (root / '.skim-payload.json').exists():
+        print('정식 설치본의 skim app 연결은 준비 중입니다. 터미널에서 skim을 실행하세요. 기존 앱과 LaunchAgent는 보존합니다.', file=sys.stderr)
+        return True
+    return False
+
+
 def uninstall_app(config):
+    if managed_app_unavailable():
+        return 1
     if sys.platform != 'darwin':
         print('skim app은 macOS에서 사용할 수 있습니다.', file=sys.stderr)
         return 1
@@ -122,6 +149,8 @@ def main(argv=None, quiet=False):
     args = parser.parse_args(argv)
     if sys.platform != 'darwin':
         print('macOS에서 실행하세요.', file=sys.stderr)
+        return 1
+    if managed_app_unavailable(args.root):
         return 1
     binary = (args.root.resolve() / 'bin/skim')
     output = args.output.resolve()
@@ -171,6 +200,8 @@ def install_app(config, *, restart=False):
         print('skim app은 macOS에서 사용할 수 있습니다.', file=sys.stderr)
         return 1
     root = Path(__file__).resolve().parents[2]
+    if managed_app_unavailable(root):
+        return 1
     home = Path.home()
     app = home / 'Applications' / APP_NAME
     agent = home / 'Library/LaunchAgents/com.skim.web.plist'

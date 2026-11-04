@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, redirect_stdout, redirect_stderr
 from types import SimpleNamespace
@@ -565,6 +566,226 @@ class BackupTests(unittest.TestCase):
             with self.assertRaises(maintenance.UpdateInProgress):
                 with maintenance.guard(data):
                     pass
+
+
+class BootstrapTests(unittest.TestCase):
+    def payloads(self):
+        fixture = ReleaseTests()
+        release = releases.parse_release(fixture.release('v1.0.0'))
+        manifest = json.dumps({'version': release.tag, 'archive': 'skim-macos.tar.gz'}).encode()
+        output = io.BytesIO()
+        repo = Path(__file__).resolve().parents[1]
+        files = {'skim/manifest.json': manifest, 'skim/bin/skim': (repo / 'bin/skim').read_bytes(),
+                 'skim/lib/python.sh': (repo / 'lib/python.sh').read_bytes()}
+        for path in (repo / 'lib/skim').rglob('*.py'):
+            files['skim/lib/skim/' + str(path.relative_to(repo / 'lib/skim'))] = path.read_bytes()
+        with tarfile.open(fileobj=output, mode='w:gz') as archive:
+            for name, data in files.items():
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                info.mode = 0o755 if name == 'skim/bin/skim' else 0o644
+                archive.addfile(info, io.BytesIO(data))
+        payloads = {'skim-macos.tar.gz': output.getvalue(), 'manifest.json': manifest, 'install.sh': b'bootstrap'}
+        payloads['SHA256SUMS'] = ''.join(hashlib.sha256(value).hexdigest() + '  ' + name + '\n'
+                                        for name, value in payloads.items()).encode()
+        return release, payloads
+
+    def test_happy_path_install_and_update_first_install(self):
+        from skim import bootstrap
+        import subprocess
+        release, payloads = self.payloads()
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1]) as temporary, patch.dict(os.environ, {}, clear=False):
+            home = Path(temporary)
+            with patch('skim.releases.fetch_latest_authenticated', return_value=release):
+                store = bootstrap.install(home, download=lambda r, n, limit: payloads[n])
+            self.assertEqual(store.current(), 'v1.0.0')
+            launcher = home / '.local/bin/skim'
+            environment = {**os.environ, 'HOME': str(home), 'SKIM_HOME': str(home / 'userdata')}
+            result = subprocess.run([str(launcher), '--help'], env=environment, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(list(store.root.rglob('__pycache__')))
+            self.assertFalse((home / 'userdata').exists())
+            self.assertFalse((home / '.config/skim').exists())
+            environment['SKIM_HOME'] = str(store.root)
+            result = subprocess.run([str(launcher), '--help'], env=environment, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('분리', result.stderr)
+
+    def test_ownership_preserves_existing_install(self):
+        from skim import bootstrap
+        for kind in ('file', 'checkout_link', 'broken_link', 'program', 'app', 'agent'):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temporary:
+                home = Path(temporary)
+                launcher = home / '.local/bin/skim'
+                launcher.parent.mkdir(parents=True)
+                if kind == 'file':
+                    launcher.write_text('사용자 파일')
+                elif kind in ('checkout_link', 'broken_link'):
+                    target = home / 'checkout/bin/skim'
+                    if kind == 'checkout_link':
+                        target.parent.mkdir(parents=True)
+                        target.write_text('개발 코드')
+                    launcher.symlink_to(target)
+                elif kind == 'program':
+                    root = home / '.local/share/skim-program'
+                    root.mkdir(parents=True)
+                    (root / 'keep').write_text('유지')
+                elif kind == 'app':
+                    (home / 'Applications/skim PR.app').mkdir(parents=True)
+                else:
+                    agent = home / 'Library/LaunchAgents/com.skim.web.plist'
+                    agent.parent.mkdir(parents=True)
+                    import plistlib
+                    agent.write_bytes(plistlib.dumps({'Label': 'other'}))
+                    agent.chmod(0o600)
+                before = {str(p): (os.readlink(p) if p.is_symlink() else p.read_bytes())
+                          for p in home.rglob('*') if p.is_symlink() or p.is_file()}
+                with patch('skim.releases.fetch_latest_authenticated', side_effect=AssertionError('조회 금지')):
+                    with self.assertRaises(ValueError):
+                        bootstrap.install(home)
+                after = {str(p): (os.readlink(p) if p.is_symlink() else p.read_bytes())
+                         for p in home.rglob('*') if p.is_symlink() or p.is_file()}
+                self.assertEqual(before, after)
+
+    def test_bootstrap_invalid_release_preserves_installed(self):
+        from skim import bootstrap
+        release, payloads = self.payloads()
+        for selected, broken in ((None, False), (release, True)):
+            with tempfile.TemporaryDirectory() as temporary:
+                home = Path(temporary)
+                data = home / 'data'
+                data.write_text('보존')
+                if broken:
+                    payloads['skim-macos.tar.gz'] += b'broken'
+                with patch('skim.releases.fetch_latest_authenticated', return_value=selected), self.assertRaises(ValueError):
+                    bootstrap.install(home, download=lambda r, n, limit: payloads[n])
+                self.assertEqual(data.read_text(), '보존')
+                self.assertFalse((home / '.local').exists())
+
+    def test_bootstrap_data_overlap_and_symlink_parent(self):
+        from skim import bootstrap
+        release, payloads = self.payloads()
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            with patch.dict(os.environ, {'SKIM_HOME': str(home / '.local')}), self.assertRaises(ValueError):
+                bootstrap.install(home)
+            outside = home / 'outside'
+            outside.mkdir()
+            (home / '.local').symlink_to(outside)
+            with patch('skim.releases.fetch_latest_authenticated', return_value=release), self.assertRaises(ValueError):
+                bootstrap.install(home, download=lambda r, n, limit: payloads[n])
+            self.assertEqual(list(outside.iterdir()), [])
+
+    def test_bootstrap_packaged_zipapp_entrypoint(self):
+        import gzip
+        import subprocess
+        import zipfile
+        release, payloads = self.payloads()
+        archived = gzip.decompress(payloads['skim-macos.tar.gz'])
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            destination = root / 'release'
+            results = [SimpleNamespace(stdout=b''), SimpleNamespace(stdout=archived)]
+            with patch('skim.release_package.subprocess.run', side_effect=results):
+                release_package.build(root, destination, release.tag, release_gate=lambda root: True)
+            with zipfile.ZipFile(destination / 'install.sh') as archive:
+                self.assertIn('skim/bootstrap.py', archive.namelist())
+                self.assertIn('from skim.bootstrap import main', archive.read('__main__.py').decode())
+            result = subprocess.run([sys.executable, '-I', str(destination / 'install.sh'), '--help'],
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_bootstrap_lookup_failure_and_unsupported_platform(self):
+        from skim import bootstrap
+        with tempfile.TemporaryDirectory() as temporary, patch('skim.releases.fetch_latest_authenticated',
+                side_effect=releases.ReleaseUnavailable('네트워크 확인')):
+            with self.assertRaises(releases.ReleaseUnavailable):
+                bootstrap.install(Path(temporary))
+            self.assertEqual(list(Path(temporary).iterdir()), [])
+        with patch('skim.bootstrap.sys.platform', 'win32'), redirect_stderr(io.StringIO()):
+            self.assertEqual(bootstrap.main([]), 1)
+
+    def test_linux_bootstrap_main(self):
+        from skim import bootstrap
+        with patch('skim.bootstrap.sys.platform', 'linux'), patch('skim.bootstrap.install') as install:
+            self.assertEqual(bootstrap.main([]), 0)
+            install.assert_called_once_with()
+
+    def test_failed_install_can_retry_without_touching_competing_launcher(self):
+        from skim import bootstrap
+        release, payloads = self.payloads()
+        for failure in (OSError('stage 실패'), KeyboardInterrupt()):
+            with self.subTest(failure=type(failure)), tempfile.TemporaryDirectory() as temporary:
+                home = Path(temporary)
+                root = home / '.local/share/skim-program'
+                with patch('skim.releases.fetch_latest_authenticated', return_value=release):
+                    with patch.object(program_store.ProgramStore, 'stage', side_effect=failure):
+                        with self.assertRaises(type(failure)):
+                            bootstrap.install(home, download=lambda r, n, limit: payloads[n])
+                    self.assertFalse(root.exists())
+                    bootstrap.install(home, download=lambda r, n, limit: payloads[n])
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            launcher = home / '.local/bin/skim'
+            def competing_link(*args):
+                launcher.write_text('다른 설치')
+                raise FileExistsError('경합')
+            with patch('skim.releases.fetch_latest_authenticated', return_value=release), patch('skim.bootstrap.os.link', side_effect=competing_link):
+                with self.assertRaises(FileExistsError):
+                    bootstrap.install(home, download=lambda r, n, limit: payloads[n])
+            self.assertEqual(launcher.read_text(), '다른 설치')
+            self.assertFalse((home / '.local/share/skim-program').exists())
+
+    def test_launcher_codex_override_and_preimport_permissions(self):
+        from skim import bootstrap
+        import subprocess
+        release, payloads = self.payloads()
+        with tempfile.TemporaryDirectory(prefix='skim home ', dir=Path(__file__).resolve().parents[1]) as temporary:
+            home = Path(temporary)
+            with patch('skim.releases.fetch_latest_authenticated', return_value=release):
+                store = bootstrap.install(home, download=lambda r, n, limit: payloads[n])
+            payload = store.root / 'versions/v1.0.0'
+            module = payload / 'lib/skim/cli.py'
+            module.write_text("import os\ndef main():\n print(os.environ.get('SKIM_CODEX_BIN'))\n return 0\n")
+            codex = home / '.local/share/skim-tools/node_modules/.bin/codex'
+            codex.parent.mkdir(parents=True)
+            codex.write_text('사용하지 않는 가짜 도구')
+            codex.chmod(0o700)
+            environment = {**os.environ, 'HOME': str(home), 'SKIM_HOME': str(home / 'userdata')}
+            environment.pop('SKIM_CODEX_BIN', None)
+            # 설치 시 Python 경로에 고정하지 않고 공백이 있는 명시 경로도 지원한다.
+            python = home / 'python path'
+            python.symlink_to(sys.executable)
+            environment['SKIM_PYTHON'] = str(python)
+            launcher = home / '.local/bin/skim'
+            result = subprocess.run([str(launcher)], env=environment, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), str(codex))
+            environment['SKIM_CODEX_BIN'] = '선택한 도구'
+            result = subprocess.run([str(launcher)], env=environment, capture_output=True, text=True)
+            self.assertEqual(result.stdout.strip(), '선택한 도구')
+            sentinel = home / 'imported'
+            (payload / 'lib/skim/__init__.py').write_text('from pathlib import Path\nPath(' + repr(str(sentinel)) + ').touch()\n')
+            module.chmod(0o666)
+            result = subprocess.run([str(launcher)], env=environment, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn('선택한 도구', result.stdout)
+            self.assertFalse(sentinel.exists())
+            self.assertFalse(list(payload.rglob('__pycache__')))
+
+    def test_installed_app_and_uninstall_never_modify_files(self):
+        from skim import bootstrap, macos_bundle
+        release, payloads = self.payloads()
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            with patch('skim.releases.fetch_latest_authenticated', return_value=release):
+                store = bootstrap.install(home, download=lambda r, n, limit: payloads[n])
+            module = store.root / 'versions/v1.0.0/lib/skim/macos_bundle.py'
+            with patch.object(macos_bundle, '__file__', str(module)), patch.object(macos_bundle.sys, 'platform', 'darwin'), patch.object(macos_bundle.subprocess, 'run', side_effect=AssertionError('프로세스 변경 금지')), redirect_stderr(io.StringIO()):
+                self.assertEqual(macos_bundle.install_app(None), 1)
+                self.assertEqual(macos_bundle.uninstall_app(None), 1)
+            self.assertFalse((home / 'Applications').exists())
+            self.assertFalse((home / 'Library').exists())
 
 
 if __name__ == '__main__':

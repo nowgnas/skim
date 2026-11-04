@@ -65,3 +65,24 @@
 - 완료 게이트 8개는 증거 미기록 상태다. 실제 정식 릴리스도 없어 실제 설치 및 업데이트를 검증하지 않았다.
 - 이 기기의 LaunchAgent는 `/Users/sangwolee/skim/bin/skim` 개발 체크아웃을 가리킨다. 기존 설치는 그대로 유지하며, 릴리스 설치 전환 전에 안정적인 launcher 경로와 작업 대기 방식이 필요하다.
 - `skim update`와 `skim update --check`의 정식 릴리스 조회를 연결했다. 아직 자동 적용은 구현되지 않았으며, 릴리스가 있을 때 적용 성공을 표시하지 않고 종료한다.
+
+## 9. 설치 리뷰 수정 1회차
+
+- 사용자 요청에 따라 macOS와 Linux에 같은 순수 Python 아카이브를 설치한다. 기존 자산 이름 `skim-macos.tar.gz`와 manifest 계약은 유지한다. Linux의 `skim app`은 안내만 제공한다.
+- 저장소 설치 스크립트는 전체 본문을 받은 뒤 main을 실행한다. Python 3.11 이상 실행 파일을 버전 이름으로도 찾고 모든 검증 Python을 격리 모드로 실행한다. 다운로드 전에 gh 인증과 auth token 지원, Codex 최소 안정 버전과 필수 격리 플래그를 확인한다.
+- Linux에서 필요한 도구가 없으면 배포판별 Python 패키지 조회 및 수동 설치 안내를 제공한다. 구버전 Python, gh, Node.js를 자동 설치하지 않는다.
+- 영구 launcher는 실행 시 Python을 선택하고 payload import 전에 소유자, 권한, 링크 및 데이터 경로 분리를 검사한다. 사용자 도구 경로의 Codex를 우선 사용하되 명시적 SKIM_CODEX_BIN을 보존한다.
+- 정식 설치본의 macOS 앱 연결은 아직 완성되지 않았다. 버전 경로를 앱에 고정하지 않도록 앱 설치와 제거를 차단하고 터미널 실행을 안내한다. 개발 설치의 소유 마커 검사는 유지한다.
+- 일반 예외와 KeyboardInterrupt는 해당 실행이 만든 프로그램 디렉터리를 정리하여 재시도할 수 있다. SIGKILL이나 전원 중단으로 남은 설치는 자동 삭제하지 않는다. 기존 파일 및 경합 중 생성된 다른 launcher는 보존한다.
+- 이번 수정은 업데이트 적용, 관리자 복구, readiness 및 앱 연결 완료를 의미하지 않는다. G2, G3, G5, G6, G8의 전체 완료 판정은 계속 보류한다. 실제 배포판 설치, macOS 기본 bash 3.2 실행 및 실제 GitHub 다운로드는 수행하지 않는다.
+- 검증 결과: `PYTHONPATH=lib python3 -m unittest discover -s tests` 전체 519개 통과. 설치 스크립트 회귀 테스트 15개와 설치 및 업데이트 테스트 55개를 포함한다. `bash -n scripts/install.sh`와 `git diff --check`도 통과했다. 테스트는 가짜 도구, mock 및 임시 디렉터리를 사용했으며 실제 릴리스 생성과 네트워크 설치는 수행하지 않았다.
+
+## 10. 설치 재리뷰 수정 2회차
+
+- 재리뷰 1, 3, 4, 5, 6, 7번을 수정했다. rebase는 이번 작업에서 수행하지 않았다.
+- 설치 경로 검사와 영구 launcher는 현재 사용자 이름의 전용 기본 그룹이고 다른 기본 및 보조 멤버가 없을 때만 그룹 쓰기를 허용한다. 공유 그룹이면 `chmod g-w` 해결 방법을 안내하며 기존 권한은 자동 변경하지 않는다. macOS 앱과 제거의 기존 소유 마커 검사는 유지한다.
+- launcher의 `/tmp` 예외를 제거했다. launcher 실행 테스트는 안전한 상위 경로의 임시 디렉터리를 사용하며 공유 임시 경로와 sticky 디렉터리도 별도로 거부하는지 검사한다.
+- gh는 `gh help auth`의 하위 명령 목록에서 `token` 지원을 확인한다. Codex 부재, 구버전 및 필수 플래그 미지원은 분석 준비 경고와 설치 안내를 출력하며 skim 설치를 막지 않는다.
+- 릴리스 API 인자의 glob 확장을 막고 README에 bash의 `~/.bashrc` 안내를 추가했다.
+- 검증은 mock, 가짜 CLI 및 임시 디렉터리만 사용한다. 실제 GitHub 릴리스와 태그 생성, 네트워크 설치 및 커밋은 수행하지 않는다. 업데이트 적용, 복구 관리자, readiness 및 정식 설치본 앱 연결의 기존 미완료 게이트는 이번 수정으로 완료되지 않는다.
+- 검증 결과: `python3 -m unittest discover -s tests` 전체 528개 통과. `bash -n scripts/install.sh`와 `git diff --check`도 통과했다. 실제 Ubuntu 기본 환경과 macOS 기본 bash 3.2에서의 실행은 검증하지 않았다.
