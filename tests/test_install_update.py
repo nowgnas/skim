@@ -1089,6 +1089,37 @@ class UpdateApplyTests(unittest.TestCase):
         self.assertIn('되돌려', output)
         self.assert_preserved()
 
+    def test_uninstall_checks_bound_data_from_other_home(self):
+        from skim import uninstall
+        original = releases.UpdateJournal.advance
+        def advance(journal, update_id, state):
+            if state == 'ready':
+                raise Crash()
+            return original(journal, update_id, state)
+        with patch.object(releases.UpdateJournal, 'advance', advance), \
+                patch('skim.update_apply.restore', side_effect=Crash()), self.assertRaises(Crash):
+            self.update()
+        record = self.journal()
+        self.assertEqual(record['state'], 'switched')
+        # 현재 SKIM_HOME에는 기록이 없지만 설치에 연결된 데이터에는 미완료 기록이 있다.
+        with patch.dict(os.environ, {'SKIM_HOME': str(self.home / 'otherdata')}), \
+                redirect_stdout(io.StringIO()) as output, redirect_stderr(io.StringIO()) as errors:
+            self.assertEqual(uninstall.run(yes=True, purge_data=True, interactive=False), 1)
+        self.assertEqual(output.getvalue(), '')
+        self.assertIn('skim update를 실행해 복구', errors.getvalue())
+        self.assertEqual(self.journal(), record)
+        self.assertTrue((self.home / '.local/bin/skim').is_file())
+        self.assertTrue((self.store.root / 'versions/v1.0.0').is_dir())
+        # 연결 기록을 읽을 수 없어도 복구 가능성을 지키기 위해 제거하지 않는다.
+        binding = self.store.root / '.data-binding.json'
+        binding.unlink()
+        binding.write_text('{', encoding='utf-8')
+        with patch.dict(os.environ, {'SKIM_HOME': str(self.home / 'otherdata')}), \
+                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as errors:
+            self.assertEqual(uninstall.run(yes=True, purge_data=True, interactive=False), 1)
+        self.assertIn('skim update를 실행해 복구', errors.getvalue())
+        self.assertTrue((self.store.root / 'versions/v1.0.0').is_dir())
+
     def test_entrypoints_report_same_result(self):
         from skim import cli
         record = releases.UpdateJournal(self.data).start(self.store.installation_id, 'v1.0.1', 'a' * 64,

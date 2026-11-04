@@ -2,6 +2,7 @@
 from contextlib import contextmanager
 from dataclasses import dataclass
 import fcntl
+import json
 import os
 from pathlib import Path
 import plistlib
@@ -240,6 +241,31 @@ def unfinished_update(data_dir):
     return record is not None and record['state'] not in ('committed', 'rolled_back')
 
 
+def bound_data_dir():
+    """업데이트가 설치에 연결한 데이터 경로. 연결 기록이 없으면 None, 읽을 수 없으면 ValueError."""
+    path = default_root() / '.data-binding.json'
+    if not os.path.lexists(path):
+        return None
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+        with os.fdopen(fd, 'rb') as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_size > 4096:
+                raise ValueError('일반 파일이 아닙니다')
+            binding = json.load(stream)
+        return Path(binding['path'])
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise ValueError(f'설치에 연결된 데이터 경로를 확인하지 못했습니다 ({exc})') from exc
+
+
+def update_pending(data_dir):
+    try:
+        bound = bound_data_dir()
+    except ValueError:
+        return True
+    return unfinished_update(data_dir) or (bound is not None and unfinished_update(bound))
+
+
 def confirm(ask, prompt):
     try:
         return ask(prompt).strip().lower() in ('y', 'yes')
@@ -273,7 +299,8 @@ def run(*, purge_data=False, yes=False, interactive=None, ask=input):
     try:
         with install_lock():
             # 미완료 기록은 업데이트 백업과 함께 자동 복구에 필요하므로 프로그램과 데이터를 모두 보존한다.
-            if unfinished_update(data_dir):
+            # 다른 SKIM_HOME으로 실행해도 놓치지 않도록 설치에 연결된 데이터 경로도 확인한다.
+            if update_pending(data_dir):
                 print('완료되지 않은 업데이트가 있어 아무것도 삭제하지 않았습니다. '
                       'skim update를 실행해 복구를 마친 뒤 다시 제거하세요.', file=sys.stderr)
                 return 1
