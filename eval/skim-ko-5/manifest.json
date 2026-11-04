@@ -1,7 +1,8 @@
 {
   "prompt_version": "skim-ko-5",
-  "confirmed_by": "",
-  "confirmed_sha256": "",
+  "confirmed_by": "nowgnas",
+  "confirmed_sha256": "8885ec4b3de58e3643acab7330adb5dd30fd4fea3c712ea90b11f08e3d5f7c16",
+  "confirmed_at": "2026-11-04",
   "designated_by": "개발국장 지정, sangwon 확인·수정",
   "rule": "high = 보안·격리·자격 증명·외부 통신·데이터 저장 경계를 바꾸는 파일. 포착 = 해당 파일의 어떤 단위가 high이거나 규칙 후보가 붙음.",
   "cases": [
