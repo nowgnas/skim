@@ -639,7 +639,7 @@ def detail(pr, query, config, offline=False, analysis_panel=""):
         params = [(key, value) for key, values in query.items()
                   if key not in ('file', 'diff', 'unit_q', 'unit_page') for value in values]
         params.append(('file', row['path']))
-        href = '?' + urlencode(params) + '#file-changes'
+        href = '?' + urlencode(params) + '#' + file_anchor(row['path'])
         choices += f'<li><a id="file-option-{index}" role="option" tabindex="-1" href="{esc(href)}">{esc(row["path"])}</a></li>'
     controls = controls.replace('<form class="filters"', '<form class="filters file-search-form"', 1)
     controls = controls.replace('파일 검색 <input type="search"', '파일 또는 변경 내용 검색 <input type="search" autocomplete="off" placeholder="파일명이나 경로, 변경 내용 검색" role="combobox" aria-autocomplete="list" aria-controls="file-search-options" aria-expanded="false"', 1)
