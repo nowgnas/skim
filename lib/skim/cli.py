@@ -1,10 +1,10 @@
 """로컬 설정과 읽기 전용 PR 수집 CLI."""
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 import argparse
 import re
 import sqlite3
 import sys
-from . import __version__
+from . import __version__, maintenance
 from .config import Config
 from .db import SCOPES, analysis_allowed, analysis_scope, connect
 from .hosts import hostname, registered
@@ -55,8 +55,9 @@ def parser():
     uninstall = commands.add_parser('uninstall', help='skim 프로그램 제거 (사용자 데이터는 기본 보존)')
     uninstall.add_argument('--yes', action='store_true', help='확인 질문 없이 제거 (비대화형 실행에 필요)')
     uninstall.add_argument('--purge-data', action='store_true', help='설정, DB, 캐시, Codex 전용 홈도 삭제')
-    update = commands.add_parser('update', help='정식 릴리스 업데이트 확인')
+    update = commands.add_parser('update', help='새 정식 릴리스 확인 후 적용')
     update.add_argument('--check', action='store_true', help='사용 가능한 정식 릴리스만 확인')
+    update.add_argument('--yes', action='store_true', help='적용 확인 질문 없이 진행')
     analyze = commands.add_parser('analyze', help='허용한 저장소의 최신 스냅샷 분석')
     analyze.add_argument('--snapshot', type=int)
     analyze.add_argument('--include-drafts', action='store_true', help='draft도 수동 분석')
@@ -76,23 +77,11 @@ def parser():
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     args = parser().parse_args(argv or ['web'])
+    barrier = ExitStack()
     try:
         if args.command == 'update':
-            from .collect import GitHub
-            from .releases import ReleaseUnavailable, fetch_latest_authenticated
-            try:
-                latest = fetch_latest_authenticated(GitHub())
-            except ReleaseUnavailable as exc:
-                print(f'오류: {exc}', file=sys.stderr)
-                return 1
-            if latest is None:
-                print('게시된 정식 릴리스가 없습니다.')
-                return 0
-            print(f'사용 가능한 정식 릴리스: {latest.tag}')
-            if not args.check:
-                print('자동 업데이트 적용 기능은 아직 준비 중입니다.', file=sys.stderr)
-                return 1
-            return 0
+            from .update_apply import run
+            return run(check=args.check, assume_yes=args.yes)
         if args.command == 'uninstall':
             from .uninstall import run
             return run(purge_data=args.purge_data, yes=args.yes)
@@ -100,6 +89,9 @@ def main(argv=None):
             from .doctor import run, paths
             return run(paths(), probe=args.probe)
         config = Config.load()
+        if args.command != 'open':
+            # 업데이트 전환 중에는 새 명령을 막고, 이미 실행 중인 명령은 끝날 때까지 업데이트가 기다린다.
+            barrier.enter_context(maintenance.guard(config.data_dir))
         if args.command == 'app':
             from .macos_bundle import install_app, uninstall_app
             return uninstall_app(config) if args.uninstall else install_app(config, restart=True) if args.restart else install_app(config)
@@ -180,7 +172,9 @@ def main(argv=None):
                     collector.clean_cache()
         finally:
             conn.close()
-    except (OSError, ValueError, sqlite3.Error) as exc:
+    except (OSError, ValueError, sqlite3.Error, maintenance.UpdateInProgress) as exc:
         print(f'오류: {exc}', file=sys.stderr)
         return 1
+    finally:
+        barrier.close()
     return 0

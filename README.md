@@ -93,7 +93,24 @@ skim app --restart
 
 `/path/to/skim`은 처음 clone한 경로입니다. 로컬에 수정한 파일이 있으면 브랜치 전환이나 갱신이 중단될 수 있으니 먼저 확인하세요. `skim app --restart`는 진행 중인 작업을 중단할 수 있습니다.
 
-`skim update --check`는 GitHub에 게시된 정식 릴리스를 조회합니다. 정식 릴리스는 GitHub Releases에 게시된 버전이며, `main`에 푸시한 코드와는 별개입니다. 비공개 저장소에 접근할 수 있는 `gh` 로그인이 필요합니다. 이 명령의 업데이트 적용은 아직 지원하지 않습니다. 최초 설치는 위 설치 스크립트를 사용하세요.
+`skim update`는 개발 설치에 적용하지 않고 안내만 표시합니다. 개발 설치는 위처럼 git으로 갱신하세요.
+
+### 업데이트
+
+정식 설치본(`~/.local/share/skim-program`)은 `skim update`로 새 정식 릴리스를 적용합니다. 정식 릴리스는 GitHub Releases에 게시된 버전이며, `main`에 푸시한 코드와는 별개입니다. 비공개 저장소에 접근할 수 있는 `gh` 로그인이 필요합니다.
+
+```bash
+skim update --check   # 새 정식 릴리스 확인만
+skim update           # 확인 질문 뒤 적용
+skim update --yes     # 확인 질문 없이 적용
+```
+
+- 현재 버전보다 새 정식 릴리스가 있을 때만 적용합니다. 초안, 사전 공개 버전과 이전 버전으로의 변경은 하지 않습니다.
+- 릴리스 파일을 내려받아 `SHA256SUMS`와 manifest로 검증합니다. 검증에 실패하면 기존 실행본과 데이터를 그대로 둡니다.
+- 실행 중인 skim 서버나 수집, 분석 작업이 있으면 최대 1분 기다립니다. 작업을 강제로 끝내지 않으므로 그래도 끝나지 않으면 서버를 종료한 뒤 다시 실행하세요. 적용 중에는 다른 skim 명령이 데이터에 접근하지 않고 대기 안내를 표시합니다.
+- 적용 전에 DB를 `update-backups`에 백업하고, 새 버전으로 전환한 뒤 `skim --version`으로 새 버전 실행을 확인합니다. 확인에 실패하면 이전 버전과 백업한 데이터로 되돌립니다.
+- 적용 도중 프로세스가 중단되었다면 `skim update`를 다시 실행하세요. 마지막 기록 단계에 맞춰 완료하거나 이전 상태로 복구합니다.
+- 적용이 끝나면 skim을 다시 실행해야 새 버전이 사용됩니다. 이전 버전 파일은 `versions` 아래에 남습니다.
 
 ## 웹에서 사용하기
 
@@ -195,7 +212,7 @@ GitHub·모델 서비스에 접속하지 않습니다. 이 README의 스크린�
 | --- | --- |
 | `skim` | 로컬 서버 시작과 브라우저 열기 (`skim web`과 동일) |
 | `skim app` / `skim app --restart` / `skim app --uninstall` | macOS 앱 설치·열기 / 서버 재시작 / 자동 시작과 앱 제거 |
-| `skim update --check` | 게시된 정식 릴리스 확인 (자동 설치 미지원) |
+| `skim update` / `skim update --check` | 새 정식 릴리스 적용 (정식 설치본만, `--yes`로 확인 생략) / 확인만 |
 | `skim uninstall` / `skim uninstall --purge-data` | 프로그램 제거 (데이터 보존) / 사용자 데이터까지 삭제 |
 | `skim web --no-browser` | 브라우저 자동 열기 없이 실행 (`--port`, `--offline` 지원) |
 | `skim repo add owner/repo` / `skim repo list` / `skim repo remove owner/repo` | 추적 저장소 관리 |

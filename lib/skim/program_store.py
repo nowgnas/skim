@@ -126,6 +126,22 @@ class ProgramStore:
         private_directory(self.root / 'versions' / target.parts[1])
         return target.parts[1]
 
+    def payload(self, tag):
+        """게시된 버전의 태그와 아카이브 해시를 읽는다."""
+        version_tuple(tag)
+        target = self.root / 'versions' / tag
+        private_directory(target)
+        fd = os.open(target / '.skim-payload.json', os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, 'rb') as stream:
+            info = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1
+                    or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size > 4096):
+                raise ValueError('준비된 버전 정보가 안전하지 않습니다.')
+            try:
+                return json.load(stream)
+            except (ValueError, UnicodeError) as exc:
+                raise ValueError('준비된 버전 정보가 손상되었습니다.') from exc
+
     def stage(self, release, download):
         version_tuple(release.tag)
         versions = self.root / 'versions'
@@ -237,16 +253,7 @@ class ProgramStore:
             record = journal.read()
             if (record['installation_id'] != self.installation_id or record['state'] not in ('backup', 'switched')):
                 raise ValueError('업데이트 준비 상태가 일치하지 않습니다.')
-            target = self.root / 'versions' / record['tag']
-            private_directory(target)
-            fd = os.open(target / '.skim-payload.json', os.O_RDONLY | os.O_NOFOLLOW)
-            with os.fdopen(fd, 'rb') as stream:
-                info = os.fstat(stream.fileno())
-                if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1
-                        or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size > 4096):
-                    raise ValueError('준비된 버전 정보가 안전하지 않습니다.')
-                metadata = json.load(stream)
-            if metadata != {'tag': record['tag'], 'sha256': record['sha256']}:
+            if self.payload(record['tag']) != {'tag': record['tag'], 'sha256': record['sha256']}:
                 raise ValueError('준비된 버전이 업데이트 요청과 다릅니다.')
             current = self.current()
             if current != record['tag']:
@@ -286,16 +293,8 @@ class ProgramStore:
                 raise ValueError('데이터 복구 상태를 확인하세요.')
             previous = record['previous']
             prior_tag = previous['tag'] if previous else None
-            if previous:
-                prior = self.root / 'versions' / prior_tag
-                private_directory(prior)
-                fd = os.open(prior / '.skim-payload.json', os.O_RDONLY | os.O_NOFOLLOW)
-                with os.fdopen(fd, 'rb') as stream:
-                    info = os.fstat(stream.fileno())
-                    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1
-                            or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size > 4096
-                            or json.load(stream) != previous):
-                        raise ValueError('이전 버전 정보를 확인하세요.')
+            if previous and self.payload(prior_tag) != previous:
+                raise ValueError('이전 버전 정보를 확인하세요.')
             current = self.current()
             if current not in (prior_tag, record['tag']):
                 raise ValueError('현재 버전이 복구 대상과 다릅니다.')
