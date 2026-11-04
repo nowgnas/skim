@@ -1034,6 +1034,61 @@ class UpdateApplyTests(unittest.TestCase):
         self.assertEqual(self.journal()['state'], 'rolled_back')
         self.assert_preserved()
 
+    def test_concurrent_update_and_uninstall_do_not_touch_running_update(self):
+        from skim import uninstall
+        import subprocess
+        observed = []
+        def runner(command, **kwargs):
+            # 첫 업데이트가 전환을 마친 시점에 두 번째 업데이트와 데이터까지 지우는 제거가 들어온다.
+            code, _, errors = self.update()
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as removal:
+                removed = uninstall.run(yes=True, purge_data=True, interactive=False)
+            observed.append((code, errors, removed, removal.getvalue(), self.journal()['state'], self.store.current()))
+            return subprocess.run(command, **kwargs)
+        code, _, errors = self.update(runner=runner)
+        self.assertEqual(code, 0, errors)
+        [(second, second_errors, removed, removal, state, current)] = observed
+        self.assertEqual((second, removed, state, current), (1, 1, 'switched', 'v1.0.1'))
+        for text in (second_errors, removal):
+            self.assertIn('다른 skim 업데이트 또는 제거가 진행 중', text)
+        self.assertEqual(self.journal()['state'], 'committed')
+        self.assertEqual(self.launcher_version(), 'skim 1.0.1')
+        self.assertTrue((self.data / 'update-backups' / (self.journal()['id'] + '.sqlite')).is_file())
+        self.assertEqual(self.items(), [('saved',)])
+
+    def test_uninstall_blocked_by_unfinished_update(self):
+        from skim import uninstall
+        from contextlib import ExitStack
+        original = releases.UpdateJournal.advance
+        def advance(journal, update_id, state):
+            if state == 'ready':
+                raise Crash()
+            return original(journal, update_id, state)
+        with patch.object(releases.UpdateJournal, 'advance', advance), \
+                patch('skim.update_apply.restore', side_effect=Crash()), self.assertRaises(Crash):
+            self.update()
+        record = self.journal()
+        self.assertEqual(record['state'], 'switched')
+        with redirect_stdout(io.StringIO()) as output, redirect_stderr(io.StringIO()) as errors:
+            self.assertEqual(uninstall.run(yes=True, purge_data=True, interactive=False), 1)
+        self.assertEqual(output.getvalue(), '')
+        self.assertIn('skim update를 실행해 복구', errors.getvalue())
+        self.assertEqual(self.journal(), record)
+        self.assertTrue((self.data / 'update-backups' / (record['id'] + '.sqlite')).is_file())
+        self.assertTrue((self.home / '.local/bin/skim').is_file())
+        self.assertTrue((self.store.root / 'versions/v1.0.0').is_dir())
+        # 제거 확인 질문을 기다리는 동안에도 업데이트는 설치를 바꾸지 않는다.
+        held = ExitStack()
+        held.enter_context(self.store.exclusive())
+        code, _, errors = self.update()
+        held.close()
+        self.assertEqual(code, 1)
+        self.assertIn('다른 skim 업데이트 또는 제거가 진행 중', errors)
+        self.assertEqual(self.journal(), record)
+        code, output, _ = self.update(assume_yes=False, ask=lambda prompt: 'n')
+        self.assertIn('되돌려', output)
+        self.assert_preserved()
+
     def test_entrypoints_report_same_result(self):
         from skim import cli
         record = releases.UpdateJournal(self.data).start(self.store.installation_id, 'v1.0.1', 'a' * 64,

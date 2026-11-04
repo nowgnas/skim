@@ -217,6 +217,26 @@ class ReleaseInstallUninstallTests(unittest.TestCase):
         self.assertFalse(self.root.exists())
         self.assertEqual((self.data / 'skim.db').read_text(), 'demo')
 
+    def test_install_lock_blocks_uninstall_and_purge_removes_lock_with_store(self):
+        from skim.releases import UpdateJournal
+        with self.store.exclusive():
+            status, out, err = self.run_uninstall(purge_data=True)
+        self.assertEqual((status, out), (1, ''))
+        self.assertIn('다른 skim 업데이트 또는 제거가 진행 중', err)
+        self.assertTrue(self.launcher.exists())
+        self.assertTrue((self.root / '.install.lock').exists())
+        self.assertEqual((self.data / 'skim.db').read_text(), 'demo')
+        # 완료된 업데이트 기록은 막지 않고, 잠금 파일은 쥔 채로 프로그램과 함께 지운다.
+        journal = UpdateJournal(self.data)
+        update_id = journal.start(self.store.installation_id, 'v1.0.1', 'b' * 64, self.store.payload('v1.0.0'))['id']
+        for state in UpdateJournal.STATES[1:]:
+            journal.advance(update_id, state)
+        status, _, err = self.run_uninstall(purge_data=True)
+        self.assertEqual(status, 0, err)
+        self.assertFalse(self.root.exists())
+        self.assertFalse(self.data.exists())
+        self.assertFalse(os.path.lexists(self.launcher))
+
     def test_launcher_for_other_installation_is_preserved(self):
         content = self.launcher.read_text()
         self.launcher.unlink()

@@ -19,6 +19,10 @@ def default_root():
     return Path.home() / '.local/share/skim-program'
 
 
+class InstallBusy(Exception):
+    pass
+
+
 def private_directory(path):
     info = path.lstat()
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
@@ -173,6 +177,35 @@ class ProgramStore:
             finally:
                 os.close(versions_fd)
         return sha256
+
+    @contextmanager
+    def exclusive(self):
+        """업데이트의 복구부터 적용 완료까지, 또는 제거 동안 설치 단위로 한 프로세스만 진입시킨다.
+
+        단계별 .update.lock과 별도 파일이다. 같은 프로세스가 단계 잠금을 다시 잡아도 막히지 않는다.
+        """
+        private_directory(self.root)
+        path = self.root / '.install.lock'
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        try:
+            info = os.fstat(fd)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                    or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600):
+                raise ValueError('설치 잠금 파일이 안전하지 않습니다.')
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise InstallBusy('다른 skim 업데이트 또는 제거가 진행 중입니다. 끝난 뒤 다시 실행하세요.') from None
+            # 제거가 잠금 파일을 지운 뒤라면 같은 경로의 새 파일은 보호하지 못한다.
+            try:
+                current = os.stat(path, follow_symlinks=False)
+            except FileNotFoundError:
+                current = None
+            if current is None or (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
+                raise InstallBusy('다른 skim 업데이트 또는 제거가 진행 중입니다. 끝난 뒤 다시 실행하세요.')
+            yield
+        finally:
+            os.close(fd)
 
     @contextmanager
     def _bound_data(self, data_dir, update_id, states):

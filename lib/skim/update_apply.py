@@ -1,4 +1,5 @@
 """정식 설치본의 업데이트 적용. 검증, 작업 대기, 백업, 전환, 준비 확인, 복구를 기존 모듈로 잇는다."""
+from contextlib import ExitStack
 from pathlib import Path
 import os
 import sqlite3
@@ -10,7 +11,7 @@ import time
 from . import __version__, maintenance, releases, update_backup
 from .collect import GitHub
 from .config import Config
-from .program_store import ProgramStore
+from .program_store import InstallBusy, ProgramStore
 
 PROGRAM_DIR = '.local/share/skim-program'
 LAUNCHER = '.local/bin/skim'
@@ -127,10 +128,13 @@ def apply(release, store, running, data_dir, home, *, download=releases.download
 def run(check=False, assume_yes=False, *, home=None, module=__file__, ask=input,
         download=releases.download_private_asset, runner=subprocess.run, sleep=time.sleep, seconds=WAIT_SECONDS):
     running = 'v' + __version__
+    held = ExitStack()
     try:
         installed = None if check else installed_store(home, module)
         if installed:
             store, tag = installed
+            # 다른 프로세스가 적용 중인 기록을 중단된 것으로 보고 되돌리지 않도록 적용 완료까지 설치 잠금을 쥔다.
+            held.enter_context(store.exclusive())
             data_dir = Config.load().data_dir
             recovered = recover(store, data_dir)
             if recovered:
@@ -166,8 +170,10 @@ def run(check=False, assume_yes=False, *, home=None, module=__file__, ask=input,
     except maintenance.UpdateInProgress as exc:
         print(f'업데이트 대기 실패: {message(exc)} 실행 중인 skim 서버와 작업을 종료한 뒤 다시 실행하세요.', file=sys.stderr)
         return 1
-    except (UpdateFailed, releases.ReleaseUnavailable, OSError, ValueError, sqlite3.Error) as exc:
+    except (UpdateFailed, InstallBusy, releases.ReleaseUnavailable, OSError, ValueError, sqlite3.Error) as exc:
         print(f'오류: {message(exc)}', file=sys.stderr)
         return 1
+    finally:
+        held.close()
     print(f'{latest.tag} 업데이트를 마쳤습니다. skim을 다시 실행하면 새 버전이 사용됩니다.')
     return 0

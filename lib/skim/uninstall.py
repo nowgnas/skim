@@ -1,4 +1,5 @@
 """skim 프로그램 제거. 사용자 데이터는 별도로 동의한 경우에만 지운다."""
+from contextlib import contextmanager
 from dataclasses import dataclass
 import fcntl
 import os
@@ -11,7 +12,8 @@ import sys
 
 from . import bootstrap, macos_bundle
 from .config import Config
-from .program_store import ProgramStore, default_root
+from .program_store import InstallBusy, ProgramStore, default_root
+from .releases import UpdateJournal
 
 SOURCE_ROOT = Path(__file__).resolve().parents[2]
 
@@ -214,6 +216,30 @@ def active_work(data_dir):
     return warnings
 
 
+@contextmanager
+def install_lock():
+    """업데이트와 같은 설치 잠금을 제거가 끝날 때까지 쥔다. 확인할 수 없는 설치는 제거하지 않으므로 잠그지 않는다."""
+    try:
+        store = ProgramStore.open(default_root())
+    except (OSError, ValueError):
+        store = None
+    if store is None:
+        yield
+        return
+    with store.exclusive():
+        yield
+
+
+def unfinished_update(data_dir):
+    if not os.path.lexists(data_dir / 'update-journal.json'):
+        return False
+    try:
+        record = UpdateJournal(data_dir).read()
+    except (OSError, ValueError):
+        return True
+    return record is not None and record['state'] not in ('committed', 'rolled_back')
+
+
 def confirm(ask, prompt):
     try:
         return ask(prompt).strip().lower() in ('y', 'yes')
@@ -243,8 +269,22 @@ def remove_item(item):
 
 
 def run(*, purge_data=False, yes=False, interactive=None, ask=input):
-    interactive = sys.stdin.isatty() if interactive is None else interactive
     config_dir, data_dir = data_paths()
+    try:
+        with install_lock():
+            # 미완료 기록은 업데이트 백업과 함께 자동 복구에 필요하므로 프로그램과 데이터를 모두 보존한다.
+            if unfinished_update(data_dir):
+                print('완료되지 않은 업데이트가 있어 아무것도 삭제하지 않았습니다. '
+                      'skim update를 실행해 복구를 마친 뒤 다시 제거하세요.', file=sys.stderr)
+                return 1
+            return remove_planned(config_dir, data_dir, purge_data, yes, interactive, ask)
+    except InstallBusy as exc:
+        print(f'오류: {exc} 아무것도 삭제하지 않았습니다.', file=sys.stderr)
+        return 1
+
+
+def remove_planned(config_dir, data_dir, purge_data, yes, interactive, ask):
+    interactive = sys.stdin.isatty() if interactive is None else interactive
     plan = build_plan(config_dir, data_dir)
     if purge_data:
         plan.remove.extend(plan.data)
