@@ -86,7 +86,8 @@ print('{{"type":"turn.completed"}}')
                 runner = Mock()
                 adapter = CodexAdapter(runner, data)
                 adapter.init_home()
-                code = f'import os,time; open({str(ready)!r}, "w").write(str(os.getpid())); time.sleep(30)'
+                code = (f'import os,time; tmp={str(ready)!r} + ".tmp"; open(tmp, "w").write(str(os.getpid())); '
+                        f'os.replace(tmp, {str(ready)!r}); time.sleep(30)')
                 guard = subprocess.Popen([sys.executable, str(GUARD), str(marker), '30',
                                           sys.executable, '-c', code], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 pid = None
