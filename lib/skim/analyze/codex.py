@@ -74,6 +74,8 @@ class CodexAdapter:
         source = source.absolute()
         if source == self.home / 'auth.json' or not source.is_file():
             raise IsolationError('원본 Codex auth.json 경로를 확인하세요.')
+        if reset and (source.is_relative_to(self.home) or source.resolve().is_relative_to(self.home.resolve())):
+            raise IsolationError('원본 인증 파일이 전용 홈 안에 있어 재설정할 수 없습니다.')
         self.data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         if not self.home.exists() and not self.home.is_symlink():
             self.home.mkdir(mode=0o700)

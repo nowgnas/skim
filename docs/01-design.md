@@ -51,11 +51,11 @@ SQLite를 기준 저장소로 사용한다. 설정·DB·캐시는 사용자 전�
 
 리뷰 요청만으로 발견한 저장소는 `tracked=0`으로 저장하고 추적 목록과 저장소 전체 PR 수집에서 제외한다. 명시적 등록은 `tracked=1`로 전환한다. 추적 해제는 `repository` 출처만 제거하고, 출처가 없어진 PR은 삭제하되 `review_request` 출처가 남은 PR과 스냅샷·분석은 보존한다. 저장소 레코드와 선택 상태는 유지하여 리뷰 요청과 호스트 분석 범위에 계속 사용한다. 삭제된 스냅샷의 diff 캐시 정리는 수집·캐시 구현 시 함께 처리한다.
 
-분석 캐시 키는 `repo + PR + base/head SHA + input_hash + provider/model + cli_version + prompt_version + schema_version`이다. `input_hash`는 전송할 제목·설명·정제 diff·테스트 목록·제외/분할 정책의 해시이며 스냅샷과 분석에 기록한다. 모델 식별자가 `unknown`이면 CLI 버전을 기록하고 영속 캐시는 재사용하지 않는다. `coverage`에는 전체/분석/제외/누락 단위 수와 사유를 보관한다. 기본 보존 기간은 30일이다.
+분석 캐시 키는 `repo + PR + base/head SHA + input_hash + provider/model + cli_version + prompt_version + schema_version`이다. `input_hash`는 전송할 제목·설명·정제 diff·테스트 목록·제외/분할 정책의 해시이며 스냅샷과 분석에 기록한다. 모델 식별자가 `unknown`이면 CLI 버전을 기록하고 영속 캐시는 재사용하지 않는다. `coverage`에는 전체/분석/제외/누락 단위 수와 사유를 보관한다. 종료 PR의 기본 보존 기간은 7일이며 12시간마다 확인한다.
 
 Sessio 연동은 sangwon 본인(현재 `gh` 로그인 사용자와 PR author가 일치)이 로컬에서 만든 PR에만 적용한다. 로컬 Sessio 인덱스에서 같은 저장소 + PR 브랜치 이름으로 세션을 찾으며, 없거나 후보가 여러 개면 아무것도 표시하지 않는다. 다른 사람의 PR에는 Sessio 링크를 표시하지 않는다.
 
-DB는 버전별 트랜잭션 마이그레이션과 사전 백업을 사용한다. 로그는 데이터 디렉터리의 `logs/`에 두고 5 MiB × 3개로 순환한다. `skim cache clear`로 캐시를, 프로세스 종료 후 `skim uninstall --purge`로 설정·DB·로그까지 삭제한다.
+DB는 버전별 트랜잭션 마이그레이션과 사전 백업을 사용한다. 진단 로그는 데이터 디렉터리의 `logs/`에 두고 기본 30일 보관한다. 마이그레이션·업데이트 백업은 자동 삭제하지 않는다. 전체 데이터는 `skim uninstall --purge-data`로 삭제한다.
 
 ## LLM 프롬프트와 출력 JSON 스키마
 

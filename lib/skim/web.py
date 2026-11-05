@@ -671,7 +671,7 @@ def file_panel(row, members, items, github_link, *, active=True, neighbors=None,
         content += file_nav(neighbors)
     return content + '</section>'
 
-def detail(pr, query, config, offline=False, analysis_panel=""):
+def detail(pr, query, config, offline=False, analysis_panel="", csrf=None):
     a, snapshot = pr['analysis'], pr['snapshot']
     current = bool(a and not pr['stale'] and pr.get('allowed', True) and pr['status'] in ('completed', 'partial'))
     shown = dict(pr, items=pr['items'] if current else {}, result=pr.get('result') if current else {})
@@ -711,7 +711,8 @@ def detail(pr, query, config, offline=False, analysis_panel=""):
     elif not pr.get('allowed', True):
         content += '<aside class="detail-warning"><strong>분석 허용 필요</strong><p>이 저장소의 분석이 허용되지 않았습니다.</p></aside>'
     elif a and pr['status'] not in ('completed', 'partial'):
-        content += '<aside class="detail-warning"><strong>' + esc(label(pr['status'])) + '</strong><p>' + esc(a['error'] or '분석을 다시 요청하거나 상태를 확인하세요.') + '</p></aside>'
+        content += '<aside class="detail-warning"><strong>' + esc(label(pr['status'])) + '</strong><p>' + esc(a['error'] or '분석을 다시 요청하거나 상태를 확인하세요.') + '</p>'
+        content += web_jobs.recovery_actions(csrf, offline, web_jobs.recovery_kind(a['error'])) + '</aside>'
     if current and 'prompt_version' in a.keys():
         from .analyze.protocol import PROMPT_VERSION
         if a['prompt_version'] != PROMPT_VERSION:
@@ -960,7 +961,7 @@ class Handler(BaseHTTPRequestHandler):
                         return self.reply(404, 'PR이 없습니다')
                     title = pr['title']
                     body = (detail(pr, parse_qs(url.query), self.server.config, offline,
-                                   web_jobs.analysis_panel(conn, pr, csrf, offline)) + web_jobs.script())
+                                   web_jobs.analysis_panel(conn, pr, csrf, offline), csrf) + web_jobs.script())
         self.reply(200, page(title, body, '/' if url.path.startswith('/pr/') else url.path, detail_page=url.path.startswith('/pr/')))
 
     def do_POST(self):
@@ -1133,6 +1134,8 @@ def serve(config, port=0, open_browser=True, offline=False):
             if not offline:
                 # 수집·분석·doctor·저장소 조회를 하나의 워커가 직렬 실행한다.
                 threads.append(threading.Thread(target=worker, args=(config, stop, server.repo_lookup), daemon=True))
+                from .lifecycle import worker as cleanup_worker
+                threads.append(threading.Thread(target=cleanup_worker, args=(config, stop), daemon=True))
             for thread in threads:
                 thread.start()
             url = server.entry_url()

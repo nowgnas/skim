@@ -98,6 +98,17 @@ class ScaffoldTests(unittest.TestCase):
             self.assertEqual(conn.execute('PRAGMA user_version').fetchone()[0], 2)
             self.assertEqual(conn.execute('SELECT last_error FROM jobs').fetchone()[0], '요청 제한')
 
+    def test_lifecycle_migration_preserves_existing_closed_pr_and_backup(self):
+        config = Config.load()
+        with patch('skim.db.MIGRATIONS', MIGRATIONS[:-1]):
+            with contextlib.closing(connect(config)) as conn, conn:
+                conn.execute("INSERT INTO repositories(owner,name) VALUES('org','repo')")
+                conn.execute("INSERT INTO pull_requests(repo_id,number,state,title) VALUES(1,1,'closed','기존 기록')")
+        with contextlib.closing(connect(config)) as conn:
+            row = conn.execute('SELECT title,closed_at FROM pull_requests').fetchone()
+            self.assertEqual((row['title'], row['closed_at']), ('기존 기록', None))
+        self.assertTrue(list(config.data_dir.glob(f'*.v{len(MIGRATIONS)-1}.*.bak')))
+
     def test_backup_and_rollback(self):
         config = Config.load()
         conn = sqlite3.connect(config.db_path)

@@ -44,10 +44,10 @@ class StatusPageTests(unittest.TestCase):
         self.assertIn('확인 필요 2개', health)
         self.assertLess(health.index('Codex 전용 홈'), health.index('<details class="check-ok"><summary>정상 2개</summary>'))
         self.assertIn('분석 준비 초기화를 실행하세요', health)  # 복구 안내가 실패 항목 옆에 붙는다
-        self.assertIn('href="#codex-setup"', health)
+        self.assertIn('전용 홈 재설정', health)
         self.assertIn('<details id="codex-setup" class="status-section codex-setup" open>', body)
         self.assertIn('GitHub 인증 (github.com)', health)
-        self.assertEqual(health.count('href="#codex-setup"'), 1)
+        self.assertEqual(health.count('name="action" value="reset"'), 1)
         self.assertIn('<span>점검 방금</span>', health)
 
     def test_all_ok_keeps_codex_setup_collapsed(self):

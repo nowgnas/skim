@@ -1,5 +1,5 @@
 """로컬 설정과 읽기 전용 PR 수집 CLI."""
-from contextlib import ExitStack, nullcontext
+from contextlib import ExitStack, closing, nullcontext
 import argparse
 import re
 import sqlite3
@@ -71,6 +71,17 @@ def parser():
     codex_home = commands.add_parser('codex-home', help='분석 전용 인증 링크 관리')
     codex_init = codex_home.add_subparsers(dest='action', required=True).add_parser('init')
     codex_init.add_argument('--reset', action='store_true', help='전용 홈 항목을 제거하고 인증 링크 재생성')
+    data = commands.add_parser('data', help='로컬 데이터 보관 설정')
+    data_actions = data.add_subparsers(dest='action', required=True)
+    data_actions.add_parser('status', help='보관 정책과 데이터 위치 조회')
+    retention = data_actions.add_parser('retention', help='보관 정책 변경')
+    retention.add_argument('--days', type=int, required=True)
+    retention.add_argument('--hours', type=int, required=True)
+    retention.add_argument('--enabled', choices=('yes', 'no'), required=True)
+    retention.add_argument('--job-days', type=int)
+    retention.add_argument('--log-days', type=int)
+    cleanup = data_actions.add_parser('cleanup', help='만료 데이터 정리')
+    cleanup.add_argument('--yes', action='store_true', help='정리 확인')
     return root
 
 
@@ -102,6 +113,35 @@ def main(argv=None):
             from .analyze.codex import CodexAdapter
             CodexAdapter(data_dir=config.data_dir).init_home(reset=args.reset)
             print('분석 전용 Codex 인증 링크를 만들었습니다.')
+            return 0
+        if args.command == 'data':
+            from .lifecycle import policy, auxiliary_policy, cleanup
+            if args.action == 'retention':
+                if not 1 <= args.days <= 3650 or not 1 <= args.hours <= 720:
+                    raise ValueError('보관 기간은 1~3650일, 정리 주기는 1~720시간이어야 합니다')
+                if any(value is not None and not 1 <= value <= 3650 for value in (args.job_days, args.log_days)):
+                    raise ValueError('작업과 로그 보관 기간은 1~3650일이어야 합니다')
+                from .config import save_settings
+                changes = {'retention_days': args.days, 'cleanup_interval_hours': args.hours, 'retention_enabled': args.enabled == 'yes'}
+                if args.job_days is not None:
+                    changes['job_retention_days'] = args.job_days
+                if args.log_days is not None:
+                    changes['log_retention_days'] = args.log_days
+                save_settings(config.config_dir, changes)
+                print('데이터 보관 설정을 저장했습니다.')
+                return 0
+            if args.action == 'status':
+                days, hours, enabled = policy(config)
+                job_days, log_days = auxiliary_policy(config)
+                print(f'데이터 위치: {config.data_dir}\n보관: {days}일\n정리 확인: {hours}시간\n작업 기록: {job_days}일\n로그: {log_days}일\n자동 정리: {"사용" if enabled else "사용 안 함"}')
+                return 0
+            if not args.yes:
+                raise ValueError('로컬 데이터 삭제를 승인하려면 skim data cleanup --yes를 사용하세요')
+            if not policy(config)[2]:
+                raise ValueError('자동 정리를 켠 뒤 요청하세요')
+            with closing(connect(config)) as data_conn:
+                result = cleanup(config, data_conn)
+            print(f'삭제 {result["removed"]}건, 보류 {result["deferred"]}건')
             return 0
         if args.command == 'web':
             if not 0 <= args.port <= 65535:

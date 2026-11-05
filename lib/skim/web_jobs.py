@@ -90,7 +90,38 @@ def describe(row):
     return result
 
 
-def job_box(row, poll=True, compact=False, analysis_compact=False):
+def recovery_actions(csrf, offline, kind=None, dynamic=False):
+    """문구는 실행하지 않고 미리 정한 상태 점검 작업만 제공한다."""
+    if offline or not csrf:
+        return ''
+    from .web_settings import form
+    probe = ('<p>격리 검증은 실제 모델을 호출하며 사용량 또는 비용이 발생할 수 있습니다.</p>'
+             + form('/jobs/doctor', csrf, '<input type="hidden" name="action" value="probe">'
+                    '<label><input type="checkbox" name="confirm" value="yes" required> 모델 호출에 동의합니다</label>'
+                    '<button>격리 검증 실행</button>'))
+    home = ('<p>전용 홈을 다시 만들고 기존 홈의 내용과 격리 검증 기록을 삭제합니다. 원본 인증 파일은 삭제하지 않습니다.</p>'
+            + form('/jobs/doctor', csrf, '<input type="hidden" name="action" value="reset">'
+                   '<label><input type="checkbox" name="confirm" value="yes" required> 삭제와 재설정에 동의합니다</label>'
+                   '<button>전용 홈 재설정</button>'))
+    actions = {'probe': probe, 'home': home,
+               'status': '<a class="btn secondary sm" href="/status">상태 점검 및 복구 안내</a>'}
+    return ''.join(f'<div class="recovery-action" data-recovery-kind="{name}"'
+                   + ('' if kind == name else ' hidden') + '>' + content + '</div>'
+                   for name, content in actions.items() if dynamic or kind == name)
+
+
+def recovery_kind(error):
+    if 'skim doctor --probe' in (error or ''):
+        return 'probe'
+    if 'skim codex-home init --reset' in (error or ''):
+        return 'home'
+    if ('Codex 분석 차단' in (error or '') or ('probe' in (error or '') and 'Codex' in (error or ''))
+            or ('상태 점검' in (error or '') and ('격리' in error or '차단' in error))):
+        return 'status'
+    return None
+
+
+def job_box(row, poll=True, compact=False, analysis_compact=False, csrf=None, offline=False):
     from .web import esc
     if row is None:
         if analysis_compact:
@@ -119,6 +150,8 @@ def job_box(row, poll=True, compact=False, analysis_compact=False):
         body += ('<div class="job-result-slot"><details data-job-result' + ('' if result else ' hidden')
                  + '><summary>' + ('수집 결과와 오류 보기' if compact else '결과 상세') + '</summary><pre data-job-result-text>' + esc(result) + '</pre></details>'
                  + '<a class="btn secondary sm" data-job-refresh href="" hidden>화면 새로고침</a></div>')
+    if d['kind'] == 'analyze':
+        body += recovery_actions(csrf, offline, recovery_kind(d['error']), dynamic=poll and d['active'])
     return body + '</div>'
 
 
@@ -173,8 +206,8 @@ def analysis_panel(conn, pr, csrf, offline):
     running = jobs.active(conn, 'analyze')
     if running is not None and running['target_id'] != pr['id']:
         body += '<p class="analysis-note">다른 PR 분석: ' + esc(running['target'] or '자동 분석') + '</p>'
-        body += job_box(running, analysis_compact=True)
-    body += job_box(jobs.latest(conn, 'analyze', pr['id']), analysis_compact=True)
+        body += job_box(running, analysis_compact=True, csrf=csrf, offline=offline)
+    body += job_box(jobs.latest(conn, 'analyze', pr['id']), analysis_compact=True, csrf=csrf, offline=offline)
     return body + '</div></article>'
 
 
@@ -210,6 +243,7 @@ def codex_setup(csrf, offline, conn, opened):
         return body + '<p>오프라인 모드에서는 초기화와 격리 검증을 실행하지 않습니다.</p></details>'
     body += '<div class="toolbar">' + form('/jobs/doctor', csrf, '<input type="hidden" name="action" value="init"><button>분석 준비 초기화</button>')
     body += form('/jobs/doctor', csrf, '<input type="hidden" name="action" value="probe"><label><input type="checkbox" name="confirm" value="yes" required>실제 유료 모델 호출에 동의합니다</label><button>격리 검증 실행</button>') + '</div>'
+    body += '<details><summary>전용 홈 재설정</summary>' + recovery_actions(csrf, offline, 'home') + '</details>'
     if jobs.active(conn, 'doctor'):
         body += '<p>상태 점검 또는 분석 준비 작업이 진행 중입니다. 완료 후 다른 작업을 요청하세요.</p>'
     return body + '</details>'
@@ -243,8 +277,13 @@ def status_page(conn, csrf, offline):
     for check in problems:
         hint = recovery_for(check['key'])
         fix = ''
-        # Codex 항목이 여럿 실패해도 해결 위치는 하나이므로 버튼은 첫 항목에만 둔다.
-        if check['key'] in CODEX_CHECKS and not linked:
+        if check['key'] == 'probe' and '선행 검사 실패' not in check['detail']:
+            fix = recovery_actions(csrf, offline, 'probe')
+        elif check['key'] == 'codex-home':
+            fix = recovery_actions(csrf, offline, 'home')
+        elif check['key'] == 'model':
+            fix = '<a class="btn secondary sm" href="/settings">모델 설정</a>'
+        elif check['key'] in CODEX_CHECKS and not linked:
             fix, linked = '<a class="btn secondary sm" href="#codex-setup">Codex 분석 준비 열기</a>', True
         body += (f'<div class="check-row"><span class="badge {"high" if check["state"] == "bad" else "mid"}">' + ('실패' if check['state'] == 'bad' else '경고') + '</span>'
                  f'<div class="check-main"><strong>{esc(check["title"])}</strong><p>{esc(check["detail"])}</p>'
@@ -269,7 +308,7 @@ def status_page(conn, csrf, offline):
         failed = row['status'] in ('failed', 'blocked')
         # 실패 이유 첫 줄은 펼치지 않아도 보이게 한다. 전체 내용은 결과 상세에 남는다.
         reason = (row['last_error'] or '').strip().splitlines()[:1] if failed else []
-        return ('<article class="job-row' + (' job-failed' if failed else '') + '">' + job_box(row)
+        return ('<article class="job-row' + (' job-failed' if failed else '') + '">' + job_box(row, csrf=csrf, offline=offline)
                 + ''.join(f'<p class="job-error">{esc(line)}</p>' for line in reason) + '</article>')
     body += '<div class="list">' + (''.join(record(row) for row in rows)
                                     or '<p class="muted">작업 기록이 없습니다.</p>') + '</div></section>'
@@ -288,9 +327,9 @@ def mutate(server, conn, path, data):
     if path == '/jobs/doctor':
         d = fields(data, (), ('action', 'confirm'))
         action = d.get('action', 'check')
-        if action == 'probe' and d.get('confirm') != 'yes':
-            raise Rejected('실제 유료 모델 호출 확인이 필요합니다', 400)
-        labels = {'check': '로컬 환경', 'init': '분석 준비 초기화', 'probe': '격리 검증'}
+        if action in ('probe', 'reset') and d.get('confirm') != 'yes':
+            raise Rejected('격리 검증 또는 전용 홈 재설정 확인이 필요합니다', 400)
+        labels = {'check': '로컬 환경', 'init': '분석 준비 초기화', 'reset': '전용 홈 재설정', 'probe': '격리 검증'}
         if action not in labels:
             raise Rejected('지원하지 않는 상태 점검 작업입니다', 400)
         row, created = jobs.enqueue(conn, 'doctor', 0, labels[action], params={'action': action})

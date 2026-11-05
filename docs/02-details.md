@@ -36,7 +36,7 @@ PR·스냅샷·분석은 보존하며, 출처가 없어진 PR만 삭제합니다
 설정 파일은 `~/.config/skim/config.json`, DB는
 `~/.local/share/skim/skim.db`입니다. `SKIM_HOME`을 지정하면 각각
 `$SKIM_HOME/config/config.json`, `$SKIM_HOME/data/skim.db`를 사용합니다.
-수집 간격 기본값은 300초입니다. 기존 설정의 `retention_days`는 아직 적용되지 않으며, 기간이 지나도 보존 데이터가 자동 삭제되지 않습니다. 전용 config/data 디렉터리는 0700이며 SKIM_HOME 자체의 기존 권한은 바꾸지 않습니다. 설정·DB·백업 파일은 0600입니다.
+수집 간격 기본값은 300초입니다. 종료 PR은 기본 7일 보관하고 온라인 서버에서 기본 12시간마다 정리합니다. `retention_days` 명시값은 유지합니다. 종료 시각이나 최신 상태를 확인하지 못한 PR은 보존합니다. 전용 config/data 디렉터리는 0700이며 SKIM_HOME 자체의 기존 권한은 바꾸지 않습니다. 설정·DB·백업 파일은 0600입니다.
 DB 버전은 `PRAGMA user_version`으로 관리하고 기존 DB 변경 전에 백업합니다.
 `SKIM_PYTHON`으로 래퍼가 사용할 Python 실행 파일을 지정할 수 있습니다. 지정하지 않으면
 `python3`, `python3.20`부터 `python3.11`까지 순서로 최소 버전을 만족하는 첫 실행 파일을 씁니다.
@@ -180,7 +180,7 @@ Host·Origin·CSRF 검증, CSP, 콘텐츠 이스케이프를 적용합니다.
 수집 원문 diff는 로컬 캐시에 저장됩니다. 전송 전 민감 정보 제외·가림은 완전하지
 않습니다. 허용한 분석 입력에는 선택 CLI 모델 서비스의 전송·보존 정책이 적용됩니다.
 별도 전송 API·원격 로그·텔레메트리는 없습니다.
-보존 기간 자동 정리와 별도 cache clear는 아직 구현하지 않았습니다. 사용자 데이터 삭제는 `skim uninstall --purge-data`로 명시적으로 요청해야 합니다.
+설정 화면 또는 `skim data status`에서 보관 설정을 확인합니다. `skim data retention --days 7 --hours 12 --enabled yes`로 설정하고, `skim data cleanup --yes`로 수동 정리를 요청할 수 있습니다. 백업은 자동 삭제하지 않으며 이전 데이터가 남을 수 있습니다. 전체 사용자 데이터 삭제는 `skim uninstall --purge-data`를 사용합니다.
 
 외부 통신 없는 화면 확인은 별도 SKIM_HOME에서 scripts/demo_seed.py 실행 후
 bin/skim web --offline으로 할 수 있습니다.
