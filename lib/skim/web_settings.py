@@ -19,7 +19,7 @@ from .hosts import hostname, registered, authenticated
 from .web_jobs import JOB_PATHS, job_box, script
 from .repos import web_repository, add_repository, remove_repository
 
-POST_PATHS = {'/hosts/check', '/hosts/add', '/hosts/remove', '/repos/add', '/repos/remove', '/repos/load', '/repos/scope', '/settings/model'} | JOB_PATHS
+POST_PATHS = {'/home/teams', '/hosts/check', '/hosts/add', '/hosts/remove', '/repos/add', '/repos/remove', '/repos/load', '/repos/scope', '/settings/model'} | JOB_PATHS
 WARNING = ('허용하면 PR 코드, diff와 제목, 설명이 Codex CLI를 통해 모델 서비스로 전송됩니다. '
            '민감 정보 제외는 완전하지 않으며 서비스의 전송, 보존 정책이 적용됩니다.')
 
@@ -48,6 +48,15 @@ class RepoLookup:
                 return self.host, self.mode, self.truncated, self.expires > 0, items
             return (self.host, items) if with_host else items
 
+    def team_snapshot(self, host):
+        """메인 필터에는 유효한 호스트별 팀 결과만 전달한다."""
+        with self.lock:
+            valid = host == self.host and self.mode == 'team' and self.clock() < self.expires
+            teams = {name: set(repos) for name, repos in self.teams.items()} if valid else {}
+            if self.selected_team:
+                teams = {name: repos for name, repos in teams.items() if name == self.selected_team}
+            return valid, self.truncated if valid else False, teams
+
     def fresh(self, host="github.com", mode="all", team=''):
         with self.lock:
             return host == self.host and mode == self.mode and team == self.selected_team and self.clock() < self.expires
@@ -61,6 +70,12 @@ class RepoLookup:
         self.gh.require_complete_sso = mode == 'team' and parts is None
         try:
             return self._run(parts, source, host, mode, team)
+        except Exception:
+            if mode == 'team' and parts is None:
+                with self.lock:
+                    if self.host == host and self.mode == 'team':
+                        self.expires = 0
+            raise
         finally:
             self._host_limits[host] = self.gh.not_before
             self.gh.require_complete_sso = False
@@ -292,7 +307,7 @@ def repository_card(server, conn, csrf, query, hosts):
             f'<a href="/repos?{esc(urlencode(keep + [("scope_host", h)]))}#analysis-scope"' + (' aria-current="page"' if h == host else '')
             + f'><span>{esc(h)}</span></a>' for h in hosts) + '</nav>'
     body += (f'<div class="section-heading repo-card-heading"><div><h2>{esc(host)} 저장소</h2>'
-             '<p class="muted">리뷰할 저장소와, 그중 코드를 분석에 보낼 범위를 정합니다. 기본은 분석 안 함입니다.</p></div></div>'
+             '<p class="muted">연결은 PR을 수집하고, 분석 허용은 코드를 모델로 보낼 범위를 정합니다. 기본은 분석 안 함입니다.</p></div></div>'
              + add_panel(server, conn, csrf, query, host))
     rows, controls, navigation = scope_candidates(conn, host, query)
     radios = ''.join(f'<label class="scope-option"><input type="radio" name="scope" value="{value}"' + (' checked' if value == scope else '')
@@ -466,6 +481,21 @@ def mutate(server, path, data):
         else:
             getattr(server, 'host_auth', {}).pop(host, None)
         return '/repos'
+    if path == '/home/teams':
+        d = fields(data, ('host',), ('team', 'pr_q', 'repo', 'tab'))
+        if any(len(value) > 200 for value in d.values()):
+            raise ValueError('필터 입력이 너무 깁니다')
+        result = {key: d[key] for key in ('team', 'pr_q', 'repo', 'tab') if d.get(key)}
+        with closing(connect(server.config)) as conn:
+            host = registered(conn, d['host'])
+            result['team_host'] = host
+            if not getattr(server, 'offline', False):
+                existing, created = jobs.enqueue(conn, 'repos', 0, host + ' / 내 팀 저장소',
+                                                params={'host': host, 'mode': 'team', 'home_teams': True})
+                existing_params = json.loads(existing['params'] or '{}')
+                if not created and (existing_params.get('host') != host or not existing_params.get('home_teams')):
+                    result['team_busy'] = '1'
+        return '/?' + urlencode(result)
     if path in ('/repos/load', '/repos/add'):
         d = fields(data, () if path.endswith('load') else ('repository', 'source'), ('host', 'mode', 'team') if path.endswith('load') else ('host',))
         mode = d.get('mode', 'all')

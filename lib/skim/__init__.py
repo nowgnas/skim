@@ -1,7 +1,7 @@
 """로컬 PR 검토 도우미."""
 import sys
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 # lib/python.sh의 SKIM_MIN_PYTHON과 같아야 한다.
 MIN_PYTHON = (3, 11)
 

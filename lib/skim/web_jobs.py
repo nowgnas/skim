@@ -228,7 +228,7 @@ def status_page(conn, csrf, offline):
             + action + '</div>')
     if offline:
         body += '<p>오프라인 모드에서는 gh, Codex를 실행하는 상태 점검을 하지 않습니다.</p>'
-    body += '<section class="status-section status-health"><div class="section-heading"><h2>점검 결과</h2>'
+    body += '<section class="status-section status-health"><div class="section-heading"><h2>점검 결과</h2><p class="muted">마지막으로 완료한 점검 결과입니다. 현재 상태가 달라졌다면 다시 점검하세요.</p>'
     if finished:
         body += ('<p class="meta"><span class="badge ' + ('high' if problems else 'ok') + '">' + (f'확인 필요 {len(problems)}개' if problems else '모두 정상')
                  + '</span><span>점검 ' + esc(human_time(finished['finished_at'])) + '</span></p>')

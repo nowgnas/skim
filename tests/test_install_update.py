@@ -45,9 +45,9 @@ class UpdateCommandTests(unittest.TestCase):
 
     def test_update_same_version_is_current(self):
         for argv in (['update'], ['update', '--yes']):
-            code, output, _ = self.run_update(argv, 'v1.0.0')
+            code, output, _ = self.run_update(argv, 'v1.1.0')
             self.assertEqual(code, 0)
-            self.assertIn('최신 버전입니다: v1.0.0', output)
+            self.assertIn('최신 버전입니다: v1.1.0', output)
 
     def test_ownership_development_checkout_only_guides(self):
         code, output, errors = self.run_update(['update', '--yes'], 'v9.0.0')
@@ -601,9 +601,10 @@ class BootstrapTests(unittest.TestCase):
                  'skim/lib/python.sh': (repo / 'lib/python.sh').read_bytes()}
         for path in (repo / 'lib/skim').rglob('*.py'):
             files['skim/lib/skim/' + str(path.relative_to(repo / 'lib/skim'))] = path.read_bytes()
-        if version:
-            files['skim/lib/skim/__init__.py'] = files['skim/lib/skim/__init__.py'].replace(
-                b'__version__ = "1.0.0"', b'__version__ = "' + version.encode() + b'"')
+        from skim import __version__
+        version = version or tag.removeprefix('v')
+        files['skim/lib/skim/__init__.py'] = files['skim/lib/skim/__init__.py'].replace(
+            ('__version__ = "' + __version__ + '"').encode(), b'__version__ = "' + version.encode() + b'"')
         with tarfile.open(fileobj=output, mode='w:gz') as archive:
             for name, data in files.items():
                 info = tarfile.TarInfo(name)
@@ -829,6 +830,9 @@ class UpdateApplyTests(unittest.TestCase):
         environment = patch.dict(os.environ, {'HOME': str(self.home), 'SKIM_HOME': str(self.home / 'userdata')})
         environment.start()
         self.addCleanup(environment.stop)
+        running_version = patch('skim.update_apply.__version__', '1.0.0')
+        running_version.start()
+        self.addCleanup(running_version.stop)
         fixture = BootstrapTests()
         installed, payloads = fixture.payloads()
         with patch('skim.releases.fetch_latest_authenticated', return_value=installed), redirect_stdout(io.StringIO()):
@@ -925,7 +929,7 @@ class UpdateApplyTests(unittest.TestCase):
         from skim import cli, update_apply
         import subprocess
         # 태그는 v1.0.1이지만 코드가 1.0.0을 보고하는 배포물은 실제 launcher 실행 확인에서 거부된다.
-        _, mismatched = BootstrapTests().payloads('v1.0.1')
+        _, mismatched = BootstrapTests().payloads('v1.0.1', '1.0.0')
         observed = []
         def runner(command, **kwargs):
             observed.append(self.journal()['state'])
