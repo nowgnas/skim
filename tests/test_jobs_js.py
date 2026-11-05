@@ -20,7 +20,7 @@ const progress = { hidden: true, removeAttribute(key) { delete this[key]; } };
 const result = {hidden: true};
 const resultText = {textContent: ''};
 const refresh = {hidden: true};
-const box = { dataset: { jobId: '1' }, querySelector(selector) {
+const box = { dataset: { jobId: '1' }, querySelectorAll: () => [], querySelector(selector) {
   if (selector.includes('summary')) return field;
   if (selector.includes('progress-label')) return label;
   if (selector.includes('result-text')) return resultText;

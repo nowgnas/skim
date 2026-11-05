@@ -5,13 +5,12 @@ from datetime import datetime, timezone
 import json
 import os
 import re
-import tempfile
 import threading
 import time
 from urllib.parse import parse_qsl, urlencode
 
 from .collect import Collector, GitHub
-from .config import Config, valid_model
+from .config import Config, valid_model, save_settings
 from .db import SCOPES, analysis_allowed, analysis_scope, connect
 from . import jobs
 from .timefmt import human_time
@@ -19,7 +18,7 @@ from .hosts import hostname, registered, authenticated
 from .web_jobs import JOB_PATHS, job_box, script
 from .repos import web_repository, add_repository, remove_repository
 
-POST_PATHS = {'/home/teams', '/hosts/check', '/hosts/add', '/hosts/remove', '/repos/add', '/repos/remove', '/repos/load', '/repos/scope', '/settings/model'} | JOB_PATHS
+POST_PATHS = {'/home/teams', '/hosts/check', '/hosts/add', '/hosts/remove', '/repos/add', '/repos/remove', '/repos/load', '/repos/scope', '/settings/model', '/settings/retention', '/settings/cleanup', '/settings/backup/remove'} | JOB_PATHS
 WARNING = ('허용하면 PR 코드, diff와 제목, 설명이 Codex CLI를 통해 모델 서비스로 전송됩니다. '
            '민감 정보 제외는 완전하지 않으며 서비스의 전송, 보존 정책이 적용됩니다.')
 
@@ -433,12 +432,53 @@ def render(server, conn, csrf, path, query=None):
     settings = json.loads((server.config.config_dir / 'config.json').read_text())
     model = settings.get('codex_model', '')
     body = '<h1>설정</h1><p>분석 허용 범위(호스트별 전체 또는 선택한 저장소)는 <a href="/repos#analysis-scope">저장소 화면</a>에서 정합니다. 기본은 분석 안 함입니다.</p>'
-    body += '<p class="notice">보관 기간 자동 정리는 아직 지원하지 않습니다. 설정 파일의 retention_days 값은 현재 적용되지 않으며 수집된 diff와 분석 기록은 자동 삭제되지 않습니다.</p>'
+    from .lifecycle import policy, auxiliary_policy, preview, usage, backups
+    days, hours, enabled = policy(server.config)
+    job_days, log_days = auxiliary_policy(server.config)
+    state = conn.execute('SELECT last_run,last_result,requested FROM cleanup_state WHERE id=1').fetchone()
+    body += '<h2>데이터 보관</h2><p>닫히거나 머지된 PR의 로컬 기록을 보관 기간이 지나면 정리합니다. GitHub의 PR은 변경하지 않습니다.</p>'
+    body += '<p>현재 데이터 위치: <code>' + esc(str(server.config.data_dir)) + '</code></p>'
+    sizes = usage(server.config)
+    body += '<p class="meta"><span>대략적인 크기</span>' + ''.join(f'<span>{label} {sizes[key] / 1048576:.1f} MiB</span>' for key, label in (('db', 'DB'), ('diff', 'diff'), ('backups', '백업'), ('logs', '로그'))) + '</p>'
+    body += ('<p class="muted">백업은 자동 삭제하지 않습니다. DB 여유 공간, 백업 및 운영체제 백업에는 이전 데이터가 남을 수 있습니다.</p>')
+    body += '<p class="muted">진단 로그는 파일의 마지막 기록 시각을 기준으로 정리하므로 계속 기록 중이면 오래된 항목도 남을 수 있습니다.</p>'
+    if state and state['last_run']:
+        last = datetime.fromtimestamp(state['last_run'], timezone.utc).isoformat()
+        next_time = datetime.fromtimestamp(state['last_run'] + hours * 3600, timezone.utc).isoformat()
+        body += '<p class="meta"><span>최근 정리 점검: ' + esc(last) + '</span><span>다음 예정: ' + esc(next_time) + '</span></p>'
+        if state['last_result']:
+            try:
+                outcome = json.loads(state['last_result'])
+                body += f'<p>최근 결과: 삭제 {int(outcome.get("removed", 0))}건, 보류 {int(outcome.get("deferred", 0))}건</p>'
+            except (TypeError, ValueError, AttributeError):
+                pass
+    if state and state['requested']:
+        body += '<p>정리 요청이 대기 중입니다.</p>'
+    if not getattr(server, 'offline', False):
+        body += form('/settings/retention', csrf,
+                     f'<label>PR 보관 기간 (일)<input type="number" name="days" min="1" max="3650" value="{days}" required></label>'
+                     f'<label>정리 확인 주기 (시간)<input type="number" name="hours" min="1" max="720" value="{hours}" required></label>'
+                     '<label>자동 정리<select name="enabled">'
+                     + ('<option value="yes" selected>사용</option><option value="no">사용 안 함</option>' if enabled else '<option value="yes">사용</option><option value="no" selected>사용 안 함</option>')
+                     + f'</select></label><label>작업 기록 (일)<input type="number" name="job_days" min="1" max="3650" value="{job_days}" required></label>'
+                     + f'<label>진단 로그 (일)<input type="number" name="log_days" min="1" max="3650" value="{log_days}" required></label>'
+                     + '<button>보관 설정 저장</button>')
+        possible, estimated = preview(server.config, conn, days)
+        estimate = 'diff 크기 확인 불가' if estimated is None else f'삭제 가능 diff 최대 {estimated / 1048576:.1f} MiB'
+        body += f'<details><summary>지금 정리</summary><p>확인 대상 최대 {possible}건, {estimate}입니다. GitHub 상태를 확인할 수 없으면 보존합니다. DB 파일 크기는 즉시 줄어들지 않을 수 있습니다.</p>'
+        body += form('/settings/cleanup', csrf, '<label><input type="checkbox" name="confirm" value="yes" required> 삭제에 동의합니다</label><button>정리 요청</button>') + '</details>'
+        saved_backups = backups(server.config)
+        body += '<details><summary>백업 관리 (' + str(len(saved_backups)) + '개)</summary><p>백업을 삭제하면 해당 시점의 복구 사본을 사용할 수 없습니다.</p>'
+        for name, size in saved_backups:
+            body += '<div class="check-row"><div class="check-main"><strong>' + esc(name) + '</strong><p>' + f'{size / 1048576:.1f} MiB' + '</p></div>'
+            body += form('/settings/backup/remove', csrf, '<input type="hidden" name="backup" value="' + esc(name) + '"><label><input type="checkbox" name="confirm" value="yes" required>삭제 동의</label><button>백업 삭제</button>') + '</div>'
+        body += '</details>'
     body += '<h2>모델 설정</h2>' + meta('파일 값: ' + (model or '미설정'), '실제 적용: ' + (Config.parse_codex_model(settings) or '자동 감지'))
     if 'SKIM_CODEX_MODEL' in os.environ:
         body += '<p>SKIM_CODEX_MODEL 환경변수가 파일 설정보다 우선합니다.</p>'
-    body += ('<p>다음 분석부터 적용됩니다. 모델 변경 후 격리 검증이 일치하지 않으면 분석이 차단됩니다. '
-             '<a href="/status#codex-setup">상태 화면의 격리 검증</a>이나 <code>skim doctor --probe</code>로 재검증하세요.</p>')
+    body += ('<p>다음 분석부터 적용됩니다. 모델 변경 후 격리 검증이 일치하지 않으면 분석이 차단됩니다.</p>')
+    from .web_jobs import recovery_actions
+    body += recovery_actions(csrf, getattr(server, 'offline', False), 'probe')
     choices = model_choices()
     if not choices:
         body += '<p class="muted">모델 목록을 불러올 수 없습니다. Codex 로그인과 모델 목록을 확인하세요.</p>'
@@ -534,21 +574,38 @@ def mutate(server, path, data):
         previous = settings.get('codex_model')
         if model and (not valid_model(model) or (model != previous and (len(model) > 64 or model not in model_choices()))):
             raise ValueError('목록에서 모델을 선택하세요')
-        if model:
-            settings['codex_model'] = model
-        else:
-            settings.pop('codex_model', None)
-        fd, temporary = tempfile.mkstemp(dir=target.parent, prefix='.config-')
+        save_settings(server.config.config_dir, {'codex_model': model or None})
+        return '/settings'
+    if path == '/settings/retention':
+        d = fields(data, ('days', 'hours', 'enabled', 'job_days', 'log_days'))
+        if (not re.fullmatch(r'[0-9]{1,4}', d['days']) or not 1 <= int(d['days']) <= 3650
+                or not re.fullmatch(r'[0-9]{1,3}', d['hours']) or not 1 <= int(d['hours']) <= 720
+                or d['enabled'] not in ('yes', 'no')
+                or any(not re.fullmatch(r'[0-9]{1,4}', d[key]) or not 1 <= int(d[key]) <= 3650 for key in ('job_days', 'log_days'))):
+            raise ValueError('보관 기간과 정리 주기를 확인하세요')
+        save_settings(server.config.config_dir, {'retention_days': int(d['days']), 'cleanup_interval_hours': int(d['hours']), 'retention_enabled': d['enabled'] == 'yes', 'job_retention_days': int(d['job_days']), 'log_retention_days': int(d['log_days'])})
+        return '/settings'
+    if path == '/settings/cleanup':
+        d = fields(data, ('confirm',))
+        if getattr(server, 'offline', False) or d['confirm'] != 'yes':
+            raise ValueError('온라인 상태와 삭제 동의를 확인하세요')
+        from .lifecycle import policy
+        if not policy(server.config)[2]:
+            raise ValueError('자동 정리를 켠 뒤 요청하세요')
+        with closing(connect(server.config)) as conn, conn:
+            conn.execute('INSERT INTO cleanup_state(id,requested) VALUES(1,1) ON CONFLICT(id) DO UPDATE SET requested=1')
+        return '/settings'
+    if path == '/settings/backup/remove':
+        d = fields(data, ('backup', 'confirm'))
+        if d['confirm'] != 'yes':
+            raise ValueError('백업 삭제 동의가 필요합니다')
+        from .lifecycle import remove_backup
+        from .maintenance import UpdateInProgress
+        from .web_jobs import Rejected
         try:
-            with os.fdopen(fd, 'w') as output:
-                json.dump(settings, output, ensure_ascii=False, indent=2)
-                output.write('\n')
-                output.flush()
-                os.fsync(output.fileno())
-            os.replace(temporary, target)
-        finally:
-            if os.path.exists(temporary):
-                os.unlink(temporary)
+            remove_backup(server.config, d['backup'])
+        except UpdateInProgress as exc:
+            raise Rejected(str(exc), 409) from None
         return '/settings'
     with closing(connect(server.config)) as conn:
         collector = Collector(conn, server.config)

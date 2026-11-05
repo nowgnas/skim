@@ -207,15 +207,18 @@ class Runner:
         from .analyze.codex import CodexAdapter, IsolationError
         params = json.loads(job['params'] or '{}')
         action = params.get('action', 'check')
-        if action not in ('check', 'init', 'probe'):
+        if action not in ('check', 'init', 'reset', 'probe'):
             return 'failed', None, '지원하지 않는 상태 점검 작업입니다.'
-        if action == 'init':
+        if action in ('init', 'reset'):
             progress(self.state, job['id'], '인증 링크 준비')
             try:
                 with self.collector.lock('analysis.lock'):
-                    CodexAdapter(data_dir=self.config.data_dir).init_home(reset=False)
+                    adapter = CodexAdapter(data_dir=self.config.data_dir)
+                    if action == 'reset':
+                        adapter.check_inflight()
+                    adapter.init_home(reset=action == 'reset')
             except (IsolationError, OSError, ValueError):
-                return 'failed', None, '초기화 실패: Codex 로그인과 전용 홈의 소유권과 경로를 확인하세요. 기존 파일은 자동 삭제하지 않습니다.'
+                return 'failed', None, '초기화 실패: Codex 로그인, 이전 실행의 종료 여부와 전용 홈의 소유권 및 경로를 확인하세요.'
             lines = []
             code = (self.doctor or doctor.run)(self.config, probe=False, out=lines.append)
             message = ('분석 준비 상태 점검 실패. 아래 점검 항목을 해결한 뒤 다시 초기화하세요.' if code

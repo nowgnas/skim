@@ -604,6 +604,10 @@ input[type=search]{-webkit-appearance:none;appearance:none}
 .status-section .job-result-slot{min-height:0}
 .job-row.job-failed{background:var(--danger-weak)}
 .job-error{margin:6px 0 0;font-size:13px;color:var(--danger)}
+.recovery-action{margin-top:10px;padding:12px;border:1px solid var(--line);border-radius:var(--radius-box);background:var(--surface)}
+.recovery-action[hidden]{display:none}
+.recovery-action p{margin:0 0 8px;font-size:13px;color:var(--text-sub)}
+.recovery-action label{font-size:13px}
 .status-section .job-row{flex-direction:column;align-items:stretch;gap:4px}
 
 @media(max-width:640px){.home-results .pr-tabs{flex-wrap:nowrap;overflow-x:auto;max-width:100%}.home-results .pr-tabs a{flex:0 0 auto;white-space:nowrap}.home-heading .heading-collect{margin-top:12px}}

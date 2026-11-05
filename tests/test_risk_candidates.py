@@ -8,6 +8,15 @@ from skim.analyze.units import added_test_lines, candidates, changed_lines, pars
 
 
 class RiskCandidatesTests(unittest.TestCase):
+    def test_usage_counts_remain_visible_but_secrets_are_redacted(self):
+        from skim.analyze.units import sanitize
+        for line in ('max_tokens = 100', 'token_count: 3', 'input_tokens = 2147483647'):
+            self.assertEqual(sanitize(line), line)
+        for line in ('token = "secret-value"', 'password = "abc"',
+                     'max_tokens = "secret-value"', 'token_count = 2147483648',
+                     'max_tokens = 100; password = "abc"'):
+            self.assertIn('[민감 정보 제외]', sanitize(line))
+
     def test_pr13_provider_schema(self):
         diff = '''diff --git a/lib/skim/analyze/codex.py b/lib/skim/analyze/codex.py
 --- a/lib/skim/analyze/codex.py

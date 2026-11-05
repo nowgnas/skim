@@ -119,6 +119,46 @@ class CollectionTests(unittest.TestCase):
         self.collector.collect()
         self.assertEqual(self.count('snapshots'), 4)
 
+    def test_unchanged_diff_is_reused_and_corruption_forces_refetch(self):
+        self.collector.collect()
+        self.fake.calls.clear()
+        self.collector.collect()
+        self.assertFalse(any('/files' in c[7] or 'Accept: application/vnd.github.diff' in c for c in self.fake.calls))
+        path = Path(self.conn.execute('SELECT diff_path FROM snapshots LIMIT 1').fetchone()[0])
+        path.write_text('corrupted')
+        self.fake.calls.clear()
+        self.collector.collect()
+        self.assertTrue(any('/files' in c[7] for c in self.fake.calls))
+        self.assertTrue(any('Accept: application/vnd.github.diff' in c for c in self.fake.calls))
+
+    def test_conditional_request_reuses_304_and_rejects_uncached_304(self):
+        calls = []
+        responses = [
+            subprocess.CompletedProcess([], 0, 'HTTP/2.0 200 OK\r\nETag: "tag1"\r\n\r\n{"number": 1}', ''),
+            subprocess.CompletedProcess([], 1, 'HTTP/2.0 304 Not Modified\r\n\r\n', ''),
+            subprocess.CompletedProcess([], 1, 'HTTP/2.0 304 Not Modified\r\n\r\n', ''),
+        ]
+        def runner(command, **kwargs):
+            calls.append(command)
+            return responses.pop(0)
+        github = GitHub(runner)
+        self.assertEqual(github.get_conditional('repos/a/b/pulls/1'), {'number': 1})
+        self.assertEqual(github.get_conditional('repos/a/b/pulls/1'), {'number': 1})
+        self.assertIn('If-None-Match: "tag1"', calls[1])
+        with self.assertRaises(CollectionError):
+            github.get_conditional('repos/a/b/pulls/2')
+
+    def test_repository_discovery_cache_expires_after_one_day(self):
+        clock = [1000]
+        self.collector.clock = lambda: clock[0]
+        self.collector.collect()
+        clock[0] += 86399
+        self.collector.collect()
+        self.assertEqual(sum(c[7].startswith('user/repos?') for c in self.fake.calls), 1)
+        clock[0] += 1
+        self.collector.collect()
+        self.assertEqual(sum(c[7].startswith('user/repos?') for c in self.fake.calls), 2)
+
     def test_review_removal_and_closed_merged(self):
         self.collector.collect()
         self.fake.personal = False

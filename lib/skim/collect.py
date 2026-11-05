@@ -8,6 +8,7 @@ import hashlib
 import json
 import re
 import subprocess
+import stat
 import time
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -43,6 +44,24 @@ class Deferred(CollectionError):
     def __init__(self, retry_at):
         self.retry_at = retry_at
         super().__init__(f'GitHub 요청 제한: 요청을 {datetime.fromtimestamp(retry_at, timezone.utc).isoformat()} 이후 재개합니다')
+
+
+@contextmanager
+def private_subdirectory(root, *parts):
+    """정리 대상 디렉터리는 링크를 따라가지 않고 소유자와 권한을 확인한다."""
+    fds = []
+    try:
+        for index, part in enumerate((str(root), *parts)):
+            fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                         dir_fd=fds[-1] if index else None)
+            fds.append(fd)
+            info = os.fstat(fd)
+            if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+                raise ValueError('데이터 정리 디렉터리의 소유자 또는 권한을 확인하세요')
+        yield fds[-1]
+    finally:
+        for fd in reversed(fds):
+            os.close(fd)
 
 
 class GitHub:
@@ -342,12 +361,15 @@ class Collector:
                 full = names[key]
                 conn.execute('INSERT INTO repositories(owner,name,host) VALUES(?,?,?) ON CONFLICT(host,owner,name) DO NOTHING', (*repo_parts(full), host))
                 repo_id = conn.execute('SELECT id FROM repositories WHERE host=? AND owner=? AND name=?', (host, *repo_parts(full))).fetchone()[0]
-                conn.execute('INSERT INTO pull_requests(repo_id,number,url,title,body,author,state,draft,head_branch,base_sha,head_sha,updated_at,last_seen_at) '
-                             'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(repo_id,number) DO UPDATE SET '
+                closed_at = (pr.get('merged_at') or pr.get('closed_at')) if state != 'open' else None
+                if not isinstance(closed_at, str):
+                    closed_at = None
+                conn.execute('INSERT INTO pull_requests(repo_id,number,url,title,body,author,state,draft,head_branch,base_sha,head_sha,updated_at,last_seen_at,closed_at) '
+                             'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(repo_id,number) DO UPDATE SET '
                              'url=excluded.url,title=excluded.title,body=excluded.body,author=excluded.author,state=excluded.state,draft=excluded.draft,'
-                             'head_branch=excluded.head_branch,base_sha=excluded.base_sha,head_sha=excluded.head_sha,updated_at=excluded.updated_at,last_seen_at=excluded.last_seen_at',
+                             'head_branch=excluded.head_branch,base_sha=excluded.base_sha,head_sha=excluded.head_sha,updated_at=excluded.updated_at,last_seen_at=excluded.last_seen_at,closed_at=excluded.closed_at',
                              (repo_id, number, f'https://{host}/{full}/pull/{number}', pr['title'], pr.get('body') or '', pr['user']['login'], state,
-                              int(pr.get('draft', False)), pr['head']['ref'], pr['base']['sha'], pr['head']['sha'], pr['updated_at'], now))
+                              int(pr.get('draft', False)), pr['head']['ref'], pr['base']['sha'], pr['head']['sha'], pr['updated_at'], now, closed_at))
                 pr_id = conn.execute('SELECT id FROM pull_requests WHERE repo_id=? AND number=?', (repo_id, number)).fetchone()[0]
                 conn.execute('DELETE FROM pr_sources WHERE pr_id=?', (pr_id,))
                 for source in targets.get((key, number), ()):
@@ -426,9 +448,21 @@ class Collector:
 
     def _clean_cache(self):
         live = {r[0] for r in self.conn.execute('SELECT diff_path FROM snapshots WHERE diff_path IS NOT NULL')}
-        for path in (self.config.data_dir / 'cache' / 'diffs').glob('*.diff'):
-            if str(path) not in live:
-                path.unlink()
+        try:
+            with private_subdirectory(self.config.data_dir, 'cache', 'diffs') as directory:
+                for name in os.listdir(directory):
+                    if not (name.endswith('.diff') or name.endswith('.tmp')):
+                        continue
+                    if name.endswith('.diff') and str(self.config.data_dir / 'cache' / 'diffs' / name) in live:
+                        continue
+                    try:
+                        info = os.stat(name, dir_fd=directory, follow_symlinks=False)
+                        if stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and info.st_nlink == 1:
+                            os.unlink(name, dir_fd=directory)
+                    except FileNotFoundError:
+                        continue
+        except FileNotFoundError:
+            return
 
 
 class CollectionScheduler:

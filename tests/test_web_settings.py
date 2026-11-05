@@ -40,6 +40,26 @@ class SettingsTests(unittest.TestCase):
     def post(self, path, **data):
         return self.request(path, 'POST', {'csrf': self.csrf, **data})
 
+    def test_retention_settings_and_cli_read_same_policy(self):
+        status, _, _ = self.post('/settings/retention', days='14', hours='6', enabled='yes', job_days='60', log_days='15')
+        self.assertEqual(status, 303)
+        output = io.StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(main(['data', 'status']), 0)
+        for text in ('14일', '6시간', '60일', '15일'):
+            self.assertIn(text, output.getvalue())
+
+    def test_backup_removal_during_update_is_explained(self):
+        from skim.releases import UpdateJournal
+        backup = self.config.data_dir / 'skim.db.v7.123.bak'
+        backup.write_text('backup')
+        backup.chmod(0o600)
+        UpdateJournal(self.config.data_dir).start('a' * 32, 'v99.0.0', 'b' * 64)
+        status, _, body = self.post('/settings/backup/remove', backup=backup.name, confirm='yes')
+        self.assertEqual(status, 409)
+        self.assertIn('업데이트', body)
+        self.assertTrue(backup.exists())
+
     def shown(self, query=''):
         import re
         body = self.request('/repos' + query)[2].split('id="analysis-scope"', 1)[1]

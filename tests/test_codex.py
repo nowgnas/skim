@@ -169,6 +169,24 @@ class CodexTests(unittest.TestCase):
         with self.assertRaises(IsolationError):
             self.adapter.verify()
 
+    def test_new_enabled_feature_invalidates_probe_before_model_call(self):
+        self.adapter.probe()
+        self.adapter.verify()
+        self.features += '\nnew_feature stable true'
+        before = sum('--output-last-message' in command for command, _ in self.calls)
+        with self.assertRaises(IsolationError):
+            self.adapter.generate('repo-code', {})
+        self.assertEqual(before, sum('--output-last-message' in command for command, _ in self.calls))
+
+    def test_legacy_probe_without_feature_list_is_rejected(self):
+        self.adapter.probe()
+        cache = self.adapter.probe_path
+        value = json.loads(cache.read_text())
+        del value['unknown_enabled']
+        cache.write_text(json.dumps(value))
+        with self.assertRaises(IsolationError):
+            self.adapter.verify()
+
     def test_probe_blocks_writes_bad_output_and_exit(self):
         self.adapter.probe()
         for location in ('cwd', 'home'):

@@ -128,6 +128,13 @@ UPDATE repositories SET analysis_policy='inherit';
 DELETE FROM organization_policies;
 DELETE FROM host_organization_policies;
 """,)
+
+MIGRATIONS += ("""
+ALTER TABLE pull_requests ADD COLUMN closed_at TEXT;
+CREATE TABLE cleanup_state (
+ id INTEGER PRIMARY KEY CHECK(id=1), last_run REAL, last_result TEXT,
+ requested INTEGER NOT NULL DEFAULT 0 CHECK(requested IN (0,1)), cursor INTEGER NOT NULL DEFAULT 0);
+""",)
 SCOPES = ('none', 'all', 'selected')
 
 
