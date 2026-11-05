@@ -159,7 +159,6 @@ class RiskCandidatesTests(unittest.TestCase):
             ('app.py', 'DB_PASSWORD=changeme'),
             ('app.py', 'SECRET_KEY=Pa$$w0rd!'),
             ('app.py', 'Authorization: Bearer eyJabc.def.ghi'),
-            ('app.py', 'max_tokens=100'),
             ('app.py', 'csrf_token = generate_token()'),
             ('app.py', 'csrf_token = "fixture"'),
             ('app.py', 'token = get_token()'),

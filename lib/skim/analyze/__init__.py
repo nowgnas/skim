@@ -30,6 +30,8 @@ class Analyzer:
         self._diagnostic_stage = 'prepare'
 
     def _diagnostic(self, stage, error):
+        if self.config is None:
+            return
         # 예외 메시지, 입력, 모델 응답은 기록하지 않는다.
         kinds = {'ValueError', 'TypeError', 'KeyError', 'OSError', 'TimeoutExpired',
                  'JSONDecodeError', 'IsolationError', 'BudgetExceeded', 'SubprocessError'}
