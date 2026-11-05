@@ -1,6 +1,8 @@
 """명시적으로 허용한 저장소의 스냅샷만 로컬 분석한다."""
 import hashlib
 import json
+import os
+import stat
 import subprocess
 from contextlib import contextmanager
 from datetime import datetime
@@ -9,7 +11,7 @@ from .codex import CodexAdapter, IsolationError
 from .protocol import (PROMPT_VERSION, SCHEMA_VERSION, CHUNK_SCHEMA, SYNTHESIS_SCHEMA, OVERVIEW_SCHEMA,
                        encode, prompt, chunk_units, validate_chunk, validate_overview, validate_synthesis, validate, strict_json)
 from .context import overview_input, synthesis_input
-from .units import parse_diff, sanitize
+from .units import SANITIZATION_POLICY, parse_diff, sanitize
 from ..db import analysis_allowed
 from ..collect import Collector
 
@@ -25,6 +27,31 @@ class Analyzer:
         self.today = today or (lambda: datetime.now().astimezone().date().isoformat())
         # 웹 작업 진행 표시용 콜백(stage, processed, total). 실패해도 분석을 막지 않는다.
         self.progress = None
+        self._diagnostic_stage = 'prepare'
+
+    def _diagnostic(self, stage, error):
+        if self.config is None:
+            return
+        # 예외 메시지, 입력, 모델 응답은 기록하지 않는다.
+        kinds = {'ValueError', 'TypeError', 'KeyError', 'OSError', 'TimeoutExpired',
+                 'JSONDecodeError', 'IsolationError', 'BudgetExceeded', 'SubprocessError'}
+        kind = type(error).__name__
+        kind = kind if kind in kinds else 'OtherError'
+        stage = stage if stage in ('prepare', 'verify', 'overview', 'chunk', 'synthesis') else 'prepare'
+        try:
+            path = self.config.data_dir / 'logs' / 'analysis.log'
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+            try:
+                info = os.fstat(fd)
+                if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                        or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1 or info.st_size > 1024 * 1024):
+                    return
+                line = json.dumps({'time': datetime.now().astimezone().isoformat(), 'stage': stage, 'type': kind}) + '\n'
+                os.write(fd, line.encode('utf-8'))
+            finally:
+                os.close(fd)
+        except OSError:
+            pass
 
     def _report(self, stage, processed=None, total=None):
         if self.progress:
@@ -53,6 +80,7 @@ class Analyzer:
             raise BudgetExceeded('자동 분석의 남은 일일 호출 예산이 부족합니다. 다음 로컬 자정까지 보류합니다.')
 
     def _call(self, stage, data, schema, ids=None, *, budgeted=True):
+        self._diagnostic_stage = stage
         request = prompt(stage, data)
         if len(request.encode()) > 200*1024:
             raise ValueError('메타데이터 또는 합성 입력이 200 KiB를 초과했습니다')
@@ -84,7 +112,8 @@ class Analyzer:
                 return value
             except (IsolationError, BudgetExceeded):
                 raise
-            except (ValueError, OSError, subprocess.SubprocessError):
+            except (ValueError, OSError, subprocess.SubprocessError) as exc:
+                self._diagnostic(stage, exc)
                 if attempt:
                     raise ValueError('분석 응답 검증 또는 CLI 실행 실패 (재시도 소진)') from None
 
@@ -120,9 +149,11 @@ class Analyzer:
                     if snapshot_id is not None:
                         results.append(self._failure(row, '최신 SHA의 최신 스냅샷이 아닙니다', 'blocked', persist=False))
                     continue
+                self._diagnostic_stage = 'prepare'
                 try:
                     results.append(self._analyze(row, retry_missing_intent=snapshot_id is not None, budgeted=budgeted))
-                except Exception:
+                except Exception as exc:
+                    self._diagnostic(self._diagnostic_stage, exc)
                     self.conn.rollback()
                     results.append(self._failure(row, '분석 실패: diff 캐시 또는 로컬 DB를 확인하세요'))
         return results
@@ -169,14 +200,16 @@ class Analyzer:
                 used += unit['raw_bytes']
         eligible = [u for u in units if not u.get('omission_reason')]
         chunks = chunk_units(eligible, metadata)
-        material = dict(metadata=metadata, units=units, policy='redact-v2/limits-v1/rules-v7/context-v1', prompt_version=PROMPT_VERSION)
+        material = dict(metadata=metadata, units=units, policy=SANITIZATION_POLICY + '/limits-v1/rules-v7/context-v1', prompt_version=PROMPT_VERSION)
         input_hash = hashlib.sha256(encode(material).encode()).hexdigest()
         row['analysis_input_hash'] = input_hash
         adapter = self.adapter
+        self._diagnostic_stage = 'verify'
         try:
             if chunks:
                 adapter.verify()
         except (ValueError, OSError, subprocess.SubprocessError) as exc:
+            self._diagnostic('verify', exc)
             return self._failure(row, str(exc) if isinstance(exc, IsolationError) else 'CLI 검증 실패',
                                  'blocked' if isinstance(exc, IsolationError) else 'failed')
         key = (row['id'], input_hash, adapter.provider, adapter.model, adapter.cli_version, PROMPT_VERSION, SCHEMA_VERSION)
@@ -238,6 +271,7 @@ class Analyzer:
                 coverage['analyzed'] = len(collected)
                 result['status'] = 'partial' if any(coverage.get(key) for key in ('excluded', 'omitted', 'redacted', 'overview_missing', 'synthesis_omitted', 'synthesis_uncertainties_omitted')) else 'completed'
         except (ValueError, OSError, subprocess.SubprocessError) as exc:
+            self._diagnostic(self._diagnostic_stage, exc)
             result['status'] = 'deferred' if isinstance(exc, BudgetExceeded) else 'blocked' if isinstance(exc, IsolationError) else 'failed'
             result['error'] = str(exc) if isinstance(exc, (BudgetExceeded, IsolationError)) else '분석 실패: 입력 또는 응답 계약을 확인하세요'
         coverage['unanalysed'] = coverage['total'] - coverage['analyzed']

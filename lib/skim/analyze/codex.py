@@ -184,7 +184,8 @@ class CodexAdapter:
             age = time.time() - value['checked_at']
             if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
                     or stat.S_IMODE(info.st_mode) != 0o600 or value['version'] != self.cli_version
-                    or (self.model != 'unknown' and value.get('model') != self.model) or value['disabled'] != self.disabled or value['passed'] is not True
+                    or (self.model != 'unknown' and value.get('model') != self.model) or value['disabled'] != self.disabled
+                    or value.get('unknown_enabled') != self.unknown_enabled or value['passed'] is not True
                     or not 0 <= age < 7 * 86400):
                 raise ValueError()
             if self.model == 'unknown' or self.model == self._detected_model:
@@ -227,7 +228,7 @@ class CodexAdapter:
         fd = os.open(self.probe_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, 'w') as stream:
             json.dump({'version': self.cli_version, 'checked_at': time.time(),
-                       'disabled': self.disabled, 'model': self.model, 'passed': True}, stream)
+                       'disabled': self.disabled, 'unknown_enabled': self.unknown_enabled, 'model': self.model, 'passed': True}, stream)
 
     @contextmanager
     def _analysis_lock(self):

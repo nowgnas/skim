@@ -5,6 +5,8 @@ import re
 from functools import lru_cache
 from pathlib import PurePosixPath
 
+SANITIZATION_POLICY = 'redact-v3'
+
 # 모델 출력에서는 값 자체가 확인되는 토큰·개인 키만 가린다.
 SECRET_VALUE = re.compile(
     r'-----BEGIN (?:[A-Z ]*PRIVATE KEY)-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)'
@@ -12,12 +14,23 @@ SECRET_VALUE = re.compile(
     r'|(?:AKIA|ASIA)[A-Z0-9]{16}|xox[baprs]-[A-Za-z0-9-]+|AIza[A-Za-z0-9_-]{30,})')
 SECRET_ASSIGNMENT = re.compile(r"(?im:\b(?:api[_-]?key|[a-z0-9_]*(?:secret|password|token|private[_-]?key)[a-z0-9_]*|authorization)[\"']?\s*[=:][^\n]*)")
 
+# 이름과 값이 모두 정해진 사용량 설정만 예외로 둔다. 비밀값처럼 보이는 다른 대입은 계속 가린다.
+SAFE_COUNT_ASSIGNMENT = re.compile(r"""(?i)^(?:max_tokens|token_count|total_tokens|input_tokens|output_tokens|prompt_tokens|completion_tokens)["']?\s*[:=]\s*(?P<value>[0-9]{1,10}|true|false)\s*[,;]?\s*$""")
+
+
 EXCLUDED = ('.env', '.env.*', '*.pem', '*.key', '*credentials*', 'id_rsa*', 'id_ed25519*', '*.p12', '*.pfx')
 
 
 def sanitize(text, assignments=True):
     cleaned = SECRET_VALUE.sub('[민감 정보 제외]', text or '')
-    return SECRET_ASSIGNMENT.sub('[민감 정보 제외]', cleaned) if assignments else cleaned
+    if not assignments:
+        return cleaned
+    def redact(match):
+        safe = SAFE_COUNT_ASSIGNMENT.fullmatch(match.group())
+        if safe and (not safe['value'].isdigit() or int(safe['value']) <= 2147483647):
+            return match.group()
+        return '[민감 정보 제외]'
+    return SECRET_ASSIGNMENT.sub(redact, cleaned)
 
 
 def secret_path(path):

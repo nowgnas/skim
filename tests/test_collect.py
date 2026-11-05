@@ -136,6 +136,8 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(self.conn.execute('SELECT state FROM pull_requests').fetchone()[0], 'merged')
 
     def test_race_retry_and_failure_preserves_data(self):
+        # 이 검사는 diff 재수집 중 오류와 교체를 대상으로 한다.
+        self.collector._unchanged_snapshot = lambda *_: False
         self.fake.race = 1
         self.collector.collect()
         self.assertEqual({r[0] for r in self.conn.execute('SELECT head_sha FROM snapshots')}, {'head1x'})
@@ -221,6 +223,8 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(coverage['status'], 'collected')
 
     def test_404_and_diff_limit_do_not_backoff_scheduler(self):
+        # 이 검사는 diff 재수집 중 오류와 교체를 대상으로 한다.
+        self.collector._unchanged_snapshot = lambda *_: False
         self.collector.collect()
         def runner(command, **kwargs):
             if command[7] == 'repos/org/outside/pulls/2':
@@ -318,6 +322,7 @@ class CollectionTests(unittest.TestCase):
                 return subprocess.CompletedProcess(command, 0, '[]', '')
             return original(command, **kwargs)
         self.collector.gh.runner = runner
+        self.collector._repository_discovery.clear()
         self.collector.collect()
         self.assertEqual(self.conn.execute("SELECT source FROM repositories WHERE name='candidate'").fetchone()[0], 'responsible')
 
@@ -352,6 +357,8 @@ class CollectionTests(unittest.TestCase):
         self.assertEqual(self.conn.execute('SELECT status FROM jobs').fetchone()[0], 'completed')
 
     def test_atomic_diff_replacement_and_process_lock(self):
+        # 이 검사는 diff 재수집 중 오류와 교체를 대상으로 한다.
+        self.collector._unchanged_snapshot = lambda *_: False
         self.collector.collect()
         path = Path(self.conn.execute('SELECT diff_path FROM snapshots').fetchone()[0])
         with path.open() as reader:
@@ -450,6 +457,8 @@ class CollectionTests(unittest.TestCase):
 
 
     def test_diff_422_is_a_collection_failure(self):
+        # 이 검사는 diff 재수집 중 오류와 교체를 대상으로 한다.
+        self.collector._unchanged_snapshot = lambda *_: False
         self.collector.collect()
         def runner(command, **kwargs):
             if '-H' in command:

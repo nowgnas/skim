@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT / 'lib'))
 from skim.analyze import Analyzer
 from skim.analyze.codex import CodexAdapter
 from skim.analyze.protocol import PROMPT_VERSION, SCHEMA_VERSION, SYSTEM
+from skim.analyze.units import SANITIZATION_POLICY
 from skim.analyze.units import parse_diff, SECRET_VALUE, SECRET_ASSIGNMENT, sanitize
 from skim.config import Config, private_dir, private_file
 from skim.db import connect
@@ -222,7 +223,7 @@ def main():
         return int(bool(report['summary']['failures']))
     config = Config.load()
     report = dict(prompt_version=PROMPT_VERSION, prompt_sha256=prompt_hash(),
-                  schema_version=SCHEMA_VERSION, cli_version='unknown', model='unknown',
+                  schema_version=SCHEMA_VERSION, sanitization_policy=SANITIZATION_POLICY, cli_version='unknown', model='unknown',
                   run_timestamp=datetime.now().astimezone().isoformat(), reviewed_by=None, cases=[])
     for case in manifest['cases']:
         print(f"Evaluating {case['id']}", file=sys.stderr, flush=True)
