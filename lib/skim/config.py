@@ -75,8 +75,7 @@ class Config:
         path = config_dir / "config.json"
         if not path.exists():
             private_file(path)
-            path.write_text(json.dumps({"poll_interval_seconds": 300,
-                                        "retention_days": 30}, indent=2) + "\n")
+            path.write_text(json.dumps({"poll_interval_seconds": 300}, indent=2) + "\n")
         private_file(path)
         settings = json.loads(path.read_text())
         if not isinstance(settings, dict):

@@ -7,7 +7,7 @@ import re
 import sys
 
 from eval_release import ROOT, PROMPT_VERSION, SCHEMA_VERSION, prompt_hash, sha256, assess, confirmation_hash, saved_requests, summarize
-from skim.analyze.units import parse_diff
+from skim.analyze.units import SANITIZATION_POLICY, parse_diff
 
 
 def accepted_misses(manifest):
@@ -57,6 +57,8 @@ def check(root=ROOT, version=PROMPT_VERSION):
         raise ValueError('프롬프트 해시 불일치')
     if report['schema_version'] != SCHEMA_VERSION:
         raise ValueError('스키마 버전 불일치')
+    if report.get('sanitization_policy') != SANITIZATION_POLICY:
+        raise ValueError('민감 정보 정제 정책 평가 불일치: 실제 모델 재평가 필요')
     for key in ('model', 'cli_version', 'run_timestamp'):
         if not report.get(key) or report[key] == 'unknown':
             raise ValueError(f'{key} 평가 근거 누락')

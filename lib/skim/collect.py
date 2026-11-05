@@ -11,6 +11,7 @@ import subprocess
 import time
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+from pathlib import Path
 from urllib.parse import urlencode
 
 from .config import private_dir, private_file
@@ -51,13 +52,18 @@ class GitHub:
         self.clock = clock
         self.not_before = 0
         self.require_complete_sso = False
+        self._etag_cache = {}
 
-    def get(self, endpoint, *, diff=False):
+    def get(self, endpoint, *, diff=False, conditional=False):
         if self.clock() < self.not_before:
             raise Deferred(self.not_before)
         command = ['gh', 'api', '--hostname', hostname(self.host), '--method', 'GET', '--include', endpoint]
         if diff:
             command += ['-H', 'Accept: application/vnd.github.diff']
+        cache_key = (self.host, endpoint)
+        cached = self._etag_cache.get(cache_key) if conditional and not diff else None
+        if cached:
+            command += ['-H', 'If-None-Match: ' + cached[0]]
         try:
             result = self.runner(command, capture_output=True, text=True, timeout=120)
         except (OSError, subprocess.TimeoutExpired) as exc:
@@ -87,7 +93,12 @@ class GitHub:
             delay = max(delay, 60)
         if delay > 0:
             self.not_before = self.clock() + delay
+        if status == 304:
+            if not cached or (self.require_complete_sso and 'partial-results' in headers.get('x-github-sso', '').lower()):
+                raise CollectionError('GitHub 조건부 응답을 확인할 수 없습니다')
+            return json.loads(cached[1])
         if result.returncode or status >= 400:
+            self._etag_cache.pop(cache_key, None)
             if self.not_before > self.clock():
                 raise Deferred(self.not_before)
             if diff and status in (406, 413):
@@ -99,7 +110,21 @@ class GitHub:
             raise CollectionError('GitHub 조회 실패: 네트워크 연결과 GitHub 상태를 확인하세요')
         if self.require_complete_sso and 'partial-results' in headers.get('x-github-sso', '').lower():
             raise CollectionError('GitHub 조직 SSO 승인 필요: 일부 결과가 누락되어 이전 목록을 유지합니다')
-        return raw if diff else json.loads(raw)
+        if diff:
+            return raw
+        payload = json.loads(raw)
+        if conditional:
+            etag = headers.get('etag', '')
+            if re.fullmatch(r'(?:W/)?"[A-Za-z0-9._:+/=-]{1,256}"', etag) and len(raw.encode('utf-8')) <= 1024 * 1024:
+                if len(self._etag_cache) >= 1000 and cache_key not in self._etag_cache:
+                    self._etag_cache.pop(next(iter(self._etag_cache)))
+                self._etag_cache[cache_key] = (etag, raw)
+            else:
+                self._etag_cache.pop(cache_key, None)
+        return payload
+
+    def get_conditional(self, endpoint):
+        return self.get(endpoint, conditional=True)
 
     def pages(self, endpoint, **params):
         items = []
@@ -129,8 +154,10 @@ def repo_parts(full_name):
 class Collector:
     def __init__(self, conn, config, runner=None, clock=time.time):
         self.conn, self.config = conn, config
+        self.clock = clock
         self.gh = GitHub(runner, clock)
         self._host_limits = {}
+        self._repository_discovery = {}
         # 웹 작업 진행 표시용 콜백(stage, processed, total). 실패해도 수집을 막지 않는다.
         self.progress = None
         self._mutex = threading.RLock()
@@ -184,16 +211,52 @@ class Collector:
                 raise CollectionError(message) from first
             return total
 
+    def _unchanged_snapshot(self, host, full, number, pr):
+        """정상 수집된 마지막 입력과 파일 캐시가 동일할 때만 재사용한다."""
+        owner, name = repo_parts(full)
+        row = self.conn.execute(
+            'SELECT p.title,p.body,s.base_sha,s.head_sha,s.diff_hash,s.diff_path,s.coverage '
+            'FROM pull_requests p JOIN repositories r ON r.id=p.repo_id '
+            'JOIN snapshots s ON s.id=(SELECT MAX(id) FROM snapshots WHERE pr_id=p.id) '
+            'WHERE r.host=? AND lower(r.owner)=lower(?) AND lower(r.name)=lower(?) AND p.number=?',
+            (host, owner, name, number)).fetchone()
+        if not row or (row['base_sha'], row['head_sha'], row['title'], row['body'] or '') != (
+                pr['base']['sha'], pr['head']['sha'], pr['title'], pr.get('body') or ''):
+            return False
+        try:
+            coverage = json.loads(row['coverage'])
+            if (coverage.get('status') != 'collected' or coverage.get('policy') != 'raw-v1'
+                    or type(pr.get('changed_files')) is not int
+                    or coverage.get('total_files') != pr['changed_files']):
+                return False
+            path = Path(row['diff_path'])
+            if path.is_symlink() or not path.resolve().is_relative_to((self.config.data_dir / 'cache').resolve()):
+                return False
+            if not path.is_file() or path.stat().st_size > 20 * 1024 * 1024:
+                return False
+            return hashlib.sha256(path.read_bytes()).hexdigest() == row['diff_hash']
+        except (OSError, ValueError, TypeError, KeyError, AttributeError):
+            return False
+
     def _collect(self):
         gh, conn = self.gh, self.conn
         host = gh.host
         login = gh.get('user')['login']
-        discovered = gh.pages('user/repos', affiliation='owner,organization_member,collaborator')
+        discovery_key = (host, login.lower())
+        cached_discovery = self._repository_discovery.get(discovery_key)
+        now = self.clock()
+        cache_hit = bool(cached_discovery and 0 <= now - cached_discovery[0] < 86400)
+        if cache_hit:
+            discovered = cached_discovery[1]
+        else:
+            discovered = gh.pages('user/repos', affiliation='owner,organization_member,collaborator')
         candidates = []
         for repo in discovered:
             owned = repo['owner']['login'].lower() == login.lower()
             if owned or repo.get('permissions', {}).get('admin'):
                 candidates.append((*repo_parts(repo['full_name']), 'owned' if owned else 'managed'))
+        if not cache_hit:
+            self._repository_discovery[discovery_key] = (now, discovered)
         targets = {}
         names = {}
         listing_failures = []
@@ -223,6 +286,7 @@ class Collector:
         for r in conn.execute("SELECT owner,name FROM repositories WHERE host=?", (host,)):
             names.setdefault((r['owner'] + '/' + r['name']).lower(), r['owner'] + '/' + r['name'])
         collected = []
+        reused = set()
         failures = []
         pending = sorted(set(targets) | old)
         for index, (full, number) in enumerate(pending):
@@ -230,7 +294,7 @@ class Collector:
             endpoint = f'repos/{full}/pulls/{int(number)}'
             try:
                 for attempt in range(2):
-                    pr = gh.get(endpoint)
+                    pr = getattr(gh, 'get_conditional', gh.get)(endpoint)
                     # 저장 단계까지 잘못된 응답이 흘러가 다른 PR을 막지 않게 검증한다.
                     for value in (pr['title'], pr['user']['login'], pr['head']['ref'],
                                   pr['head']['sha'], pr['base']['sha'], pr['updated_at']):
@@ -241,6 +305,10 @@ class Collector:
                     state = 'merged' if pr.get('merged_at') else pr['state']
                     snapshot = None
                     if state == 'open' and (full, number) in targets:
+                        if self._unchanged_snapshot(host, full, number, pr):
+                            reused.add((full, number))
+                            collected.append((full, number, pr, state, None))
+                            break
                         oversized = None
                         try:
                             files = gh.pages(endpoint + '/files')
@@ -342,7 +410,7 @@ class Collector:
         if errors:
             full, number, exc = errors[0]
             raise CollectionError(f'PR 수집 실패 ({len(errors)}건, {full}#{number}): ' + error_message(exc))
-        return sum(snapshot is not None and not any(f == full and n == number for f, n, _ in failures)
+        return sum((snapshot is not None or (full, number) in reused) and not any(f == full and n == number for f, n, _ in failures)
                    for full, number, pr, state, snapshot in collected)
 
     def _report(self, stage, processed, total):

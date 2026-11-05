@@ -433,6 +433,7 @@ def render(server, conn, csrf, path, query=None):
     settings = json.loads((server.config.config_dir / 'config.json').read_text())
     model = settings.get('codex_model', '')
     body = '<h1>설정</h1><p>분석 허용 범위(호스트별 전체 또는 선택한 저장소)는 <a href="/repos#analysis-scope">저장소 화면</a>에서 정합니다. 기본은 분석 안 함입니다.</p>'
+    body += '<p class="notice">보관 기간 자동 정리는 아직 지원하지 않습니다. 설정 파일의 retention_days 값은 현재 적용되지 않으며 수집된 diff와 분석 기록은 자동 삭제되지 않습니다.</p>'
     body += '<h2>모델 설정</h2>' + meta('파일 값: ' + (model or '미설정'), '실제 적용: ' + (Config.parse_codex_model(settings) or '자동 감지'))
     if 'SKIM_CODEX_MODEL' in os.environ:
         body += '<p>SKIM_CODEX_MODEL 환경변수가 파일 설정보다 우선합니다.</p>'

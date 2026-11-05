@@ -9,7 +9,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
 import check_release
-from eval_release import prompt_hash, sha256, SCHEMA_VERSION, confirmation_hash, assess, summarize
+from eval_release import prompt_hash, sha256, SCHEMA_VERSION, SANITIZATION_POLICY, confirmation_hash, assess, summarize
 from skim.analyze.units import parse_diff
 from skim.analyze.protocol import prompt
 
@@ -28,6 +28,7 @@ class ReleaseGateTests(unittest.TestCase):
         self.manifest['confirmed_sha256'] = confirmation_hash(self.manifest)
         (self.corpus / 'manifest.json').write_text(json.dumps(self.manifest))
         self.report = dict(prompt_version='skim-ko-5', prompt_sha256=prompt_hash(), schema_version=SCHEMA_VERSION,
+                           sanitization_policy=SANITIZATION_POLICY,
                            cli_version='0.165.0', model='synthetic-gate-test', run_timestamp='2026-10-31T12:00:00+09:00',
                            reviewed_by='test reviewer', cases=[], summary=dict(total_misses=0, hidden_count=0, failures=[]))
         for case in self.manifest['cases']:
