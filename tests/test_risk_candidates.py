@@ -13,6 +13,19 @@ class RiskCandidatesTests(unittest.TestCase):
         patch = f'diff --git a/{path} b/{path}\n' + diff if diff else ''
         return parse_diff(patch, files)[0][0]
 
+    def test_secrets_directory_is_only_a_location_hint(self):
+        unit = self.unit('secrets/app.py')
+        self.assertIn('secrets', unit['location_hints'])
+        self.assertIn('secrets', unit['candidates'])
+        self.assertEqual(unit['kind_signals'], [])
+        self.assertEqual(unit['hard_floors'], [])
+
+    def test_dependency_text_file_is_not_demoted_by_extension(self):
+        from skim.analyze.units import allocation_key
+        dependency = dict(self.unit('requirements.txt'), change_id='h1')
+        source = dict(self.unit('app.py'), change_id='h2', content_hits=['auth'])
+        self.assertLess(allocation_key(dependency), allocation_key(source))
+
     def test_signals_separate_location_content_and_floors(self):
         unit = self.unit('auth/login.py')
         self.assertEqual(unit['location_hints'], ['auth'])

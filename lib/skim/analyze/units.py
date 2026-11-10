@@ -215,6 +215,7 @@ def signals(path, text, tests, test_diffs=None, *, test_lines=None):
         'auth': auth_candidate(parts, name, ''),
         'payments': payment_candidate(parts, ''),
         'config': rules['config'],
+        'secrets': 'secrets' in parts,
     }.items() if matches]
     schema_path = schema_candidate(parts, path, name, '')
     kind_signals = [flag for flag in ('install_script', 'ci_workflow', 'dependency') if rules[flag]]
@@ -277,7 +278,8 @@ def priority(unit):
 
 def allocation_key(unit, focus=()):
     path = unit['file_path'].lower()
-    supporting = is_test(path) or path.startswith(('docs/', 'doc/')) or path.endswith(('.md', '.rst', '.txt'))
+    supporting = is_test(path) or path.startswith(('docs/', 'doc/')) or (path.endswith(('.md', '.rst', '.txt'))
+                and not any(unit.get(key) for key in ('kind_signals', 'hard_floors', 'content_hits')))
     return priority(unit), unit['change_id'] not in focus, supporting, int(unit['change_id'][1:])
 
 
