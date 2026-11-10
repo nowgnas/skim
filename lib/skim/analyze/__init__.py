@@ -11,7 +11,7 @@ from .codex import CodexAdapter, IsolationError
 from .protocol import (PROMPT_VERSION, SCHEMA_VERSION, CHUNK_SCHEMA, SYNTHESIS_SCHEMA, OVERVIEW_SCHEMA,
                        encode, prompt, chunk_units, validate_chunk, validate_overview, validate_synthesis, validate, strict_json)
 from .context import overview_input, synthesis_input
-from .units import SANITIZATION_POLICY, parse_diff, sanitize
+from .units import SANITIZATION_POLICY, parse_diff, sanitize, allocation_key
 from ..db import analysis_allowed
 from ..collect import Collector
 
@@ -108,6 +108,8 @@ class Analyzer:
                         return {key: clean(item) for key, item in value.items()}
                     return value
                 value = clean(value)
+                if stage == 'synthesis' and ids is not None:
+                    value = validate_synthesis(encode(value), ids)
                 validate(value, schema)
                 return value
             except (IsolationError, BudgetExceeded):
@@ -189,9 +191,9 @@ class Analyzer:
             diff = diff_path.read_text()
         units, tests = parse_diff(diff, source_coverage.get('files', []))
         metadata = dict(title=sanitize(row['title']), body=sanitize(row['body']), tests=[sanitize(t) for t in tests])
-        # 정제 전 1 MiB 한도는 후보 우선 순서로 배정한다.
+        # 정제 전 1 MiB 한도는 구조화 신호 순서로 배정한다.
         used = 0
-        for unit in sorted(units, key=lambda u: (not bool(u['candidates']), int(u['change_id'][1:]))):
+        for unit in sorted(units, key=allocation_key):
             if unit['excluded']:
                 continue
             if used + unit['raw_bytes'] > 1024*1024:
@@ -200,7 +202,7 @@ class Analyzer:
                 used += unit['raw_bytes']
         eligible = [u for u in units if not u.get('omission_reason')]
         chunks = chunk_units(eligible, metadata)
-        material = dict(metadata=metadata, units=units, policy=SANITIZATION_POLICY + '/limits-v1/rules-v7/context-v1', prompt_version=PROMPT_VERSION)
+        material = dict(metadata=metadata, units=units, policy=SANITIZATION_POLICY + '/limits-v1/rules-v8/context-v1', prompt_version=PROMPT_VERSION)
         input_hash = hashlib.sha256(encode(material).encode()).hexdigest()
         row['analysis_input_hash'] = input_hash
         adapter = self.adapter
@@ -260,19 +262,23 @@ class Analyzer:
                     value = self._call('chunk', chunk, CHUNK_SCHEMA, {u['change_id'] for u in chunk['units']}, budgeted=budgeted)
                     collected.extend(value['items'])
                     uncertainties.extend(value['uncertainties'])
+                    result.update(items=collected, uncertainties=uncertainties, overview=overview)
+                    coverage['analyzed'] = len(collected)
                 self._report('결과 합성', len(chunks) + int(overview is not None), steps)
                 synthesis_data = synthesis_input(units, metadata, collected, dict(coverage, analyzed=len(collected)), overview, uncertainties)
                 synthesis_ids = {item['change_id'] for item in synthesis_data['items']}
-                synthesis = self._call('synthesis', synthesis_data, SYNTHESIS_SCHEMA, synthesis_ids, budgeted=budgeted)
                 coverage['synthesis_omitted'] = synthesis_data['coverage']['synthesis_omitted']
                 coverage['synthesis_uncertainties_omitted'] = synthesis_data['coverage']['synthesis_uncertainties_omitted']
-                result.update(intent=synthesis['intent'], focus=synthesis['focus'], items=collected,
+                synthesis = self._call('synthesis', synthesis_data, SYNTHESIS_SCHEMA, synthesis_ids, budgeted=budgeted)
+                result.update(intent=synthesis['intent'], focus=synthesis['focus'], groups=synthesis['groups'], items=collected,
                               uncertainties=uncertainties, overview=overview)
                 coverage['analyzed'] = len(collected)
                 result['status'] = 'partial' if any(coverage.get(key) for key in ('excluded', 'omitted', 'redacted', 'overview_missing', 'synthesis_omitted', 'synthesis_uncertainties_omitted')) else 'completed'
         except (ValueError, OSError, subprocess.SubprocessError) as exc:
             self._diagnostic(self._diagnostic_stage, exc)
             result['status'] = 'deferred' if isinstance(exc, BudgetExceeded) else 'blocked' if isinstance(exc, IsolationError) else 'failed'
+            if result['items']:
+                result['status'] = 'partial'
             result['error'] = str(exc) if isinstance(exc, (BudgetExceeded, IsolationError)) else '분석 실패: 입력 또는 응답 계약을 확인하세요'
         coverage['unanalysed'] = coverage['total'] - coverage['analyzed']
         by_id = {item['change_id']: item for item in result['items']}
