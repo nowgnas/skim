@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
@@ -43,7 +44,7 @@ class ReleaseGateTests(unittest.TestCase):
 
     def check(self):
         (self.corpus / 'results.json').write_text(json.dumps(self.report))
-        check_release.check(self.root)
+        check_release.check(self.root, version='skim-ko-5')
 
     def test_block_synthetic_results(self):
         with self.assertRaises(ValueError):
@@ -115,13 +116,25 @@ class ReleaseGateTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.check()
 
+    def test_supported_versions_reach_corpus_check(self):
+        for version in ('skim-ko-3', 'skim-ko-4', 'skim-ko-6'):
+            with self.subTest(version=version), self.assertRaises(FileNotFoundError):
+                check_release.check(self.root, version=version)
+        with self.assertRaises(FileNotFoundError):
+            check_release.check(self.root)
+
+    def test_prompt_hash_includes_stage_instructions(self):
+        original = prompt_hash()
+        with patch.dict('eval_release.STAGE_INSTRUCTIONS', chunk='다른 청크 지시'):
+            self.assertNotEqual(prompt_hash(), original)
+
     def test_other_version(self):
         with self.assertRaises(ValueError):
-            check_release.check(self.root, 'skim-ko-3')
+            check_release.check(self.root, 'unsupported')
 
     def test_missing_results(self):
         with self.assertRaises(OSError):
-            check_release.check(self.root)
+            check_release.check(self.root, version='skim-ko-5')
 
     def test_hidden_and_expectation_failures(self):
         original = copy.deepcopy(self.report)

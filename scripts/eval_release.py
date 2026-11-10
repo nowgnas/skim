@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'lib'))
 from skim.analyze import Analyzer
 from skim.analyze.codex import CodexAdapter
-from skim.analyze.protocol import PROMPT_VERSION, SCHEMA_VERSION, SYSTEM
+from skim.analyze.protocol import PROMPT_VERSION, SCHEMA_VERSION, SYSTEM, STAGE_INSTRUCTIONS, encode
 from skim.analyze.units import SANITIZATION_POLICY
 from skim.analyze.units import parse_diff, SECRET_VALUE, SECRET_ASSIGNMENT, sanitize
 from skim.config import Config, private_dir, private_file
@@ -28,7 +28,7 @@ def sha256(value):
 
 
 def prompt_hash():
-    return sha256(SYSTEM.encode('utf-8'))
+    return sha256(encode(dict(system=SYSTEM, stages=STAGE_INSTRUCTIONS)).encode('utf-8'))
 
 
 def confirmation_hash(manifest):
@@ -212,7 +212,7 @@ def main():
         parser.error('--home is required for model evaluation')
     corpus = ROOT / 'eval' / PROMPT_VERSION
     manifest = json.loads((corpus / 'manifest.json').read_text())
-    if PROMPT_VERSION not in ('skim-ko-3', 'skim-ko-4', 'skim-ko-5') or manifest['prompt_version'] != PROMPT_VERSION:
+    if PROMPT_VERSION not in ('skim-ko-3', 'skim-ko-4', 'skim-ko-5', 'skim-ko-6') or manifest['prompt_version'] != PROMPT_VERSION:
         parser.error('unsupported release prompt version')
     if args.rescore:
         try:

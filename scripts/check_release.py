@@ -39,7 +39,7 @@ def accepted_misses(manifest):
 
 
 def check(root=ROOT, version=PROMPT_VERSION):
-    if version != 'skim-ko-5':
+    if version not in ('skim-ko-3', 'skim-ko-4', 'skim-ko-5', 'skim-ko-6'):
         raise ValueError('지원하지 않는 프롬프트 버전')
     corpus = root / 'eval' / version
     manifest = json.loads((corpus / 'manifest.json').read_text())
