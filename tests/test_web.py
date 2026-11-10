@@ -81,6 +81,27 @@ class WebTests(unittest.TestCase):
         lines = head.decode().split('\r\n')
         return int(lines[0].split()[1]), dict(line.split(': ', 1) for line in lines[1:]), content.decode()
 
+    def test_failed_attempt_keeps_last_success_and_visible_status(self):
+        for status in ('deferred', 'failed', 'blocked', 'cancelled'):
+            with self.subTest(status=status), closing(connect(self.config)) as conn:
+                before = next(pr for pr in load_prs(conn, self.config) if pr['id'] == 1)
+                with conn:
+                    conn.execute("INSERT INTO analyses(snapshot_id,input_hash,provider,model,cli_version,prompt_version,schema_version,status,output_json,error) "
+                                 "VALUES(?, 'retry', 'fake', 'fake', '1', 'skim-ko-6', '3', ?, '{}', '재시도 실패 안내')",
+                                 (before['snapshot']['id'], status))
+                after = next(pr for pr in load_prs(conn, self.config) if pr['id'] == 1)
+                self.assertEqual(after['status'], status)
+                self.assertTrue(after['previous_result'])
+                self.assertEqual(after['items'], before['items'])
+                self.assertTrue(after['items'])
+                self.assertEqual(after['result']['intent'], before['result']['intent'])
+                self.assertEqual(after['importance'], before['importance'])
+                for path in ('/', '/pr/1'):
+                    body = self.request(path)[2]
+                    self.assertIn('직전 성공 분석 결과', body)
+                    self.assertIn(before['result']['intent'], body)
+                self.assertIn('재시도 실패 안내', self.request('/pr/1')[2])
+
     def test_page_titles_and_separator_free_markup(self):
         # PR 원문은 보존하고, 화면에서 추가하는 구분 문자를 검사한다.
         with closing(connect(self.config)) as conn, conn:
