@@ -202,6 +202,20 @@ class EvalEvidenceTests(unittest.TestCase):
                 self.assertEqual(main(), 0)
             self.assertEqual(json.loads(out.read_text())['reviewed_by'], 'Reviewer')
 
+    def test_historical_version_rescore_keeps_recorded_binding(self):
+        recorded = json.loads((ROOT / 'eval/skim-ko-5/results.json').read_text())
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / 'results.json'
+            out.write_text(json.dumps(recorded))
+            argv = ['eval_release.py', '--version', 'skim-ko-5', '--out', str(out), '--rescore']
+            with patch.object(sys, 'argv', argv), patch('eval_release.prompt_hash', side_effect=AssertionError('no live hash')), patch('eval_release.Config.load', side_effect=AssertionError('no config')), patch('eval_release.CodexAdapter', side_effect=AssertionError('no model')):
+                main()
+            updated = json.loads(out.read_text())
+        self.assertNotIn('sanitization_policy', recorded)
+        for key in ('prompt_version', 'prompt_sha256', 'schema_version'):
+            self.assertEqual(updated[key], recorded[key])
+        self.assertEqual(len(updated['cases']), len(recorded['cases']))
+
     @patch('eval_release.SCHEMA_VERSION', '1')
     @patch('eval_release.PROMPT_VERSION', 'skim-ko-3')
     @patch('eval_release.prompt_hash', lambda: LEGACY_PROMPT_HASH)
