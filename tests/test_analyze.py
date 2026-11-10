@@ -532,6 +532,48 @@ new mode 100755
         self.assertEqual(len(self.fake.calls), 6)
         self.assertEqual(self.conn.execute('SELECT COUNT(*) FROM changes').fetchone()[0], 3)
 
+    def test_later_chunk_failure_preserves_previous_result_and_retries(self):
+        from skim.analyze import BudgetExceeded
+        from skim.web import load_prs
+        diff = 'diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n'
+        diff += ''.join(f'@@ -{i} +{i} @@\n-old\n+new\n' for i in range(1, 102))
+        self.snapshot(diff)
+        units, _ = parse_diff(diff)
+        self.assertEqual(len(chunk_units(units, {})), 2)
+        previous = self.analyzer.run()[0]
+        self.assertEqual(previous['status'], 'completed')
+        original = self.analyzer._call
+        for error, status in ((BudgetExceeded('budget'), 'deferred'), (IsolationError('isolation'), 'blocked')):
+            with self.subTest(status=status):
+                with self.conn:
+                    self.conn.execute("UPDATE pull_requests SET title=?", (status,))
+                chunk_calls = 0
+
+                def call(stage, *args, **kwargs):
+                    nonlocal chunk_calls
+                    if stage == 'chunk':
+                        chunk_calls += 1
+                        if chunk_calls == 2:
+                            raise error
+                    return original(stage, *args, **kwargs)
+
+                with patch.object(self.analyzer, '_call', side_effect=call):
+                    result = self.analyzer.run()[0]
+                self.assertEqual(result['status'], status)
+                self.assertTrue(result['items'])
+                stored = self.conn.execute('SELECT status,output_json FROM analyses ORDER BY id DESC LIMIT 1').fetchone()
+                self.assertEqual(stored['status'], status)
+                self.assertEqual(json.loads(stored['output_json'])['items'], result['items'])
+                shown = load_prs(self.conn, self.config)[0]
+                self.assertEqual(shown['status'], status)
+                self.assertTrue(shown['previous_result'])
+                self.assertEqual(shown['result']['intent'], previous['intent'])
+                self.assertEqual(shown['result']['items'], previous['items'])
+                calls = len(self.fake.calls)
+                retried = self.analyzer.run()[0]
+                self.assertEqual(retried['status'], 'completed')
+                self.assertGreater(len(self.fake.calls), calls)
+
     def test_synthesis_failure_preserves_previous_success(self):
         self.analyzer.run()
         with self.conn:

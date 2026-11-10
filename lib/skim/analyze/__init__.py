@@ -236,6 +236,7 @@ class Analyzer:
                       notice='민감 정보 탐지는 완전하지 않습니다',
                       logic_without_tests_reason='제공된 diff에서 관련 테스트 변경을 확인하지 못함',
                       metadata_exclusions=[key for key in ('title', 'body') if sanitize(row[key]) != (row[key] or '')], error=None)
+        chunks_completed = False
         try:
             if chunks:
                 collected = []
@@ -264,6 +265,7 @@ class Analyzer:
                     uncertainties.extend(value['uncertainties'])
                     result.update(items=collected, uncertainties=uncertainties, overview=overview)
                     coverage['analyzed'] = len(collected)
+                chunks_completed = True
                 self._report('결과 합성', len(chunks) + int(overview is not None), steps)
                 synthesis_data = synthesis_input(units, metadata, collected, dict(coverage, analyzed=len(collected)), overview, uncertainties)
                 synthesis_ids = {item['change_id'] for item in synthesis_data['items']}
@@ -277,7 +279,7 @@ class Analyzer:
         except (ValueError, OSError, subprocess.SubprocessError) as exc:
             self._diagnostic(self._diagnostic_stage, exc)
             result['status'] = 'deferred' if isinstance(exc, BudgetExceeded) else 'blocked' if isinstance(exc, IsolationError) else 'failed'
-            if result['items']:
+            if chunks_completed:
                 result['status'] = 'partial'
             result['error'] = str(exc) if isinstance(exc, (BudgetExceeded, IsolationError)) else '분석 실패: 입력 또는 응답 계약을 확인하세요'
         coverage['unanalysed'] = coverage['total'] - coverage['analyzed']
