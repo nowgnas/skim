@@ -77,9 +77,25 @@ def payment_candidate(parts, code):
 
 def schema_candidate(parts, path, name, code):
     return (any(part in ('migration', 'migrations', 'migrate') for part in parts)
-            or 'alembic/versions/' in path.lower() or name.endswith('.sql')
+            or 'alembic/versions/' in path.lower()
             or name == 'schema.prisma' or path.lower().endswith('db/schema.rb')
             or bool(re.search(r'\b(?:(?:create|alter|drop)\s+table|(?:add|drop)\s+column|create\s+(?:unique\s+)?index)\b', code)))
+
+
+SQL_LITERAL = re.compile(r"--[^\n]*|/\*[\s\S]*?(?:\*/|\Z)|'(?:''|[^'])*(?:'|\Z)|\$(?P<tag>\w*)\$[\s\S]*?(?:\$(?P=tag)\$|\Z)")
+DDL = re.compile(r'(?im)^\s*(?:(?:create|alter|drop)\s+table|(?:add|drop)\s+column|create\s+(?:unique\s+)?index)\b')
+
+
+def changed_ddl(text):
+    for hunk in re.split(r'(?m)^@@ .*$', text):
+        for sign in ('+', '-'):
+            lines = [line for line in hunk.splitlines() if line.startswith((' ', sign))]
+            source = '\n'.join(line[1:] for line in lines)
+            masked = SQL_LITERAL.sub(lambda match: re.sub(r'[^\n]', ' ', match.group()), source)
+            if any(line.startswith(sign) and DDL.search(code)
+                   for line, code in zip(lines, masked.split('\n'))):
+                return True
+    return False
 
 
 def config_candidate(parts, path, name):
@@ -176,7 +192,7 @@ def added_test_lines(text):
                 yield ''.join(masked)
 
 
-def candidates(path, text, tests, test_diffs=None, *, test_lines=None):
+def signals(path, text, tests, test_diffs=None, *, test_lines=None):
     location = PurePosixPath(path.lower())
     # 경로 조각은 camelCase를 분리하고 확장자를 뗀 이름으로 통일한다.
     parts = tuple(re.sub(r'([a-z])([A-Z])', r'\1_\2', part).lower().split('.')[0]
@@ -186,9 +202,6 @@ def candidates(path, text, tests, test_diffs=None, *, test_lines=None):
     # camelCase 호출도 동일한 식별자로 검사하되 일반 단어 언급은 근거로 쓰지 않는다.
     code = re.sub(r'([a-z])([A-Z])', r'\1_\2', changed).lower()
     rules = {
-        'auth': auth_candidate(parts, name, code),
-        'payments': payment_candidate(parts, code),
-        'db_schema_migration': schema_candidate(parts, path, name, code),
         'config': config_candidate(parts, path, name),
         'install_script': (name in ('setup.sh', 'install.sh', 'bootstrap.sh')
                            or (name.endswith('.sh') and (len(location.parts) == 1
@@ -197,9 +210,33 @@ def candidates(path, text, tests, test_diffs=None, *, test_lines=None):
                            or location.parts[0] == 'bin'),
         'ci_workflow': path.lower().startswith('.github/workflows/'),
         'dependency': bool(re.search(r'(^|/)(package(-lock)?\.json|(?:[^/]+[.-])?lock|requirements[^/]*|pyproject\.toml|go\.(?:mod|sum)|pnpm-lock\.yaml|gemfile|cargo\.toml)$', path.lower())),
-        'secrets': secret_path(path) or 'secrets' in parts or changed_secrets(text),
     }
-    flags = [flag for flag, matches in rules.items() if matches]
+    location_hints = [flag for flag, matches in {
+        'auth': auth_candidate(parts, name, ''),
+        'payments': payment_candidate(parts, ''),
+        'config': rules['config'],
+    }.items() if matches]
+    schema_path = schema_candidate(parts, path, name, '')
+    kind_signals = [flag for flag in ('install_script', 'ci_workflow', 'dependency') if rules[flag]]
+    if schema_path:
+        kind_signals.append('db_schema_migration')
+    if secret_path(path):
+        kind_signals.append('secrets')
+    content_hits = [flag for flag, matches in {
+        'auth': auth_candidate((), '', code),
+        'payments': payment_candidate((), code),
+        'db_schema_migration': schema_candidate((), '', '', code),
+        'secrets': changed_secrets(text),
+    }.items() if matches]
+    hard_floors = []
+    spans = list(changed_spans(text))
+    if secret_path(path) or any(start < match.end() and match.start() < end
+                               for match in SECRET_VALUE.finditer(text) for start, end in spans):
+        hard_floors.append('secrets')
+    # Only standalone SQL statements qualify; strings in source and tests are hints.
+    if schema_path or (name.endswith('.sql') and not is_test(path) and changed_ddl(text)):
+        hard_floors.append('db_schema_migration')
+    test_gap = False
     if not is_test(path) and PurePosixPath(path).suffix in ('.py', '.js', '.ts', '.tsx', '.go', '.rs', '.java', '.rb', '.c', '.cpp'):
         stem = PurePosixPath(path).stem
         test_diffs = test_diffs if test_diffs is not None else {}
@@ -208,8 +245,40 @@ def candidates(path, text, tests, test_diffs=None, *, test_lines=None):
         # 테스트 패키지 초기화 파일 자체는 대응 테스트의 근거가 아니다.
         if not any((PurePosixPath(t).stem != '__init__' and stem == re.sub(r'^(?:test_|spec_)|(?:[._](?:test|spec)|_test)$', '', PurePosixPath(t).stem))
                    or (stem.lower() not in COMMON_STEMS and test_references(stem, test_lines.get(t, ()))) for t in tests):
-            flags.append('logic_without_tests')
-    return flags
+            test_gap = True
+    return dict(location_hints=location_hints, kind_signals=kind_signals,
+                content_hits=content_hits, hard_floors=hard_floors,
+                test_gap=test_gap, mechanical_hints=[])
+
+
+SIGNAL_FIELDS = ('location_hints', 'kind_signals', 'content_hits', 'hard_floors', 'test_gap', 'mechanical_hints')
+
+
+def candidate_view(signals):
+    flags = {flag for key in SIGNAL_FIELDS if key not in ('test_gap', 'mechanical_hints') for flag in signals[key]}
+    if signals['test_gap']:
+        flags.add('logic_without_tests')
+    return sorted(flags)
+
+
+def candidates(path, text, tests, test_diffs=None, *, test_lines=None):
+    return candidate_view(signals(path, text, tests, test_diffs, test_lines=test_lines))
+
+
+def priority(unit):
+    if unit.get('hard_floors'):
+        return 0
+    if unit.get('kind_signals') or unit.get('content_hits'):
+        return 1
+    if unit.get('mechanical_hints') and not unit.get('location_hints'):
+        return 3
+    return 2
+
+
+def allocation_key(unit, focus=()):
+    path = unit['file_path'].lower()
+    supporting = is_test(path) or path.startswith(('docs/', 'doc/')) or path.endswith(('.md', '.rst', '.txt'))
+    return priority(unit), unit['change_id'] not in focus, supporting, int(unit['change_id'][1:])
 
 
 def parse_diff(diff, files=()):
@@ -257,7 +326,15 @@ def parse_diff(diff, files=()):
         overhead = section_sizes.get(path, 0) - sum(len(p[0].encode()) for p in parts)
         for index, (text, old, new) in enumerate(parts):
             excluded = secret_path(path) or bool(old_path and secret_path(old_path))
-            flags = candidates(path, text, tests, test_lines=test_lines)
+            local = signals(path, text, tests, test_lines=test_lines)
+            if old_path:
+                previous = signals(old_path, '', tests, test_lines=test_lines)
+                for key in ('location_hints', 'kind_signals', 'hard_floors'):
+                    local[key] = sorted(set(local[key]) | set(previous[key]))
+            if (not old and old_path and 'similarity index 100%' in body
+                    and not re.search(r'(?m)^(?:old|new) mode ', body)):
+                local['mechanical_hints'] = ['pure_rename']
+            flags = candidate_view(local)
             cleaned = sanitize(text)
             redacted = not excluded and cleaned != text
             if excluded and 'secrets' not in flags:
@@ -267,5 +344,5 @@ def parse_diff(diff, files=()):
                               diff='' if excluded else cleaned, raw_bytes=len(text.encode()) + max(0, overhead) * (index == 0), excluded=excluded,
                               exclusion_reason='민감 경로' if excluded else None,
                               redacted=redacted, redaction_reason='일부 민감 정보 가림' if redacted else None,
-                              candidates=flags))
+                              candidates=flags, **local))
     return units, tests
