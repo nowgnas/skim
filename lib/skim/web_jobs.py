@@ -121,7 +121,7 @@ def record_view(row, now=None):
         else:
             notes.append(first_line(d['error']) or first_line(d['result']))
     return dict(status_label=RECORD_STATUS.get(d['status'], d['status_label']), tone=RECORD_TONE.get(d['status'], ''),
-                facts=facts, note=', '.join(filter(None, notes)), error_line=first_line(d['error']) if failed else '')
+                facts=facts, note=', '.join(filter(None, notes)), error_line=(first_line(d['error']) or first_line(d['result'])) if failed else '')
 
 
 def describe(row):
@@ -209,7 +209,7 @@ def job_record(row, csrf=None, offline=False):
     from .web import esc
     d = jobs.describe(row)
     view = record_view(row)
-    state = ' job-running' if d['status'] == 'running' else ' job-failed' if view['error_line'] else ''
+    state = ' job-running' if d['status'] == 'running' else ' job-failed' if d['status'] in ('failed', 'blocked') else ''
     facts = ''.join('<span class="job-fact"><span class="job-fact-label">' + esc(label) + '</span><span>' + esc(value) + '</span>'
                     + (f'<span class="job-fact-hint">{esc(hint)}</span>' if hint else '') + '</span>'
                     for label, value, hint in view['facts'])

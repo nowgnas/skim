@@ -57,6 +57,30 @@ class StatusPageTests(unittest.TestCase):
         self.assertIn('모두 정상', self.health(body))
         self.assertIn('<details id="codex-setup" class="status-section codex-setup">', body)
 
+    def test_failed_doctor_result_is_visible_in_history_and_payload(self):
+        with closing(connect(self.config)) as conn:
+            row, _ = jobs.enqueue(conn, 'doctor')
+            jobs.claim(conn)
+            jobs.finish(conn, row['id'], 'failed', RESULT, None)
+        card = self.record(self.request('/status')[2], row['id'])
+        self.assertIn('<article class="job-row job-failed">', card)
+        error = '<p class="job-error">' + RESULT.splitlines()[0] + '</p>'
+        self.assertIn(error, card)
+        self.assertLess(card.index(error), card.index('<details'))
+        payload = json.loads(self.request('/jobs/' + str(row['id']))[2])
+        self.assertIsNone(payload['error'])
+        self.assertEqual(payload['record']['error_line'], RESULT.splitlines()[0])
+
+    def test_failed_and_blocked_history_style_without_error_text(self):
+        for status in ('failed', 'blocked'):
+            with self.subTest(status=status), closing(connect(self.config)) as conn:
+                row, _ = jobs.enqueue(conn, 'doctor')
+                jobs.claim(conn)
+                jobs.finish(conn, row['id'], status, None, None)
+                card = self.record(self.request('/status')[2], row['id'])
+                self.assertIn('<article class="job-row job-failed">', card)
+                self.assertIn('<p class="job-error" hidden></p>', card)
+
     def test_failed_jobs_marked_in_single_list(self):
         with closing(connect(self.config)) as conn:
             row, _ = jobs.enqueue(conn, 'repos', 0, 'github.com/org/x')
