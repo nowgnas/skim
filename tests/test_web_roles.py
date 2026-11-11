@@ -70,6 +70,31 @@ class RoleSelectionTests(unittest.TestCase):
         self.assertEqual([row['path'] for row in top_file_rows(rows)], ['orders/total.py', 'billing/refund.py'])
         self.assertEqual(next(row for row in rows if row['path'] == 'billing/refund.py')['role'], '')
 
+    def test_every_high_outside_groups_is_listed_by_name(self):
+        units = [unit('h0', 'orders/total.py')] + [unit(f'h{i}', f'billing/high{i}.py') for i in range(1, 8)]
+        items = dict({'h0': verdict('mid')}, **{f'h{i}': verdict('high') for i in range(1, 8)})
+        pr = pull(units, items, focus=[dict(change_id='h0', reason='주문 금액 계산을 바꾼다')], groups=[group('h0')])
+        highs = [f'billing/high{i}.py' for i in range(1, 8)]
+        self.assertEqual([row['path'] for row in first_look(file_rows(pr))['top']], ['orders/total.py'] + highs)
+        card = file_card(pr)
+        self.assertEqual(re.findall(r'<span class="badge high">[^<]*</span><span class="file-path">([^<]+)', card), highs)
+        self.assertNotIn('더 보기', card)
+
+    def test_core_groups_stay_capped_at_three(self):
+        units = [unit(f'h{i}', f'core{i}.py') for i in range(1, 6)]
+        pr = pull(units, {f'h{i}': verdict('mid') for i in range(1, 6)}, focus=[],
+                  groups=[group(f'h{i}') for i in range(1, 6)])
+        self.assertEqual([row['path'] for row in top_file_rows(file_rows(pr))], ['core1.py', 'core2.py', 'core3.py'])
+
+    def test_empty_groups_keep_every_high_before_mid(self):
+        units = [unit(f'h{i}', f'f{i}.py') for i in range(1, 7)]
+        items = dict({f'h{i}': verdict('high') for i in range(1, 5)}, h5=verdict('mid'), h6=verdict('mid'))
+        rows = file_rows(pull(units, items, focus=[], groups=[]))
+        self.assertEqual([row['path'] for row in top_file_rows(rows)], ['f1.py', 'f2.py', 'f3.py', 'f4.py'])
+        items = dict({f'h{i}': verdict('mid') for i in range(1, 7)}, h1=verdict('high'))
+        rows = file_rows(pull(units, items, focus=[], groups=[]))
+        self.assertEqual([row['path'] for row in top_file_rows(rows)], ['f1.py', 'f2.py', 'f3.py'])
+
     def test_review_order_and_mechanical_fold(self):
         pr = self.grouped()
         pr['units'].append(unit('h7', '.github/workflows/ci.yml', kind_signals=['ci_workflow']))

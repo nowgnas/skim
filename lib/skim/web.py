@@ -50,7 +50,6 @@ RELATION_LABELS = {'caller': '호출부', 'test': '테스트', 'wiring': '연결
                    'docs': '문서', 'config': '설정', 'other': '기타'}
 ROLE_LABELS = {'core': '핵심', 'supporting': '연관', 'mechanical': '기계적'}
 SIGNAL_KEYS = ('location_hints', 'kind_signals', 'content_hits', 'hard_floors', 'mechanical_hints')
-TOP_LIMIT = 6
 SAFETY_LIMIT = 3
 
 
@@ -196,10 +195,11 @@ def top_file_rows(rows):
         return [row for row in rows if row['rank'] >= 2 or row['rule']][:3]
     cores = sorted((row for row in rows if row['role'] == 'core'), key=lambda r: (-r['rank'], r['group_rank']))[:3]
     if not cores:
-        return [row for row in rows if row['rank'] >= 2][:3]
+        cores = [row for row in rows if row['rank'] == 2][:max(0, 3 - sum(row['rank'] == 3 for row in rows))]
     chosen = {row['path'] for row in cores}
-    # 그룹에 못 든 높음도 같은 목록에 둔다. 역할 판단이 틀려도 높음이 사라지지 않는다.
-    return (cores + [row for row in rows if row['rank'] == 3 and row['path'] not in chosen])[:TOP_LIMIT]
+    # 높음은 개수와 상관없이 이름으로 남긴다. 역할 판단이 틀려도 높음이 숫자 뒤로 사라지지 않는다.
+    highs = [row for row in rows if row['rank'] == 3 and row['path'] not in chosen]
+    return cores + highs if cores and cores[0]['role'] == 'core' else highs + cores
 
 
 def first_look(rows):
@@ -208,8 +208,7 @@ def first_look(rows):
     shown = {row['path'] for row in top}
     safety = [row for row in rows if row['path'] not in shown
               and (row['kind_signals'] or row['hard_floors'] or (not row['rank'] and row['location_hints']))]
-    return dict(top=top, more_high=sum(row['rank'] == 3 and row['path'] not in shown for row in rows),
-                safety=safety[:SAFETY_LIMIT], safety_more=max(0, len(safety) - SAFETY_LIMIT),
+    return dict(top=top, safety=safety[:SAFETY_LIMIT], safety_more=max(0, len(safety) - SAFETY_LIMIT),
                 hints=sum(row['hint'] for row in rows), mechanical=sum(foldable(row) for row in rows))
 
 
@@ -314,8 +313,6 @@ def file_card(pr):
         level = level_of(row)
         body += (f'<a class="file-row" href="{esc(file_href(row["path"]))}"><span class="badge {level}">{label(level)}</span>'
                  f'<span class="file-path">{esc(row["path"])}</span><span class="file-note">{notes}</span></a>')
-    if look['more_high']:
-        body += f'<p class="file-summary"><a href="{base}?order=priority#file-changes">높음 파일 {look["more_high"]}개 더 보기</a></p>'
     body += look_footer(look, file_href, base)
     return body + (distribution(rows, len(look['top'])) if rows else '') + '</div>'
 
@@ -972,8 +969,6 @@ def detail(pr, query, config, offline=False, analysis_panel="", csrf=None):
                         '<div class="focus-inline">' + file_panel(row, units_by_file[row['path']], shown['items'], link, inline=True,
                                                                    known_symbols=candidates, file_href=file_href) + '</div></details>')
         content += '</div>'
-        if look and look['more_high']:
-            content += f'<p class="file-summary"><a href="?order=priority#file-changes">높음 파일 {look["more_high"]}개 더 보기</a></p>'
     else:
         content += '<p class="muted">' + ('높음 또는 보통으로 분석된 파일이 없습니다.' if current else '분석 후 중요한 파일과 선정 이유를 확인할 수 있습니다.') + '</p>'
     if look:
