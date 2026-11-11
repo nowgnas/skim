@@ -2,7 +2,7 @@
 from collections import defaultdict
 
 from .protocol import prompt
-from .units import changed_lines, allocation_key, SIGNAL_FIELDS
+from .units import changed_lines, allocation_key, call_context, SIGNAL_FIELDS
 
 
 def _prefix(text, limit):
@@ -38,6 +38,7 @@ def overview_input(units, metadata, max_bytes=32 * 1024):
             sample = {'change_id': unit['change_id'], 'file_path': path, 'excerpt': excerpt,
                       'excerpt_truncated': len(excerpt.encode('utf-8')) < len((changed or unit['diff']).encode('utf-8'))}
             sample.update({key: unit[key] for key in SIGNAL_FIELDS})
+            sample.update(call_context(unit))
             data['samples'].append(sample)
             data['coverage']['sampled_units'] = len(data['samples'])
             if len(prompt('overview', data).encode('utf-8')) > max_bytes:
@@ -75,6 +76,7 @@ def synthesis_input(units, metadata, items, coverage, overview=None, uncertainti
                    'importance': item['importance'], 'reason': _prefix(item['reason'], 300),
                    'risk_flags': item['risk_flags'], 'behavior': item['behavior']}
         summary.update({key: unit[key] for key in SIGNAL_FIELDS})
+        summary.update(call_context(unit, excerpt=False))
         data['items'].append(summary)
         data['coverage']['synthesis_included'] = len(data['items'])
         data['coverage']['synthesis_omitted'] = len(items) - len(data['items'])
