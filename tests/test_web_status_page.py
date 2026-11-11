@@ -1,5 +1,6 @@
 """상태 화면: 점검 결과를 항목별로 요약하고 작업 기록을 한 목록으로 보여준다."""
 from contextlib import closing
+import json
 import unittest
 
 from test_web import WebTests
@@ -67,6 +68,67 @@ class StatusPageTests(unittest.TestCase):
         self.assertIn('<p class="job-error">저장소 조회 실패: GitHub 조직 SSO 승인 필요</p>', records)
         self.assertIn('action="/jobs/collect"', body.split('<h2>작업 기록</h2>', 1)[0].rsplit('<section', 1)[1] + records[:2000])
         self.assertNotIn('활성 작업', body)
+
+    def record(self, body, job_id):
+        records = body.split('<h2>작업 기록</h2>', 1)[1]
+        return '<article' + records.split(f'data-job-id="{job_id}"', 1)[0].rsplit('<article', 1)[1] + records.split(f'data-job-id="{job_id}"', 1)[1].split('</article>', 1)[0]
+
+    def test_history_card_shows_badge_target_kst_times_duration_and_outcome(self):
+        with closing(connect(self.config)) as conn, conn:
+            done, _ = jobs.enqueue(conn, 'repos', 0, 'github.com/demo-org')
+            jobs.claim(conn)
+            jobs.finish(conn, done['id'], 'completed', '저장소 3개를 찾았습니다.\n둘째 줄')
+            conn.execute("UPDATE jobs SET started_at='2026-11-01T12:40:00+00:00',finished_at='2026-11-01T12:42:04+00:00' WHERE id=?", (done['id'],))
+        card = self.record(self.request('/status')[2], done['id'])
+        self.assertIn('<article class="job-row">', card)
+        self.assertIn('<span class="badge job-status ok" aria-live="polite" data-job-status>완료</span>', card)
+        self.assertIn(f'<h3 class="job-title">저장소 조회 #{done["id"]}</h3><span class="job-target">github.com/demo-org</span>', card)
+        self.assertRegex(card, r'<span class="job-fact-label">시작</span><span>[^<]*21:40 KST</span>')
+        self.assertRegex(card, r'<span class="job-fact-label">종료</span><span>[^<]*21:42 KST</span>')
+        self.assertIn('<span class="job-fact-label">소요</span><span>2분 4초</span>', card)
+        # The one-line outcome is readable without opening the details.
+        self.assertIn('<p class="job-note">저장소 3개를 찾았습니다.</p>', card)
+        self.assertIn('<p class="job-error" hidden></p>', card)
+        self.assertIn('둘째 줄</pre>', card)
+
+    def test_running_job_is_prominent_and_waiting_job_hides_duration(self):
+        with closing(connect(self.config)) as conn:
+            waiting, _ = jobs.enqueue(conn, 'doctor')
+            body = self.request('/status')[2]
+            card = self.record(body, waiting['id'])
+            self.assertIn('<article class="job-row">', card)
+            self.assertIn('data-job-status>대기 중</span>', card)
+            self.assertIn('<span class="job-fact-label">요청</span>', card)
+            self.assertNotIn('소요', card)
+            self.assertNotIn('경과', card)
+            self.assertNotIn('job-target', card)
+            jobs.claim(conn)
+            running = conn.execute("SELECT * FROM jobs WHERE status='running'").fetchone()
+            jobs.progress(conn, running['id'], '저장소 수집 중', 2, 5)
+        body = self.request('/status')[2]
+        card = self.record(body, running['id'])
+        self.assertIn('<article class="job-row job-running">', card)
+        self.assertIn('<span class="badge job-status running" aria-live="polite" data-job-status>실행 중</span>', card)
+        self.assertIn(f'data-job-id="{running["id"]}" data-job-active="1" data-job-record="1"', body)
+        self.assertIn('<span class="job-fact-label">경과</span>', card)
+        self.assertIn('KST</span>', card)
+        self.assertIn('<p class="job-note">저장소 수집 중 2/5</p>', card)
+        self.assertIn('aria-label="작업 진행" max="5" value="2"', card)
+
+    def test_poll_payload_carries_the_card_fields(self):
+        with closing(connect(self.config)) as conn:
+            row, _ = jobs.enqueue(conn, 'repos', 0, 'github.com/org/x')
+            jobs.claim(conn)
+            jobs.finish(conn, row['id'], 'blocked', None, '차단 사유 첫 줄\n자세한 안내')
+        payload = json.loads(self.request('/jobs/' + str(row['id']))[2])
+        view = payload['record']
+        self.assertEqual((view['status_label'], view['tone'], view['error_line'], view['note']), ('차단', 'high', '차단 사유 첫 줄', ''))
+        self.assertEqual([fact[0] for fact in view['facts']], ['시작', '종료', '소요'])
+        self.assertTrue(all(len(fact) == 3 for fact in view['facts']))
+        self.assertTrue(view['facts'][0][1].endswith(' KST'))
+        # The summary contract used by the other job boxes is unchanged.
+        self.assertEqual(payload['summary'], ', '.join(payload['summary_parts']))
+        self.assertIn('<article class="job-row job-failed">', self.record(self.request('/status')[2], row['id']))
 
 
 if __name__ == '__main__':
