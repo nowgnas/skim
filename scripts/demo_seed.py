@@ -28,15 +28,33 @@ class DemoModel:
     def generate(self, request, schema):
         value = json.loads(request.split('\n', 1)[1])
         if value['stage'] == 'synthesis':
-            return json.dumps({'intent': '변경 목적과 검토 우선순위를 보여 주는 가짜 PR입니다.', 'focus': [], 'groups': []})
-        items = []
-        for unit in value['data']['units']:
-            path = unit['file_path']
-            level = 'high' if 'auth' in path else 'low' if path.endswith('.md') else 'mid'
-            items.append(dict(change_id=unit['change_id'], importance=level,
-                              reason='인증 경계를 확인하세요.' if level == 'high' else '변경 동작과 테스트를 확인하세요.',
-                              behavior='changed', risk_flags=['auth'] if level == 'high' else []))
-        return json.dumps(dict(items=items, uncertainties=[]))
+            return json.dumps(self.synthesis(value['data']['items']))
+        return json.dumps(dict(items=[self.verdict(unit) for unit in value['data']['units']], uncertainties=[]))
+
+    @staticmethod
+    def verdict(unit):
+        path = unit['file_path']
+        # 경로에 auth가 있다는 이유만으로 높음을 주지 않는다. 높음은 실제 동작 변경에만 준다.
+        if path == 'service.py':
+            level, behavior, reason, flags = 'high', 'changed', '결제 승인 전에 세션 만료를 확인하는 순서를 바꿉니다.', ['payments']
+        elif path.startswith('auth/'):
+            level, behavior, reason, flags = 'low', 'unchanged', '인증 디렉터리에 있지만 동작은 바뀌지 않습니다.', []
+        elif path.endswith('.md'):
+            level, behavior, reason, flags = 'low', 'changed', '문서 설명을 고칩니다.', []
+        else:
+            level, behavior, reason, flags = 'mid', 'changed', '변경 동작과 테스트를 확인하세요.', []
+        return dict(change_id=unit['change_id'], importance=level, reason=reason, behavior=behavior, risk_flags=flags)
+
+    @staticmethod
+    def synthesis(items):
+        ids = {item['file_path']: item['change_id'] for item in items}
+        focus, groups = [], []
+        if 'service.py' in ids:
+            reason = '결제 승인 흐름의 세션 확인 순서를 바꾸는 핵심 변경입니다.'
+            focus = [dict(change_id=ids['service.py'], reason=reason)]
+            groups = [dict(core_change_id=ids['service.py'], reason=reason,
+                           related=[dict(change_id=ids[path], relation='wiring') for path in ('auth/session.py',) if path in ids])]
+        return dict(intent='변경 목적과 검토 우선순위를 보여 주는 가짜 PR입니다.', focus=focus, groups=groups)
 
 
 def seed(config):

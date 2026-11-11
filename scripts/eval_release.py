@@ -91,7 +91,7 @@ def assess(case, result, requests, diff):
                       watch['model_flag_absent'] in f['risk_flags'] for f in files)
         expectations['watch'] = dict(watch, model_flag_present=present, met=not present)
     rows = file_rows(dict(units=units, items=items, result=result))
-    top3 = [row['path'] for row in top_file_rows(rows)]
+    top3 = [row['path'] for row in top_file_rows(rows)[:3]]
     expected = set(case['high_files'])
     matched = len(expected.intersection(top3))
     metrics = dict(model_high_files=sorted(f['file_path'] for f in files if f.get('importance') == 'high'),
