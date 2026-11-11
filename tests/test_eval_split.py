@@ -269,7 +269,22 @@ class CorpusTests(unittest.TestCase):
             derived = tmp / 'derived-home'
             derived.mkdir()
             (derived / 'config').symlink_to(ROOT / 'eval/skim-ko-5', target_is_directory=True)
-            homes = [ROOT / 'eval', ROOT / 'eval/skim-ko-5', ROOT / 'eval/skim-ko-5/nested', linked, derived, corpus]
+            config_file = tmp / 'config-file-home'
+            (config_file / 'config').mkdir(parents=True)
+            (config_file / 'config/config.json').symlink_to(ROOT / 'eval/skim-ko-5/manifest.json')
+            missing_file = tmp / 'missing-file-home'
+            (missing_file / 'config').mkdir(parents=True)
+            (missing_file / 'config/config.json').symlink_to(ROOT / 'eval/skim-ko-5/nested.json')
+            cache = tmp / 'cache-home'
+            (cache / 'data').mkdir(parents=True)
+            (cache / 'data/cache').symlink_to(ROOT / 'eval/skim-ko-5', target_is_directory=True)
+            chained = tmp / 'chained-home'
+            (tmp / 'elsewhere/cache').mkdir(parents=True)
+            (tmp / 'elsewhere/cache/diffs').symlink_to(corpus, target_is_directory=True)
+            chained.mkdir()
+            (chained / 'data').symlink_to(tmp / 'elsewhere', target_is_directory=True)
+            homes = [ROOT / 'eval', ROOT / 'eval/skim-ko-5', ROOT / 'eval/skim-ko-5/nested', linked, derived, corpus,
+                     config_file, missing_file, cache, chained]
             for home in homes:
                 argv = ['eval_release.py', '--home', str(home), '--corpus', str(corpus), '--compare',
                         '--out', str(tmp / 'comparison.json')]
@@ -283,6 +298,30 @@ class CorpusTests(unittest.TestCase):
             self.assertFalse((ROOT / 'eval/skim-ko-5/config').exists())
             self.assertFalse((ROOT / 'eval/skim-ko-5/nested').exists())
             self.assertFalse((corpus / 'config').exists())
+            self.assertFalse((ROOT / 'eval/skim-ko-5/nested.json').exists())
+
+    def test_compare_cli_allows_home_outside_eval(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            corpus = tmp / 'corpus'
+            corpus.mkdir()
+            home = tmp / 'home'
+            (tmp / 'elsewhere').mkdir()
+            (home / 'config').mkdir(parents=True)
+            (home / 'config/config.json').write_text('{}')
+            (home / 'data/cache/diffs').mkdir(parents=True)
+            (home / 'data/logs').symlink_to(tmp / 'elsewhere', target_is_directory=True)
+            (home / 'data/loop').symlink_to(home / 'data', target_is_directory=True)
+            for target in (home, tmp / 'new-home'):
+                argv = ['eval_release.py', '--home', str(target), '--corpus', str(corpus), '--compare',
+                        '--out', str(tmp / 'comparison.json')]
+                with self.subTest(home=target), patch.object(sys, 'argv', argv), patch.dict(
+                        'os.environ'), patch('eval_release.Config.load') as load, patch(
+                        'eval_release.compare') as compare:
+                    self.assertEqual(evaluation.main(), 0)
+                    self.assertEqual(evaluation.os.environ['SKIM_HOME'], str(target.resolve()))
+                load.assert_called_once_with()
+                compare.assert_called_once_with(load.return_value, corpus.resolve(), (tmp / 'comparison.json').resolve())
 
     def test_auth_rename_fixture_preserves_behavior(self):
         """The low label holds only if the diff renames private and local names and nothing else."""

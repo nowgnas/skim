@@ -309,10 +309,20 @@ def compare(config, corpus, out):
 
 
 def writes_into_corpus(home, source):
-    """Config.load() creates config/ and data/ under home, so check where those really land."""
+    """Config.load() and the run write under home, config/ and data/, so follow every link below them."""
     protected = ((ROOT / 'eval').resolve(), source)
-    targets = [home] + [(home / name).resolve() for name in ('config', 'data')]
-    return any(target == root or root in target.parents for target in targets for root in protected)
+    pending, seen = [home, home / 'config', home / 'data'], set()
+    while pending:
+        # A link to a file that does not exist yet still resolves to where the write would land.
+        target = pending.pop().resolve()
+        if target in seen:
+            continue
+        seen.add(target)
+        if any(target == root or root in target.parents for root in protected):
+            return True
+        if target != home and target.is_dir():
+            pending.extend(target.iterdir())
+    return False
 
 
 def main():
