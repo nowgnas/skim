@@ -6,7 +6,7 @@ from pathlib import Path
 import re
 import sys
 
-from eval_release import ROOT, PROMPT_VERSION, SCHEMA_VERSION, prompt_hash, sha256, assess, confirmation_hash, saved_requests, summarize
+from eval_release import ROOT, PROMPT_VERSION, SCHEMA_VERSION, prompt_hash, sha256, assess, confirmation_hash, saved_requests, summarize, validate_binding
 from skim.analyze.units import SANITIZATION_POLICY, parse_diff
 
 
@@ -39,7 +39,7 @@ def accepted_misses(manifest):
 
 
 def check(root=ROOT, version=PROMPT_VERSION):
-    if version != 'skim-ko-5':
+    if version not in ('skim-ko-3', 'skim-ko-4', 'skim-ko-5', 'skim-ko-6'):
         raise ValueError('지원하지 않는 프롬프트 버전')
     corpus = root / 'eval' / version
     manifest = json.loads((corpus / 'manifest.json').read_text())
@@ -51,13 +51,8 @@ def check(root=ROOT, version=PROMPT_VERSION):
     report = json.loads((corpus / 'results.json').read_text())
     if not isinstance(report.get('reviewed_by'), str) or not report['reviewed_by'].strip():
         raise ValueError('reviewed_by 누락: 결과와 원본 출력 사람 검토 필요')
-    if manifest['prompt_version'] != version or report['prompt_version'] != version:
-        raise ValueError('프롬프트 버전 불일치')
-    if report['prompt_sha256'] != prompt_hash():
-        raise ValueError('프롬프트 해시 불일치')
-    if report['schema_version'] != SCHEMA_VERSION:
-        raise ValueError('스키마 버전 불일치')
-    if report.get('sanitization_policy') != SANITIZATION_POLICY:
+    validate_binding(report, manifest, version)
+    if version == PROMPT_VERSION and report.get('sanitization_policy') != SANITIZATION_POLICY:
         raise ValueError('민감 정보 정제 정책 평가 불일치: 실제 모델 재평가 필요')
     for key in ('model', 'cli_version', 'run_timestamp'):
         if not report.get(key) or report[key] == 'unknown':

@@ -26,7 +26,7 @@ class EvalEvidenceTests(unittest.TestCase):
         units, _ = parse_diff(diff)
         self.assertGreater(len(chunk_units(units, dict(title=case['title'], body=case['body'], tests=[]))), 1)
         result = dict(status='completed', intent='주문 계산 변경', units=units,
-                      items=[dict(change_id=units[0]['change_id'], importance='high', reason='핵심', risk_flags=[])],
+                      items=[dict(change_id=units[0]['change_id'], importance='high', reason='핵심', behavior='changed', risk_flags=[])],
                       files=[dict(file_path=units[0]['file_path'], importance='high', candidates=[]),
                              dict(file_path='infra/deployment.yaml', importance='low', candidates=['config'])])
         evidence = assess(case, result, [], diff)['metrics']
@@ -48,7 +48,7 @@ class EvalEvidenceTests(unittest.TestCase):
         self.assertEqual(baseline['top3_recall'], 0.5)
         self.assertEqual(baseline['intent'], '별도 목적')
         low = dict(units=[dict(change_id='h1', file_path='docs/readme.md', candidates=[])],
-                   items=[dict(change_id='h1', importance='low', reason='문서', risk_flags=[])],
+                   items=[dict(change_id='h1', importance='low', reason='문서', behavior='changed', risk_flags=[])],
                    files=[dict(file_path='docs/readme.md', importance='low', candidates=[])])
         self.assertEqual(assess(dict(high_files=[]), low, [], '')['metrics']['top3'], [])
 
@@ -73,9 +73,9 @@ class EvalEvidenceTests(unittest.TestCase):
                 requests.append(request)
                 payload = json.loads(request.split('\n', 1)[1])
                 if payload['stage'] == 'synthesis':
-                    return '{"intent":"설정 변경","focus":[]}'
+                    return '{"intent":"설정 변경","focus":[],"groups":[]}'
                 return json.dumps(dict(items=[dict(change_id=u['change_id'], importance='high',
-                    reason='설정 변경', risk_flags=['secrets']) for u in payload['data']['units']], uncertainties=[]))
+                    reason='설정 변경', behavior='changed', risk_flags=['secrets']) for u in payload['data']['units']], uncertainties=[]))
 
             def verify(adapter):
                 adapter.model, adapter.cli_version = 'offline-test', 'test-cli'
@@ -112,7 +112,7 @@ class EvalEvidenceTests(unittest.TestCase):
         for status in ('unanalysed', 'excluded', 'omitted', 'analyzed'):
             for u in units:
                 u['status'] = status
-            result['items'] = [dict(change_id=u['change_id'], importance='mid', reason='확인', risk_flags=[]) for u in units] if status == 'analyzed' else []
+            result['items'] = [dict(change_id=u['change_id'], importance='mid', reason='확인', behavior='changed', risk_flags=[]) for u in units] if status == 'analyzed' else []
             self.assertTrue(met())
         result['units'] = units[:-1]
         self.assertFalse(met())
@@ -201,6 +201,20 @@ class EvalEvidenceTests(unittest.TestCase):
             with patch.object(sys, 'argv', ['eval_release.py', '--out', str(out), '--review', 'Reviewer']), patch('eval_release.Config.load', side_effect=AssertionError('no config')), patch('eval_release.CodexAdapter', side_effect=AssertionError('no model')):
                 self.assertEqual(main(), 0)
             self.assertEqual(json.loads(out.read_text())['reviewed_by'], 'Reviewer')
+
+    def test_historical_version_rescore_keeps_recorded_binding(self):
+        recorded = json.loads((ROOT / 'eval/skim-ko-5/results.json').read_text())
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / 'results.json'
+            out.write_text(json.dumps(recorded))
+            argv = ['eval_release.py', '--version', 'skim-ko-5', '--out', str(out), '--rescore']
+            with patch.object(sys, 'argv', argv), patch('eval_release.prompt_hash', side_effect=AssertionError('no live hash')), patch('eval_release.Config.load', side_effect=AssertionError('no config')), patch('eval_release.CodexAdapter', side_effect=AssertionError('no model')):
+                main()
+            updated = json.loads(out.read_text())
+        self.assertNotIn('sanitization_policy', recorded)
+        for key in ('prompt_version', 'prompt_sha256', 'schema_version'):
+            self.assertEqual(updated[key], recorded[key])
+        self.assertEqual(len(updated['cases']), len(recorded['cases']))
 
     @patch('eval_release.SCHEMA_VERSION', '1')
     @patch('eval_release.PROMPT_VERSION', 'skim-ko-3')

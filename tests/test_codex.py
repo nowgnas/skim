@@ -324,7 +324,7 @@ class CodexTests(unittest.TestCase):
                             return original(command, **kw)
                         attempts.append(command)
                         if recover and len(attempts) == 2:
-                            self.answer = {'intent': '요약', 'focus': []}
+                            self.answer = {'intent': '요약', 'focus': [], 'groups': []}
                             return original(command, **kw)
                         if failure == 'timeout':
                             raise subprocess.TimeoutExpired(command, 120)
@@ -334,7 +334,7 @@ class CodexTests(unittest.TestCase):
                     analyzer = Analyzer(None, None, adapter=self.adapter)
                     with patch.object(analyzer, '_reserve') as reserve:
                         if recover:
-                            self.assertEqual(analyzer._call('synthesis', {}, SYNTHESIS_SCHEMA), {'intent': '요약', 'focus': []})
+                            self.assertEqual(analyzer._call('synthesis', {}, SYNTHESIS_SCHEMA), {'intent': '요약', 'focus': [], 'groups': []})
                         else:
                             with self.assertRaises(ValueError) as caught:
                                 analyzer._call('synthesis', {}, SYNTHESIS_SCHEMA)

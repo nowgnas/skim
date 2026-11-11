@@ -28,14 +28,14 @@ class DemoModel:
     def generate(self, request, schema):
         value = json.loads(request.split('\n', 1)[1])
         if value['stage'] == 'synthesis':
-            return json.dumps({'intent': '변경 목적과 검토 우선순위를 보여 주는 가짜 PR입니다.', 'focus': []})
+            return json.dumps({'intent': '변경 목적과 검토 우선순위를 보여 주는 가짜 PR입니다.', 'focus': [], 'groups': []})
         items = []
         for unit in value['data']['units']:
             path = unit['file_path']
             level = 'high' if 'auth' in path else 'low' if path.endswith('.md') else 'mid'
             items.append(dict(change_id=unit['change_id'], importance=level,
                               reason='인증 경계를 확인하세요.' if level == 'high' else '변경 동작과 테스트를 확인하세요.',
-                              risk_flags=['auth'] if level == 'high' else []))
+                              behavior='changed', risk_flags=['auth'] if level == 'high' else []))
         return json.dumps(dict(items=items, uncertainties=[]))
 
 

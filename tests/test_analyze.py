@@ -43,10 +43,10 @@ class Fake:
         if self.invalid:
             return '{"items":[],"uncertainties":[]}'
         if value['stage'] == 'synthesis':
-            return '{"intent":"인증 동작을 변경한다.","focus":[]}'
+            return '{"intent":"인증 동작을 변경한다.","focus":[],"groups":[]}'
         if value['stage'] == 'overview':
             return '{"intent":"인증 동작을 변경한다.","focus":[]}'
-        return json.dumps(dict(items=[dict(change_id=u['change_id'], importance='high' if u['change_id'] == 'h2' else 'low', reason='변경된 인증 동작 검토', risk_flags=[]) for u in value['data']['units']], uncertainties=[]))
+        return json.dumps(dict(items=[dict(change_id=u['change_id'], importance='high' if u['change_id'] == 'h2' else 'low', reason='변경된 인증 동작 검토', behavior='changed', risk_flags=[]) for u in value['data']['units']], uncertainties=[]))
 
 
 class AnalysisTests(unittest.TestCase):
@@ -66,6 +66,104 @@ class AnalysisTests(unittest.TestCase):
         self.snapshot(DIFF)
         self.fake = Fake()
         self.analyzer = Analyzer(self.conn, self.config, self.fake, today=lambda: '2026-10-31')
+
+    def test_structured_priority_ignores_candidate_union_and_test_gap(self):
+        from skim.analyze.units import allocation_key
+        from skim.analyze.context import overview_input
+        base = parse_diff('', [{'filename': 'app.py'}])[0][0]
+        units = [dict(base, change_id=f'h{i}', file_path=f'src/{i}.py', candidates=['auth']) for i in range(1, 8)]
+        units[0]['mechanical_hints'] = ['pure_rename']
+        units[1]['location_hints'] = ['auth']
+        units[2]['test_gap'] = True
+        units[3]['content_hits'] = ['auth']
+        units[4]['kind_signals'] = ['ci_workflow']
+        units[5]['hard_floors'] = ['secrets']
+        units[6]['file_path'] = 'tests/test_app.py'
+        expected = ['h6', 'h4', 'h5', 'h2', 'h3', 'h7', 'h1']
+        self.assertEqual([u['change_id'] for u in sorted(units, key=allocation_key)], expected)
+        chunk = chunk_units(units, {})[0]
+        self.assertEqual([u['change_id'] for u in chunk['units']], expected)
+        self.assertNotIn('candidates', chunk['units'][0])
+        self.assertIn('hard_floors', chunk['units'][0])
+        focused = chunk_units(units, {}, overview={'intent': '확인', 'focus': [{'change_id': 'h5', 'reason': '핵심'}]})
+        self.assertEqual([u['change_id'] for u in focused[0]['units']][:3], ['h6', 'h5', 'h4'])
+        samples = overview_input(units, {})['samples']
+        self.assertEqual([u['change_id'] for u in samples], expected)
+
+    def test_overview_round_robin_keeps_other_files(self):
+        from skim.analyze.context import overview_input
+        base = parse_diff('', [{'filename': 'app.py'}])[0][0]
+        units = [dict(base, change_id=f'h{i}', content_hits=['auth']) for i in range(1, 4)]
+        units.append(dict(base, change_id='h4', file_path='other.py'))
+        self.assertEqual([u['change_id'] for u in overview_input(units, {})['samples']], ['h1', 'h4', 'h2', 'h3'])
+
+    def test_raw_budget_prioritizes_floor_over_test_gap(self):
+        base = parse_diff('', [{'filename': 'app.py'}])[0][0]
+        units = [dict(base, change_id='h1', raw_bytes=700000, test_gap=True),
+                 dict(base, change_id='h2', raw_bytes=700000, hard_floors=['db_schema_migration'])]
+        with patch('skim.analyze.parse_diff', return_value=(units, [])):
+            result = self.analyzer.run()[0]
+        self.assertEqual([item['change_id'] for item in result['items']], ['h2'])
+        self.assertEqual(result['units'][0]['omission_reason'], '정제 전 diff 1 MiB 초과')
+
+    def test_groups_invalid_only_discard_groups(self):
+        from skim.analyze.protocol import validate_synthesis
+        focus = [{'change_id': 'h1', 'reason': '핵심'}]
+        valid = {'core_change_id': 'h1', 'reason': '핵심', 'related': [{'change_id': 'h2', 'relation': 'caller'}]}
+        good = dict(intent='동작 변경', focus=focus, groups=[valid])
+        self.assertEqual(validate_synthesis(json.dumps(good), {'h1', 'h2'}), good)
+        for groups in ([dict(valid, core_change_id='h2')], [valid, valid],
+                       [dict(valid, related=[{'change_id': 'h1', 'relation': 'test'}])],
+                       [dict(valid, related=[{'change_id': 'h9', 'relation': 'test'}])],
+                       [dict(valid, related=[{'change_id': 'h2', 'relation': 'unknown'}])],
+                       [dict(valid, reason='x' * 301)], [valid] * 21, None):
+            with self.subTest(groups=groups):
+                result = validate_synthesis(json.dumps(dict(good, groups=groups)), {'h1', 'h2'})
+                self.assertEqual(result, dict(good, groups=[]))
+        other = dict(core_change_id='h3', reason='다른 핵심', related=[{'change_id': 'h2', 'relation': 'test'}])
+        result = validate_synthesis(json.dumps(dict(good, focus=focus + [{'change_id': 'h3', 'reason': '다른 핵심'}],
+                                                   groups=[valid, other])), {'h1', 'h2', 'h3'})
+        self.assertEqual(result['groups'], [])
+
+    def test_synthesis_budget_preserves_high_floor_focus_and_only_included_ids(self):
+        from skim.analyze.context import synthesis_input
+        base = parse_diff('', [{'filename': 'app.py'}])[0][0]
+        units = [dict(base, change_id=f'h{i}', file_path=f'{i}.py') for i in range(1, 41)]
+        units[-1]['hard_floors'] = ['secrets']
+        items = [dict(change_id=u['change_id'], importance='high' if u['change_id'] == 'h39' else 'low',
+                      behavior='unchanged', reason='근거' * 200, risk_flags=[]) for u in units]
+        overview = dict(intent='목적', focus=[dict(change_id='h38', reason='핵심')])
+        data = synthesis_input(units, {}, items, {}, overview, [dict(change_id='h37', reason='미확인')], max_bytes=10000)
+        ids = {i['change_id'] for i in data['items']}
+        self.assertTrue({'h38', 'h39', 'h40'} <= ids)
+        self.assertGreater(data['coverage']['synthesis_omitted'], 0)
+        self.assertTrue(all(i['change_id'] in ids for i in data['uncertainties']))
+        self.assertLessEqual(len(prompt('synthesis', data).encode()), 10000)
+        self.assertEqual(data['items'][0]['behavior'], 'unchanged')
+
+    def test_redacted_group_failure_keeps_synthesis_and_chunk_results(self):
+        original = self.fake.generate
+
+        def generate(request, schema):
+            value = json.loads(original(request, schema))
+            if '"stage":"synthesis"' in request:
+                value['focus'] = [dict(change_id='h1', reason='핵심')]
+                value['groups'] = [dict(core_change_id='h1', reason='ghp_a ' * 45, related=[])]
+            return json.dumps(value)
+
+        self.fake.generate = generate
+        result = self.analyzer.run()[0]
+        self.assertEqual(result['status'], 'completed')
+        self.assertEqual(result['groups'], [])
+        self.assertTrue(result['intent'])
+        self.assertEqual(len(result['items']), 2)
+        self.assertEqual(len(self.fake.calls), 2)
+
+    def test_behavior_is_required_and_closed_enum(self):
+        item = dict(change_id='h1', importance='low', reason='변경', risk_flags=[])
+        for candidate in (item, dict(item, behavior='mechanical')):
+            with self.assertRaises(ValueError):
+                validate_chunk(json.dumps(dict(items=[candidate], uncertainties=[])), {'h1'})
 
     def test_prompt_defines_all_risk_flags(self):
         from skim.analyze.protocol import FLAGS
@@ -182,13 +280,13 @@ class AnalysisTests(unittest.TestCase):
 
     def test_overview_input_is_bounded_and_skips_excluded_units(self):
         from skim.analyze.context import overview_input
-        units = [dict(change_id=f'h{i}', file_path=f'파일{i}.py', diff='+변경내용' * 100,
+        units = [dict(parse_diff('', [{'filename': 'app.py'}])[0][0], change_id=f'h{i}', file_path=f'파일{i}.py', diff='+변경내용' * 100,
                       excluded=False, omission_reason=None) for i in range(1, 16)]
         units.extend([dict(change_id='h100', file_path='.env', diff='do-not-send', excluded=True),
                       dict(change_id='h101', file_path='omitted.py', diff='do-not-send-either',
                            excluded=False, omission_reason='한도')])
-        data = overview_input(units, {'title': '제목', 'body': '설명'}, max_bytes=4096)
-        self.assertLessEqual(len(prompt('overview', data).encode('utf-8')), 4096)
+        data = overview_input(units, {'title': '제목', 'body': '설명'}, max_bytes=8192)
+        self.assertLessEqual(len(prompt('overview', data).encode('utf-8')), 8192)
         self.assertEqual(data['coverage']['excluded_units'], 1)
         self.assertEqual(data['coverage']['omitted_units'], 1)
         self.assertNotIn('do-not-send', json.dumps(data))
@@ -232,9 +330,9 @@ class AnalysisTests(unittest.TestCase):
         self.assertNotIn('overview', chunks[0])
         self.assertLessEqual(len(prompt('chunk', chunks[0]).encode()), plain + 16)
         from skim.analyze.context import synthesis_input
-        units = [dict(change_id=f'h{i}', file_path='가' * 500 + str(i), excluded=False) for i in range(500)]
+        units = [dict(base, change_id=f'h{i}', file_path='가' * 500 + str(i), excluded=False) for i in range(500)]
         items = [dict(change_id=unit['change_id'], importance='high', reason='이유' * 250,
-                      risk_flags=[]) for unit in units]
+                      behavior='changed', risk_flags=[]) for unit in units]
         data = synthesis_input(units, {'title': '제목', 'body': '본문'}, items, {}, max_bytes=8192)
         self.assertLessEqual(len(prompt('synthesis', data).encode()), 8192)
         self.assertGreater(data['coverage']['synthesis_omitted'], 0)
@@ -290,7 +388,7 @@ class AnalysisTests(unittest.TestCase):
         self.snapshot(diff)
         original = self.fake.generate
         local = dict(change_id='h1', reason='청크 안의 미확인 내용')
-        foreign = dict(change_id='h101', reason='다른 청크의 미확인 내용')
+        foreign = dict(change_id='h100', reason='다른 청크의 미확인 내용')
 
         for mismatch in (None, 'missing', 'duplicate', 'foreign'):
             with self.subTest(mismatch=mismatch):
@@ -304,16 +402,16 @@ class AnalysisTests(unittest.TestCase):
                     if payload['stage'] == 'overview':
                         self.assertIn('h101', {u['change_id'] for u in payload['data']['samples']})
                         value['focus'] = [dict(change_id='h101', reason='전체 변경의 핵심')]
-                    elif payload['stage'] == 'chunk' and payload['data']['units'][0]['change_id'] == 'h1':
+                    elif payload['stage'] == 'chunk' and payload['data']['units'][0]['change_id'] == 'h101':
                         self.assertEqual(payload['data']['overview']['focus'][0]['change_id'], 'h101')
-                        self.assertNotIn('h101', {u['change_id'] for u in payload['data']['units']})
+                        self.assertNotIn('h100', {u['change_id'] for u in payload['data']['units']})
                         value['uncertainties'] = [foreign, local]
                         if mismatch == 'missing':
                             value['items'].pop()
                         elif mismatch == 'duplicate':
                             value['items'][-1] = value['items'][0]
                         elif mismatch == 'foreign':
-                            value['items'][-1]['change_id'] = 'h101'
+                            value['items'][-1]['change_id'] = 'h100'
                     return json.dumps(value)
 
                 self.fake.generate = generate
@@ -382,7 +480,7 @@ new mode 100755
         self.assertTrue(next(u for u in units if u['file_path'] == 'pic.png')['binary'])
 
     def test_schema_rejects_missing_duplicate_foreign_extra_and_logic_flag(self):
-        item = dict(change_id='h1', importance='mid', reason='변경', risk_flags=[])
+        item = dict(change_id='h1', importance='mid', reason='변경', behavior='changed', risk_flags=[])
         for items in ([], [item,item], [dict(item, change_id='h2')], [dict(item, other=1)], [dict(item, risk_flags=['logic_without_tests'])]):
             with self.subTest(items=items), self.assertRaises(ValueError):
                 validate_chunk(json.dumps(dict(items=items, uncertainties=[])), {'h1'})
@@ -390,7 +488,7 @@ new mode 100755
             validate_chunk('{"items":[],"items":[],"uncertainties":[]}', set())
 
     def test_chunk_uncertainties_keep_only_chunk_ids(self):
-        item = dict(change_id='h1', importance='mid', reason='변경', risk_flags=[])
+        item = dict(change_id='h1', importance='mid', reason='변경', behavior='changed', risk_flags=[])
         local = dict(change_id='h1', reason='청크 안의 미확인 내용')
         foreign = dict(change_id='h2', reason='다른 청크의 미확인 내용')
         value = validate_chunk(json.dumps(dict(items=[item], uncertainties=[foreign, local])), {'h1'})
@@ -399,22 +497,22 @@ new mode 100755
 
     def test_install_script_stays_rule_only(self):
         self.assertNotIn('install_script', FLAGS)
-        self.assertEqual(PROMPT_VERSION, 'skim-ko-5')
+        self.assertEqual(PROMPT_VERSION, 'skim-ko-6')
         item = dict(change_id='h1', importance='high', reason='설치 변경',
-                    risk_flags=['install_script'])
+                    behavior='changed', risk_flags=['install_script'])
         with self.assertRaises(ValueError):
             validate_chunk(json.dumps(dict(items=[item], uncertainties=[])), {'h1'})
 
     def test_prompt_states_priority_and_partial_context(self):
         text = prompt('chunk', {'metadata': {'title': 'PR 목적'}, 'units': []})
-        for phrase in ('PR 목적을 구현하는 핵심 동작', '운영 인프라', '파일 경로, 이름이나 단어',
+        for phrase in ('권한 검사 제거·변경', '운영 인프라', '파일 경로, 이름이나 단어',
                        '청크는 PR 전체가 아닐 수 있다', 'uncertainties', '지정 JSON만 반환'):
             self.assertIn(phrase, text)
 
     def test_chunk_limits_prioritize_rules_and_count_metadata(self):
         units, _ = parse_diff(DIFF)
         units = [dict(units[0], change_id=f'h{i}', candidates=[], file_path=f'{i}.txt') for i in range(1, 503)]
-        units[-1]['candidates'] = ['install_script']
+        units[-1]['kind_signals'] = ['install_script']
         chunks = chunk_units(units, {'title':'자료'})
         self.assertEqual(sum(len(c['units']) for c in chunks), 200)
         self.assertEqual(chunks[0]['units'][0]['change_id'], 'h502')
@@ -434,6 +532,48 @@ new mode 100755
         self.assertEqual(len(self.fake.calls), 6)
         self.assertEqual(self.conn.execute('SELECT COUNT(*) FROM changes').fetchone()[0], 3)
 
+    def test_later_chunk_failure_preserves_previous_result_and_retries(self):
+        from skim.analyze import BudgetExceeded
+        from skim.web import load_prs
+        diff = 'diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n'
+        diff += ''.join(f'@@ -{i} +{i} @@\n-old\n+new\n' for i in range(1, 102))
+        self.snapshot(diff)
+        units, _ = parse_diff(diff)
+        self.assertEqual(len(chunk_units(units, {})), 2)
+        previous = self.analyzer.run()[0]
+        self.assertEqual(previous['status'], 'completed')
+        original = self.analyzer._call
+        for error, status in ((BudgetExceeded('budget'), 'deferred'), (IsolationError('isolation'), 'blocked')):
+            with self.subTest(status=status):
+                with self.conn:
+                    self.conn.execute("UPDATE pull_requests SET title=?", (status,))
+                chunk_calls = 0
+
+                def call(stage, *args, **kwargs):
+                    nonlocal chunk_calls
+                    if stage == 'chunk':
+                        chunk_calls += 1
+                        if chunk_calls == 2:
+                            raise error
+                    return original(stage, *args, **kwargs)
+
+                with patch.object(self.analyzer, '_call', side_effect=call):
+                    result = self.analyzer.run()[0]
+                self.assertEqual(result['status'], status)
+                self.assertTrue(result['items'])
+                stored = self.conn.execute('SELECT status,output_json FROM analyses ORDER BY id DESC LIMIT 1').fetchone()
+                self.assertEqual(stored['status'], status)
+                self.assertEqual(json.loads(stored['output_json'])['items'], result['items'])
+                shown = load_prs(self.conn, self.config)[0]
+                self.assertEqual(shown['status'], status)
+                self.assertTrue(shown['previous_result'])
+                self.assertEqual(shown['result']['intent'], previous['intent'])
+                self.assertEqual(shown['result']['items'], previous['items'])
+                calls = len(self.fake.calls)
+                retried = self.analyzer.run()[0]
+                self.assertEqual(retried['status'], 'completed')
+                self.assertGreater(len(self.fake.calls), calls)
+
     def test_synthesis_failure_preserves_previous_success(self):
         self.analyzer.run()
         with self.conn:
@@ -446,8 +586,13 @@ new mode 100755
             return original(request, schema)
         self.fake.generate = generate
         result = self.analyzer.run()[0]
-        self.assertEqual(result['status'], 'failed')
-        self.assertEqual(result['items'], [])
+        self.assertEqual(result['status'], 'partial')
+        self.assertEqual(len(result['items']), 2)
+        self.assertEqual(result['coverage']['analyzed'], 2)
+        stored = self.conn.execute('SELECT id,output_json,error FROM analyses ORDER BY id DESC LIMIT 1').fetchone()
+        self.assertEqual(json.loads(stored['output_json'])['items'], result['items'])
+        self.assertTrue(stored['error'])
+        self.assertEqual(self.conn.execute('SELECT COUNT(*) FROM analysis_items WHERE analysis_id=?', (stored['id'],)).fetchone()[0], 3)
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM analyses WHERE status='completed'").fetchone()[0], 1)
         self.assertEqual(len(self.fake.calls), 5)
 
@@ -772,6 +917,6 @@ with Collector(None, config).lock('analysis.lock') as lock_fd:
             return json.dumps(value)
         self.fake.generate = generate
         result = self.analyzer.run()[0]
-        self.assertEqual(result['status'], 'failed')
+        self.assertEqual(result['status'], 'partial')
         self.assertIsNone(result['intent'])
         self.assertEqual(len(self.fake.calls), 3)

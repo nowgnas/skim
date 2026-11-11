@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
@@ -41,9 +42,9 @@ class ReleaseGateTests(unittest.TestCase):
                 captured={p: True for p in case['high_files']}, misses=[], hidden_unanalysed=[],
                 expectations={k: dict(met=True) for k in ('expect_redacted', 'expect_unanalysed_visible', 'watch') if case.get(k)}))
 
-    def check(self):
+    def check(self, version='skim-ko-5'):
         (self.corpus / 'results.json').write_text(json.dumps(self.report))
-        check_release.check(self.root)
+        check_release.check(self.root, version=version)
 
     def test_block_synthetic_results(self):
         with self.assertRaises(ValueError):
@@ -100,10 +101,35 @@ class ReleaseGateTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'reviewed_by'):
                 self.check()
 
+    def test_historical_binding_keeps_recorded_metadata(self):
+        self.realistic()
+        self.report.update(prompt_sha256='old-recorded-hash', schema_version='2')
+        self.report.pop('sanitization_policy')
+        self.check()
+        for key in ('prompt_sha256', 'schema_version'):
+            original = self.report.pop(key)
+            with self.assertRaises(ValueError):
+                self.check()
+            self.report[key] = original
+
     def test_hash_mismatch(self):
-        self.report['prompt_sha256'] = 'wrong'
-        with self.assertRaisesRegex(ValueError, '해시'):
-            self.check()
+        self.realistic()
+        version = check_release.PROMPT_VERSION
+        target = self.root / 'eval' / version
+        self.corpus.rename(target)
+        self.corpus = target
+        self.manifest['prompt_version'] = version
+        self.manifest['confirmed_sha256'] = confirmation_hash(self.manifest)
+        (target / 'manifest.json').write_text(json.dumps(self.manifest))
+        self.report['prompt_version'] = version
+        self.check(version)
+        for key, message in (('prompt_sha256', '해시'), ('schema_version', '스키마'),
+                             ('sanitization_policy', '정제')):
+            original = self.report[key]
+            self.report[key] = 'wrong'
+            with self.assertRaisesRegex(ValueError, message):
+                self.check(version)
+            self.report[key] = original
 
     def test_miss(self):
         self.report['cases'][0]['misses'] = ['lib/skim/db.py']
@@ -115,13 +141,25 @@ class ReleaseGateTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.check()
 
+    def test_supported_versions_reach_corpus_check(self):
+        for version in ('skim-ko-3', 'skim-ko-4', 'skim-ko-6'):
+            with self.subTest(version=version), self.assertRaises(FileNotFoundError):
+                check_release.check(self.root, version=version)
+        with self.assertRaises(FileNotFoundError):
+            check_release.check(self.root)
+
+    def test_prompt_hash_includes_stage_instructions(self):
+        original = prompt_hash()
+        with patch.dict('eval_release.STAGE_INSTRUCTIONS', chunk='다른 청크 지시'):
+            self.assertNotEqual(prompt_hash(), original)
+
     def test_other_version(self):
         with self.assertRaises(ValueError):
-            check_release.check(self.root, 'skim-ko-3')
+            check_release.check(self.root, 'unsupported')
 
     def test_missing_results(self):
         with self.assertRaises(OSError):
-            check_release.check(self.root)
+            check_release.check(self.root, version='skim-ko-5')
 
     def test_hidden_and_expectation_failures(self):
         original = copy.deepcopy(self.report)

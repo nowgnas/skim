@@ -8,6 +8,93 @@ from skim.analyze.units import added_test_lines, candidates, changed_lines, pars
 
 
 class RiskCandidatesTests(unittest.TestCase):
+    def unit(self, path, diff='', old_path=None):
+        files = [dict(filename=path, previous_filename=old_path)]
+        patch = f'diff --git a/{path} b/{path}\n' + diff if diff else ''
+        return parse_diff(patch, files)[0][0]
+
+    def test_secrets_directory_is_only_a_location_hint(self):
+        unit = self.unit('secrets/app.py')
+        self.assertIn('secrets', unit['location_hints'])
+        self.assertIn('secrets', unit['candidates'])
+        self.assertEqual(unit['kind_signals'], [])
+        self.assertEqual(unit['hard_floors'], [])
+
+    def test_dependency_text_file_is_not_demoted_by_extension(self):
+        from skim.analyze.units import allocation_key
+        dependency = dict(self.unit('requirements.txt'), change_id='h1')
+        source = dict(self.unit('app.py'), change_id='h2', content_hits=['auth'])
+        self.assertLess(allocation_key(dependency), allocation_key(source))
+
+    def test_signals_separate_location_content_and_floors(self):
+        unit = self.unit('auth/login.py')
+        self.assertEqual(unit['location_hints'], ['auth'])
+        self.assertEqual(unit['content_hits'], [])
+        self.assertEqual(unit['hard_floors'], [])
+        unit = self.unit('app.py', '@@ -1 +1 @@\n-@login_required\n+pass')
+        self.assertEqual(unit['content_hits'], ['auth'])
+        self.assertEqual(unit['location_hints'], [])
+        for text in ('+token: str', '+token = value', '+password: str'):
+            unit = self.unit('app.py', '@@ -1 +1 @@\n' + text)
+            self.assertIn('secrets', unit['content_hits'])
+            self.assertEqual(unit['hard_floors'], [])
+        unit = self.unit('app.py', '@@ -1 +1 @@\n+value = "ghp_example123"')
+        self.assertIn('secrets', unit['hard_floors'])
+
+    def test_schema_path_and_ddl_are_distinct(self):
+        for path in ('migrations/0001_init.py', 'alembic/versions/1.py', 'schema.prisma', 'db/schema.rb'):
+            unit = self.unit(path)
+            self.assertIn('db_schema_migration', unit['kind_signals'])
+            self.assertIn('db_schema_migration', unit['hard_floors'])
+        for path, text in (('query.sql', '+SELECT * FROM users;'),
+                           ('tests/test_db.py', '+sql = "CREATE TABLE users (id int)"'),
+                           ('tests/schema.sql', '+CREATE TABLE users (id int);'),
+                           ('app.py', '+sql = "CREATE TABLE users (id int)"')):
+            unit = self.unit(path, '@@ -1 +1 @@\n' + text)
+            self.assertEqual(unit['kind_signals'], [])
+            self.assertEqual(unit['hard_floors'], [])
+            if 'CREATE' in text:
+                self.assertIn('db_schema_migration', unit['content_hits'])
+        unit = self.unit('query.sql', '@@ -1 +1 @@\n+DROP TABLE users;')
+        self.assertEqual(unit['hard_floors'], ['db_schema_migration'])
+
+    def test_sql_comments_and_literals_are_content_only(self):
+        for sql in ('/*\nDROP TABLE users;\n*/', '-- DROP TABLE users;',
+                    "SELECT 'literal\nDROP TABLE users;\n';",
+                    'SELECT $$literal\nDROP TABLE users;\n$$;',
+                    'SELECT $tag$literal\nDROP TABLE users;\n$tag$;'):
+            for sign in ('+', '-'):
+                unit = self.unit('query.sql', '@@ -1 +1 @@\n SELECT 1;\n' +
+                                 '\n'.join(sign + line for line in sql.splitlines()))
+                self.assertIn('db_schema_migration', unit['content_hits'])
+                self.assertEqual(unit['hard_floors'], [])
+        for text in (' /* comment\n+DROP TABLE users;\n */',
+                     " SELECT 'literal\n+DROP TABLE users;\n ';",
+                     ' SELECT $tag$literal\n+DROP TABLE users;\n $tag$;'):
+            self.assertEqual(self.unit('query.sql', '@@ -1 +1 @@\n' + text)['hard_floors'], [])
+        for sign in ('+', '-'):
+            unit = self.unit('query.sql', '@@ -1 +1 @@\n /* done */\n' + sign + 'DROP TABLE users;')
+            self.assertEqual(unit['hard_floors'], ['db_schema_migration'])
+
+    def test_old_paths_retain_location_kind_and_sensitive_exclusion(self):
+        for old, key, flag in (('auth/login.py', 'location_hints', 'auth'),
+                               ('payments/client.py', 'location_hints', 'payments'),
+                               ('config/app.py', 'location_hints', 'config'),
+                               ('.github/workflows/ci.yml', 'kind_signals', 'ci_workflow'),
+                               ('migrations/1.py', 'hard_floors', 'db_schema_migration'),
+                               ('.env', 'hard_floors', 'secrets')):
+            unit = self.unit('plain.py', old_path=old)
+            self.assertIn(flag, unit[key])
+            if old == '.env':
+                self.assertTrue(unit['excluded'])
+                self.assertEqual(unit['diff'], '')
+
+    def test_mechanical_hints_never_infer_from_synthetic_alone(self):
+        self.assertEqual(self.unit('a.py')['mechanical_hints'], [])
+        body = 'similarity index 100%\nrename from a.py\nrename to b.py\n'
+        self.assertEqual(self.unit('b.py', body)['mechanical_hints'], ['pure_rename'])
+        self.assertEqual(self.unit('b.py', body + 'old mode 100644\nnew mode 100755\n')['mechanical_hints'], [])
+
     def test_usage_counts_remain_visible_but_secrets_are_redacted(self):
         from skim.analyze.units import sanitize
         for line in ('max_tokens = 100', 'token_count: 3', 'input_tokens = 2147483647'):
@@ -38,14 +125,13 @@ class RiskCandidatesTests(unittest.TestCase):
             ('migrations/0001_init.py', 'db_schema_migration'),
             ('db/migrate/001.py', 'db_schema_migration'),
             ('alembic/versions/001.py', 'db_schema_migration'),
-            ('schema.sql', 'db_schema_migration'),
             ('prisma/schema.prisma', 'db_schema_migration'),
             ('db/schema.rb', 'db_schema_migration'),
             ('auth/login.py', 'auth'), ('middleware/auth_guard.py', 'auth'),
             ('.github/workflows/ci.yml', 'ci_workflow'),
             ('package.json', 'dependency'), ('.env', 'config'), ('.env', 'secrets'),
             ('settings.py', 'config'), ('config/app.json', 'config'),
-            ('secrets/value.txt', 'secrets'), ('private.pem', 'secrets'),
+            ('private.pem', 'secrets'),
             ('payments/client.py', 'payments')):
             with self.subTest(path=path, flag=flag):
                 self.assertIn(flag, candidates(path, '', []))

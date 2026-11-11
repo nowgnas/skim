@@ -225,6 +225,16 @@ def load_prs(conn, config):
         pr = dict(raw)
         snapshot = conn.execute('SELECT * FROM snapshots WHERE pr_id=? ORDER BY id DESC LIMIT 1', (pr['id'],)).fetchone()
         analysis = conn.execute('SELECT a.*,s.head_sha,s.base_sha FROM analyses a JOIN snapshots s ON s.id=a.snapshot_id WHERE s.pr_id=? ORDER BY s.id DESC,a.id DESC LIMIT 1', (pr['id'],)).fetchone()
+        latest_analysis = analysis
+        previous_result = False
+        if analysis and analysis['status'] not in ('completed', 'partial'):
+            successful = conn.execute(
+                "SELECT a.*,s.head_sha,s.base_sha FROM analyses a JOIN snapshots s ON s.id=a.snapshot_id "
+                "WHERE a.snapshot_id=? AND a.status IN ('completed','partial') ORDER BY a.id DESC LIMIT 1",
+                (analysis['snapshot_id'],)).fetchone()
+            if successful:
+                analysis = successful
+                previous_result = True
         result = json.loads(analysis['output_json'] or '{}') if analysis else {}
         units = result.get('units', [])
         if not units and snapshot:
@@ -234,8 +244,9 @@ def load_prs(conn, config):
         if snapshot and analysis and snapshot['id'] != analysis['snapshot_id']:
             units, _ = parse_diff(read_diff(config, snapshot), json.loads(snapshot['coverage']).get('files', []))
             items = {}
-        pr.update(snapshot=snapshot, analysis=analysis, result=result, units=units, items=items,
-                  status=analysis['status'] if analysis else 'unanalyzed',
+        pr.update(snapshot=snapshot, analysis=analysis, latest_analysis=latest_analysis, previous_result=previous_result,
+                  result=result, units=units, items=items,
+                  status=latest_analysis['status'] if latest_analysis else 'unanalyzed',
                   stale=bool(analysis and (analysis['head_sha'] != pr['head_sha'] or analysis['base_sha'] != pr['base_sha'] or (snapshot and snapshot['id'] != analysis['snapshot_id']))))
         pr['importance'] = max((item['importance'] for item in items.values()), key=lambda x: RANK.get(x, 0), default='unanalyzed')
         pr['rule_flags'] = sorted({flag for unit in units for flag in unit.get('candidates', [])})
@@ -308,7 +319,7 @@ TABS = [('', '전체', lambda pr: True),
 
 
 def priority_rank(pr):
-    if not pr['allowed'] or pr['stale'] or pr['status'] not in ('completed', 'partial'):
+    if not pr['allowed'] or pr['stale'] or (pr['status'] not in ('completed', 'partial') and not pr.get('previous_result')):
         return 0
     return RANK.get(pr['importance'], 0)
 
@@ -429,12 +440,14 @@ def listing(prs, query, csrf, heading_toolbar="", team_filter="", has_connected_
         if not pr['allowed']:
             target = urlencode([('scope_host', pr.get('host', 'github.com')), ('tracked_q', pr['owner'] + '/' + pr['name'])])
             state = f'<p class="pr-state"><span>분석 허용 안 됨</span><a href="/repos?{esc(target)}#analysis-scope">분석 허용 범위 열기</a></p>'
-        elif pr['status'] in ('failed', 'blocked', 'deferred') or pr['stale']:
+        elif pr['status'] in ('failed', 'blocked', 'deferred', 'cancelled') or pr['stale']:
             state = '<p class="pr-state"><span>' + esc(label('stale' if pr['stale'] else pr['status'])) + f'</span><a href="/pr/{pr["id"]}">상세에서 다시 분석</a></p>'
         elif pr['status'] == 'unanalyzed':
             state = f'<p class="pr-state"><span>분석 대기</span><a href="/pr/{pr["id"]}">상세에서 분석 요청</a></p>'
         elif pr['status'] in ('completed', 'partial') and (not a or not a['intent']):
             state = f'<p class="pr-state"><span>변경 의도 미분석</span><a href="/pr/{pr["id"]}">상세에서 다시 분석</a></p>'
+        if pr.get('previous_result'):
+            state += '<p class="pr-state">직전 성공 분석 결과를 표시합니다.</p>'
         rank = priority_rank(pr)
         priority = label({3: 'high', 2: 'mid', 1: 'low'}.get(rank, 'unanalyzed')) if rank else '우선순위 미확인'
         content += ('<article class="issue-row"><div class="row-content">' + f'<h2><a href="/pr/{pr["id"]}">{esc(pr["title"])}</a></h2>'
@@ -673,7 +686,8 @@ def file_panel(row, members, items, github_link, *, active=True, neighbors=None,
 
 def detail(pr, query, config, offline=False, analysis_panel="", csrf=None):
     a, snapshot = pr['analysis'], pr['snapshot']
-    current = bool(a and not pr['stale'] and pr.get('allowed', True) and pr['status'] in ('completed', 'partial'))
+    latest = pr.get('latest_analysis') or a
+    current = bool(a and not pr['stale'] and pr.get('allowed', True) and (pr['status'] in ('completed', 'partial') or pr.get('previous_result')))
     shown = dict(pr, items=pr['items'] if current else {}, result=pr.get('result') if current else {})
     rows = file_rows(shown)
     units_by_file = {}
@@ -711,8 +725,8 @@ def detail(pr, query, config, offline=False, analysis_panel="", csrf=None):
     elif not pr.get('allowed', True):
         content += '<aside class="detail-warning"><strong>분석 허용 필요</strong><p>이 저장소의 분석이 허용되지 않았습니다.</p></aside>'
     elif a and pr['status'] not in ('completed', 'partial'):
-        content += '<aside class="detail-warning"><strong>' + esc(label(pr['status'])) + '</strong><p>' + esc(a['error'] or '분석을 다시 요청하거나 상태를 확인하세요.') + '</p>'
-        content += web_jobs.recovery_actions(csrf, offline, web_jobs.recovery_kind(a['error'])) + '</aside>'
+        content += '<aside class="detail-warning"><strong>' + esc(label(pr['status'])) + '</strong><p>' + esc(latest['error'] or '분석을 다시 요청하거나 상태를 확인하세요.') + '</p>'
+        content += web_jobs.recovery_actions(csrf, offline, web_jobs.recovery_kind(latest['error'])) + '</aside>'
     if current and 'prompt_version' in a.keys():
         from .analyze.protocol import PROMPT_VERSION
         if a['prompt_version'] != PROMPT_VERSION:
@@ -723,6 +737,8 @@ def detail(pr, query, config, offline=False, analysis_panel="", csrf=None):
     body = sanitize(pr.get('body') or '')
     if body.strip():
         content += '<details class="detail-description"><summary>PR 원래 설명 보기</summary><p>' + esc(body) + '</p></details>'
+    if pr.get('previous_result'):
+        content += '<p class="muted">직전 성공 분석 결과를 표시합니다.</p>'
     missing_tests = sum('logic_without_tests' in row['rule'] for row in rows)
     if missing_tests:
         content += (f'<p class="test-summary">관련 테스트 변경 미확인 파일 {missing_tests}개</p>'

@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'lib'))
 from skim.analyze import Analyzer
 from skim.analyze.codex import CodexAdapter
-from skim.analyze.protocol import PROMPT_VERSION, SCHEMA_VERSION, SYSTEM
+from skim.analyze.protocol import PROMPT_VERSION, SCHEMA_VERSION, SYSTEM, STAGE_INSTRUCTIONS, encode
 from skim.analyze.units import SANITIZATION_POLICY
 from skim.analyze.units import parse_diff, SECRET_VALUE, SECRET_ASSIGNMENT, sanitize
 from skim.config import Config, private_dir, private_file
@@ -28,7 +28,7 @@ def sha256(value):
 
 
 def prompt_hash():
-    return sha256(SYSTEM.encode('utf-8'))
+    return sha256(encode(dict(system=SYSTEM, stages=STAGE_INSTRUCTIONS)).encode('utf-8'))
 
 
 def confirmation_hash(manifest):
@@ -165,10 +165,27 @@ def summarize(report):
     return failures
 
 
-def rescore(report, manifest, corpus):
+SUPPORTED_VERSIONS = ('skim-ko-3', 'skim-ko-4', 'skim-ko-5', 'skim-ko-6')
+
+
+def validate_binding(report, manifest, version):
+    if version not in SUPPORTED_VERSIONS:
+        raise ValueError('지원하지 않는 프롬프트 버전')
+    if manifest.get('prompt_version') != version or report.get('prompt_version') != version:
+        raise ValueError('프롬프트 버전 불일치')
+    for key in ('prompt_sha256', 'schema_version'):
+        if not isinstance(report.get(key), str) or not report[key].strip():
+            raise ValueError(f'{key} 평가 근거 누락')
+    if version == PROMPT_VERSION:
+        if report['prompt_sha256'] != prompt_hash():
+            raise ValueError('프롬프트 해시 불일치')
+        if report['schema_version'] != SCHEMA_VERSION:
+            raise ValueError('스키마 버전 불일치')
+
+
+def rescore(report, manifest, corpus, version=None):
     """Recompute scores without invoking an adapter or changing recorded evidence."""
-    if report['prompt_sha256'] != prompt_hash() or report['schema_version'] != SCHEMA_VERSION or report['prompt_version'] != PROMPT_VERSION:
-        raise ValueError('prompt or schema mismatch')
+    validate_binding(report, manifest, version if version is not None else report.get('prompt_version'))
     cases = {c['id']: c for c in report['cases']}
     expected_ids = {c['id'] for c in manifest['cases']}
     if len(cases) != len(report['cases']) or len(expected_ids) != len(manifest['cases']) or set(cases) != expected_ids:
@@ -195,10 +212,14 @@ def rescore(report, manifest, corpus):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--home', type=Path)
-    parser.add_argument('--out', type=Path, default=ROOT / 'eval' / PROMPT_VERSION / 'results.json')
+    parser.add_argument('--version', default=PROMPT_VERSION, choices=SUPPORTED_VERSIONS)
+    parser.add_argument('--out', type=Path)
     parser.add_argument('--rescore', action='store_true', help='rescore existing results without model calls')
     parser.add_argument('--review', metavar='NAME', help='stamp human review without model calls')
     args = parser.parse_args()
+    corpus = ROOT / 'eval' / args.version
+    if args.out is None:
+        args.out = corpus / 'results.json'
     if args.review is not None:
         if not args.review.strip() or args.rescore:
             parser.error('--review requires a non-empty name and cannot combine with --rescore')
@@ -210,17 +231,18 @@ def main():
         os.environ['SKIM_HOME'] = str(args.home.expanduser().resolve())
     elif not args.rescore:
         parser.error('--home is required for model evaluation')
-    corpus = ROOT / 'eval' / PROMPT_VERSION
     manifest = json.loads((corpus / 'manifest.json').read_text())
-    if PROMPT_VERSION not in ('skim-ko-3', 'skim-ko-4', 'skim-ko-5') or manifest['prompt_version'] != PROMPT_VERSION:
+    if manifest['prompt_version'] != args.version:
         parser.error('unsupported release prompt version')
     if args.rescore:
         try:
-            report = rescore(json.loads(args.out.read_text()), manifest, corpus)
+            report = rescore(json.loads(args.out.read_text()), manifest, corpus, args.version)
         except (OSError, ValueError, KeyError) as exc:
             parser.error(str(exc))
         args.out.write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n')
         return int(bool(report['summary']['failures']))
+    if args.version != PROMPT_VERSION:
+        parser.error('historical versions require --rescore or --review')
     config = Config.load()
     report = dict(prompt_version=PROMPT_VERSION, prompt_sha256=prompt_hash(),
                   schema_version=SCHEMA_VERSION, sanitization_policy=SANITIZATION_POLICY, cli_version='unknown', model='unknown',
