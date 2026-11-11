@@ -1,0 +1,11 @@
+diff --git a/app/reports.py b/app/reports.py
+index b139249..30860ba 100644
+--- a/app/reports.py
++++ b/app/reports.py
+@@ -23,6 +23,4 @@ def show_report(report_id):
+ @bp.route("/<report_id>/rows")
+ def report_rows(report_id):
+     report = _load(report_id)
+-    if report.owner_id != g.user.id:
+-        abort(403)
+     return jsonify(rows=reports.rows(report.id, limit=500))

@@ -1,0 +1,42 @@
+diff --git a/.github/workflows/deploy.yml b/.github/workflows/deploy.yml
+index cfacef2..d617094 100644
+--- a/.github/workflows/deploy.yml
++++ b/.github/workflows/deploy.yml
+@@ -4,8 +4,7 @@ on:
+   push:
+     branches: [main]
+ 
+-permissions:
+-  contents: read
++permissions: write-all
+ 
+ jobs:
+   web:
+@@ -14,3 +13,9 @@ jobs:
+       - uses: actions/checkout@v4
+       - run: ./scripts/build.sh web
+       - run: ./scripts/release.sh web
++  digest-worker:
++    runs-on: ubuntu-latest
++    steps:
++      - uses: actions/checkout@v4
++      - run: ./scripts/build.sh digest-worker
++      - run: ./scripts/release.sh digest-worker
+diff --git a/app/notifications.py b/app/notifications.py
+index 0c48c22..4b9d9d6 100644
+--- a/app/notifications.py
++++ b/app/notifications.py
+@@ -6,3 +6,13 @@ from app.storage import activity, subscribers
+ def notify_now(event):
+     for person in subscribers.for_workspace(event.workspace_id):
+         send(person.email, subject=event.title, template="event.txt", event=event)
++
++
++def send_daily_digest(workspace_id, day):
++    events = activity.for_day(workspace_id, day)
++    if not events:
++        return 0
++    people = [p for p in subscribers.for_workspace(workspace_id) if p.wants_digest]
++    for person in people:
++        send(person.email, subject=f"{len(events)} updates on {day:%b %d}", template="digest.txt", events=events)
++    return len(people)

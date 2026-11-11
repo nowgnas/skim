@@ -1,0 +1,29 @@
+diff --git a/app/clients/webhook.py b/app/clients/webhook.py
+index 521dc68..b6cbfd1 100644
+--- a/app/clients/webhook.py
++++ b/app/clients/webhook.py
+@@ -2,19 +2,18 @@
+ import hashlib
+ import hmac
+ from dataclasses import dataclass
+-from typing import Any
+ 
+ 
+ @dataclass
+ class Endpoint:
+-    url: Any
+-    token: Any
+-    retries: Any = 3
++    url: str
++    token: str
++    retries: int = 3
+ 
+ 
+-def signature(endpoint, payload):
++def signature(endpoint: Endpoint, payload: bytes) -> str:
+     return hmac.new(endpoint.token.encode(), payload, hashlib.sha256).hexdigest()
+ 
+ 
+-def headers_for(endpoint, payload, token):
++def headers_for(endpoint: Endpoint, payload: bytes, token: str) -> dict:
+     return {"X-Signature": signature(endpoint, payload), "X-Delivery": token}

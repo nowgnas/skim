@@ -1,0 +1,14 @@
+diff --git a/app/sync/worker.py b/app/sync/worker.py
+index a2b2c38..9d6d9aa 100644
+--- a/app/sync/worker.py
++++ b/app/sync/worker.py
+@@ -13,5 +13,5 @@ def drain(queue, apply):
+             log.exception("job %s failed", job.id)
+         else:
+             handled += 1
+-            queue.ack(job)
++        queue.ack(job)
+     return handled
+diff --git a/tools/rotate_logs.sh b/tools/rotate_logs.sh
+old mode 100644
+new mode 100755
