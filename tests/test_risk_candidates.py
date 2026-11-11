@@ -991,13 +991,27 @@ class CallReferenceTests(unittest.TestCase):
 class SecretStringContextRegressionTests(unittest.TestCase):
     def test_multiline_string_names_and_values_are_redacted(self):
         from skim.analyze.units import sanitize, REDACTED
-        for quote in ('"' * 3, "'" * 3):
+        openers = ('"' * 3, "'" * 3, '`', '<<EOF', '<<-EOF', "<<'EOF'",
+                   '|', '>', '|-', '>2', '"continued' + chr(92), "'continued" + chr(92))
+        for opener in openers:
             for value in ('"hidden"', '[민감 정보 제외: 직접 쓴 문자열 값]'):
-                source = '+password = ' + quote + '\n+opaqueTOKENfragment=' + value + '\n+' + quote
-                cleaned = sanitize(source)
-                self.assertNotIn('opaqueTOKENfragment', cleaned)
-                self.assertNotIn('hidden', cleaned)
-                self.assertIn('\n+' + REDACTED + '\n', cleaned)
+                with self.subTest(opener=opener, value=value):
+                    source = '+payload: ' + opener + '\n+  opaqueTOKENfragment=' + value + '\n'
+                    outputs = (sanitize(source), parse_diff(hunk('lib/config.py', source))[0][0]['diff'])
+                    for cleaned in outputs:
+                        self.assertNotIn('opaqueTOKENfragment', cleaned)
+                        self.assertNotIn('hidden', cleaned)
+                        self.assertIn('+  ' + REDACTED, cleaned)
+
+    def test_fx_secret_fixture_keeps_literal_name(self):
+        path = Path(__file__).resolve().parents[1] / 'eval/skim-ko-6/diffs/fx-secret.diff'
+        source = path.read_text()
+        units, _ = parse_diff(source)
+        cleaned = '\n'.join(unit['diff'] for unit in units)
+        self.assertIn('AWS_SECRET_ACCESS_KEY = [민감 정보 제외: 직접 쓴 문자열 값]', cleaned)
+        for line in source.splitlines():
+            if line.startswith('+AWS_SECRET_ACCESS_KEY'):
+                self.assertNotIn(line.split('"')[1], cleaned)
 
     def test_spoofed_marker_does_not_bypass_name_checks(self):
         from skim.analyze.units import sanitize, REDACTED_LITERAL

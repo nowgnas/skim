@@ -30,17 +30,22 @@ REFERENCE_BODY = re.compile(r'\$\{|\{\{|#\{|%\(|^\$|^<[^>]*>$|^%\w+%$|^\s*$')
 NAME_PREFIX = re.compile(r"""[+\- ]?\s*(?:-\s+)?(?:(?:export|const|let|var|final|static|public|private|val)\s+)*(?:(?:self|this)\.)?["']?""")
 
 
+# Partial diffs cannot establish string state; even closed markers suppress names.
+MULTILINE_CONTEXT = re.compile(r"`|\"{3}|'{3}|<<|:[ \t]*[|>]|\\\r?\n")
+
+
 EXCLUDED = ('.env', '.env.*', '*.pem', '*.key', '*credentials*', 'id_rsa*', 'id_ed25519*', '*.p12', '*.pfx')
 
 
 def sanitize(text, assignments=True):
-    cleaned = SECRET_VALUE.sub(REDACTED, text or '')
+    text = text or ''
+    cleaned = SECRET_VALUE.sub(REDACTED, text)
     if not assignments:
         return cleaned
+    unsafe_context = MULTILINE_CONTEXT.search(text)
     def redact(match):
         line_start = match.string.rfind('\n', 0, match.start()) + 1
-        # A partial diff cannot establish string state after a triple-quote delimiter.
-        if any(quote in match.string[:line_start] for quote in ('"' * 3, "'" * 3)):
+        if unsafe_context:
             return REDACTED
         safe_name = (len(match['head']) <= 80
                      and NAME_PREFIX.fullmatch(match.string, line_start, match.start()))
