@@ -252,6 +252,32 @@ def signals(path, text, tests, test_diffs=None, *, test_lines=None):
                 test_gap=test_gap, mechanical_hints=[])
 
 
+HASH_COMMENTS = ('#',)
+SLASH_COMMENTS = ('//', '/*')
+# Keyed by suffix because the same prefix is code elsewhere: '#' opens a Markdown
+# heading or a C include, and '--' is an ordinary flag in a shell script.
+COMMENT_PREFIXES = {
+    **dict.fromkeys(('.py', '.rb', '.sh', '.yaml', '.yml', '.toml', '.tf'), HASH_COMMENTS),
+    **dict.fromkeys(('.js', '.jsx', '.ts', '.tsx', '.java', '.kt', '.go', '.rs', '.c', '.h', '.cpp', '.cs', '.swift'),
+                    SLASH_COMMENTS),
+    '.php': HASH_COMMENTS + SLASH_COMMENTS,
+    '.sql': ('--', '/*'),
+}
+
+
+def comment_only(path, text):
+    """변경 줄이 모두 빈 줄이거나 한 줄 전체가 주석일 때만 참이다.
+
+    블록 주석 안의 ' * ' 줄은 *args 같은 코드와 구분할 수 없어 주석으로 보지 않는다.
+    """
+    prefixes = COMMENT_PREFIXES.get(PurePosixPath(path).suffix.lower())
+    lines = [text[start:end].strip() for start, end in changed_spans(text)]
+    if not prefixes or not lines:
+        return False
+    return all(not line or line == '*/' or (line.startswith(prefixes) and not line.startswith('#!'))
+               for line in lines)
+
+
 SIGNAL_FIELDS = ('location_hints', 'kind_signals', 'content_hits', 'hard_floors', 'test_gap', 'mechanical_hints')
 
 
@@ -336,6 +362,8 @@ def parse_diff(diff, files=()):
             if (not old and old_path and 'similarity index 100%' in body
                     and not re.search(r'(?m)^(?:old|new) mode ', body)):
                 local['mechanical_hints'] = ['pure_rename']
+            if old and comment_only(path, text):
+                local['mechanical_hints'].append('comment_only')
             flags = candidate_view(local)
             cleaned = sanitize(text)
             redacted = not excluded and cleaned != text
