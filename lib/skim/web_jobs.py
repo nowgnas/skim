@@ -4,7 +4,7 @@ import json
 from urllib.parse import urlencode
 
 from . import jobs
-from .timefmt import human_time
+from .timefmt import duration, human_time, kst_clock
 from .db import analysis_allowed
 from .repos import web_repository
 from .hosts import registered
@@ -80,9 +80,53 @@ def analysis_summary_parts(d):
     return parts
 
 
+RECORD_STATUS = {'pending': '대기 중', 'blocked': '차단'}
+RECORD_TONE = {'running': 'running', 'completed': 'ok', 'failed': 'high', 'blocked': 'high'}
+
+
+def first_line(text):
+    return next(iter((text or '').strip().splitlines()), '')
+
+
+def record_view(row, now=None):
+    """One job-history card: badge, KST clock times, duration and a one-line outcome."""
+    d = jobs.describe(row)
+    running, failed = d['status'] == 'running', d['status'] in ('failed', 'blocked')
+
+    def clock(label, value):
+        relative = human_time(value, now)
+        return [label, kst_clock(value, now), relative if relative == '방금' or relative.endswith('분 전') else '']
+
+    facts = [clock('시작', d['started_at']) if d['started_at'] else clock('요청', d['created_at'])]
+    if d['finished_at'] and not d['active']:
+        facts.append(clock('종료', d['finished_at']))
+    if d['started_at'] and (running or (d['finished_at'] and not d['active'])):
+        facts.append(['경과' if running else '소요', duration(d['started_at'], None if running else d['finished_at'], now), ''])
+    if d['retry_at']:
+        facts.append(clock('재시도 가능', d['retry_at']))
+    if d['model']:
+        facts.append(['모델', d['model'], ''])
+    notes = []
+    if d['active']:
+        stage = d['stage'] if d['stage'] not in (None, '', '시작', d['status_label']) else ''
+        count = f'{d["processed"]}/{d["total"]}' if d['total'] is not None and d['processed'] is not None else ''
+        notes.append(' '.join(filter(None, [stage, count])))
+        if d['followup']:
+            notes.append('완료 후 1회 다시 수집 예정')
+    if not failed:
+        checks = doctor_checks(row) if d['kind'] == 'doctor' and not d['active'] else []
+        if checks:
+            problems = sum(c['state'] != 'ok' for c in checks)
+            notes.append(f'정상 {len(checks) - problems}개, 확인 필요 {problems}개')
+        else:
+            notes.append(first_line(d['error']) or first_line(d['result']))
+    return dict(status_label=RECORD_STATUS.get(d['status'], d['status_label']), tone=RECORD_TONE.get(d['status'], ''),
+                facts=facts, note=', '.join(filter(None, notes)), error_line=(first_line(d['error']) or first_line(d['result'])) if failed else '')
+
+
 def describe(row):
     d = jobs.describe(row)
-    result = dict(d, summary=summary(row), summary_parts=summary_parts(row))
+    result = dict(d, summary=summary(row), summary_parts=summary_parts(row), record=record_view(row))
     if d['kind'] == 'collect':
         result['collection_summary_parts'] = collection_summary_parts(d)
     elif d['kind'] == 'analyze':
@@ -121,6 +165,17 @@ def recovery_kind(error):
     return None
 
 
+def progress_bar(d):
+    if not d['active']:
+        return ''
+    running = d['status'] == 'running'
+    known = running and d['total'] is not None and d['total'] > 0 and d['processed'] is not None and 0 <= d['processed'] <= d['total']
+    return ('<div class="job-progress" data-job-progress>'
+            + '<span class="job-progress-label" data-job-progress-label>' + ('작업 중' if running else '대기 중') + '</span>'
+            + '<progress aria-label="작업 진행"' + (f' max="{d["total"]}" value="{d["processed"]}"' if known else '')
+            + ('' if running else ' hidden') + '></progress></div>')
+
+
 def job_box(row, poll=True, compact=False, analysis_compact=False, csrf=None, offline=False):
     from .web import esc
     if row is None:
@@ -132,13 +187,7 @@ def job_box(row, poll=True, compact=False, analysis_compact=False, csrf=None, of
     body = (f'<div class="job" data-job-id="{d["id"]}" data-job-active="{int(poll and d["active"])}"' + (' data-job-compact="1"' if compact else ' data-job-analysis="1"' if analysis_compact else '') + '>'
             '<p class="meta" aria-live="polite" data-job-field="summary">'
             + ''.join(f'<span>{esc(part)}</span>' for part in parts) + '</p>')
-    if d['active']:
-        running = d['status'] == 'running'
-        known = running and d['total'] is not None and d['total'] > 0 and d['processed'] is not None and 0 <= d['processed'] <= d['total']
-        body += ('<div class="job-progress" data-job-progress>'
-                 + '<span class="job-progress-label" data-job-progress-label>' + ('작업 중' if running else '대기 중') + '</span>'
-                 + '<progress aria-label="작업 진행"' + (f' max="{d["total"]}" value="{d["processed"]}"' if known else '')
-                 + ('' if running else ' hidden') + '></progress></div>')
+    body += progress_bar(d)
     result = '\n'.join(str(value) for value in (d['error'], d['result']) if value)
     if analysis_compact:
         if result == parts[0]:
@@ -153,6 +202,32 @@ def job_box(row, poll=True, compact=False, analysis_compact=False, csrf=None, of
     if d['kind'] == 'analyze':
         body += recovery_actions(csrf, offline, recovery_kind(d['error']), dynamic=poll and d['active'])
     return body + '</div>'
+
+
+def job_record(row, csrf=None, offline=False):
+    """Status-page history card. jobs.js refreshes the same fields from the `record` payload."""
+    from .web import esc
+    d = jobs.describe(row)
+    view = record_view(row)
+    state = ' job-running' if d['status'] == 'running' else ' job-failed' if d['status'] in ('failed', 'blocked') else ''
+    facts = ''.join('<span class="job-fact"><span class="job-fact-label">' + esc(label) + '</span><span>' + esc(value) + '</span>'
+                    + (f'<span class="job-fact-hint">{esc(hint)}</span>' if hint else '') + '</span>'
+                    for label, value, hint in view['facts'])
+    result = '\n'.join(str(value) for value in (d['error'], d['result']) if value)
+    body = ('<article class="job-row' + state + f'"><div class="job job-record" data-job-id="{d["id"]}" data-job-active="{int(d["active"])}" data-job-record="1">'
+            '<div class="job-head"><span class="badge job-status' + (' ' + view['tone'] if view['tone'] else '') + '" aria-live="polite" data-job-status>'
+            + esc(view['status_label']) + f'</span><h3 class="job-title">{esc(d["kind_label"])} #{d["id"]}</h3>'
+            + (f'<span class="job-target">{esc(d["target"])}</span>' if d['target'] else '') + '</div>'
+            '<p class="job-facts" data-job-facts>' + facts + '</p>' + progress_bar(d)
+            + '<p class="job-note"' + ('' if view['note'] else ' hidden') + '>' + esc(view['note']) + '</p>'
+            # The first error line stays visible without opening the details below.
+            + '<p class="job-error"' + ('' if view['error_line'] else ' hidden') + '>' + esc(view['error_line']) + '</p>'
+            + '<div class="job-result-slot"><details data-job-result' + ('' if result else ' hidden')
+            + '><summary>결과 상세</summary><pre data-job-result-text>' + esc(result) + '</pre></details>'
+            + '<a class="btn secondary sm" data-job-refresh href="" hidden>화면 새로고침</a></div>')
+    if d['kind'] == 'analyze':
+        body += recovery_actions(csrf, offline, recovery_kind(d['error']), dynamic=d['active'])
+    return body + '</div></article>'
 
 
 def script():
@@ -303,14 +378,8 @@ def status_page(conn, csrf, offline):
     rows = list(active_rows) + [row for row in jobs.recent(conn) if row['id'] not in seen]
     collect = '' if offline else form('/jobs/collect', csrf, '<button>지금 수집</button>')
     body += ('<section class="status-section"><div class="section-heading job-heading"><div><h2>작업 기록</h2>'
-             '<p class="muted">수집, 분석, 저장소 조회, 상태 점검 작업입니다. 진행 중인 작업이 위에 옵니다.</p></div>' + collect + '</div>')
-    def record(row):
-        failed = row['status'] in ('failed', 'blocked')
-        # 실패 이유 첫 줄은 펼치지 않아도 보이게 한다. 전체 내용은 결과 상세에 남는다.
-        reason = (row['last_error'] or '').strip().splitlines()[:1] if failed else []
-        return ('<article class="job-row' + (' job-failed' if failed else '') + '">' + job_box(row, csrf=csrf, offline=offline)
-                + ''.join(f'<p class="job-error">{esc(line)}</p>' for line in reason) + '</article>')
-    body += '<div class="list">' + (''.join(record(row) for row in rows)
+             '<p>수집, 분석, 저장소 조회, 상태 점검 작업입니다. 진행 중인 작업이 위에 옵니다. 시각은 한국 시간(KST)입니다.</p></div>' + collect + '</div>')
+    body += '<div class="list job-history">' + (''.join(job_record(row, csrf, offline) for row in rows)
                                     or '<p class="muted">작업 기록이 없습니다.</p>') + '</div></section>'
     body += '<details class="status-recovery"><summary>복구 안내</summary><ul>' + ''.join(f'<li><strong>{esc(name)}</strong>: {esc(text)}</li>' for name, text in RECOVERY) + '</ul></details>'
     return body + script()
