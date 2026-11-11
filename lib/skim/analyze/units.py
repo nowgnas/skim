@@ -263,6 +263,8 @@ COMMENT_PREFIXES = {
     '.php': HASH_COMMENTS + SLASH_COMMENTS,
     '.sql': ('--', '/*'),
 }
+# 주석 접두어로 시작하지만 실행에 영향을 주는 코드다. PHP 8 속성은 라우팅·권한 같은 동작을 바꾼다.
+CODE_PREFIXES = {'.php': ('#[',)}
 
 
 def comment_only(path, text):
@@ -270,15 +272,17 @@ def comment_only(path, text):
 
     블록 주석 안의 ' * ' 줄은 *args 같은 코드와 구분할 수 없어 주석으로 보지 않는다.
     """
-    prefixes = COMMENT_PREFIXES.get(PurePosixPath(path).suffix.lower())
+    suffix = PurePosixPath(path).suffix.lower()
+    prefixes = COMMENT_PREFIXES.get(suffix)
+    code = ('#!',) + CODE_PREFIXES.get(suffix, ())
     lines = [text[start:end].strip() for start, end in changed_spans(text)]
     if not prefixes or not lines:
         return False
-    return all(not line or line == '*/' or _full_line_comment(line, prefixes) for line in lines)
+    return all(not line or line == '*/' or _full_line_comment(line, prefixes, code) for line in lines)
 
 
-def _full_line_comment(line, prefixes):
-    if not line.startswith(prefixes) or line.startswith('#!'):
+def _full_line_comment(line, prefixes, code):
+    if not line.startswith(prefixes) or line.startswith(code):
         return False
     if not line.startswith('/*'):
         return True

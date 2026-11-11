@@ -103,7 +103,9 @@ class RiskCandidatesTests(unittest.TestCase):
                               ('app/order_core.py', ('-    # prior', '+', '+    # updated')),
                               ('web/app.ts', ('-// prior', '+/* updated', '+*/')),
                               ('web/app.ts', ('-/* prior */', '+/* updated */  ')),
-                              ('db/report.sql', ('--- prior', '+-- updated'))):
+                              ('db/report.sql', ('--- prior', '+-- updated')),
+                              ('src/OrderController.php', ('-# old note', '+# new note')),
+                              ('config/app.toml', ('-#[old]', '+#[new]'))):
             with self.subTest(path=path, changed=changed):
                 self.assertEqual(self.hunk(path, *changed)['mechanical_hints'], ['comment_only'])
         for path, changed in (('app/order_core.py', ('-    return order.subtotal', '+    return order.subtotal + order.delivery_fee')),
@@ -115,12 +117,23 @@ class RiskCandidatesTests(unittest.TestCase):
                               ('app/query.sql', ('-/* note */ SELECT 1;', '+/* note */ SELECT 2;')),
                               ('web/app.ts', ('-/* a */ /* b */', '+/* a */ run(); /* b */')),
                               ('web/app.ts', ('-# prior', '+# updated')),
+                              ('src/OrderController.php', ("-#[Route('/old')]", "+#[Route('/new')]")),
+                              ('src/OrderController.php', ('-# old note', "+    #[Route('/new')]")),
                               ('README.md', ('-# Old title', '+# New title')),
                               ('lib/util.c', ('-#include <a.h>', '+#include <b.h>')),
                               ('tools/run.sh', ('-#!/bin/sh', '+#!/bin/bash')),
                               ('tools/run.sh', ('-    --dry-run \\', '+    --force \\'))):
             with self.subTest(path=path, changed=changed):
                 self.assertEqual(self.hunk(path, *changed)['mechanical_hints'], [])
+
+    def test_php_attribute_change_keeps_default_priority(self):
+        from skim.analyze.units import priority
+        attribute = self.hunk('src/OrderController.php', "-#[Route('/old')]", "+#[Route('/new')]")
+        note = self.hunk('src/OrderController.php', '-# old note', '+# new note')
+        self.assertEqual(attribute['mechanical_hints'], [])
+        self.assertEqual(priority(attribute), priority(self.hunk('src/OrderController.php', '-run(1);', '+run(2);')))
+        self.assertEqual(note['mechanical_hints'], ['comment_only'])
+        self.assertGreater(priority(note), priority(attribute))
 
     def test_comment_only_hint_ignores_units_without_a_hunk(self):
         self.assertEqual(self.unit('tools/rotate_logs.sh', 'old mode 100644\nnew mode 100755\n')['mechanical_hints'], [])
