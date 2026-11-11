@@ -840,7 +840,7 @@ def file_panel(row, members, items, github_link, *, active=True, neighbors=None,
                                     + (f' data-file-position="{position}"' if position else '')
                                     + f' data-file-path="{esc(path)}"'
                                     + ('' if active else ' hidden'))
-    content = f'<section class="detail-file"{attributes}><header class="detail-file-heading"><h3 class="file-title">{full_path_title(path)}</h3>{file_badges(row, '중요도 ')}<span class="file-count">변경 {len(members)}개</span></header>'
+    content = f'<section class="detail-file"{attributes}><header class="detail-file-heading"><h3 class="file-title">{full_path_title(path)}</h3>{file_badges(row, "중요도 ")}<span class="file-count">변경 {len(members)}개</span></header>'
     if row['group_reason'] or row['focus_reason']:
         content += '<p class="file-focus-reason"><strong>중요한 이유</strong> ' + esc(row['group_reason'] or row['focus_reason']) + '</p>'
     # 연관 경로는 합성 결과의 변경 ID에서만 가져온다.
