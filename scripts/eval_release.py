@@ -308,6 +308,13 @@ def compare(config, corpus, out):
     out.write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n')
 
 
+def writes_into_corpus(home, source):
+    """Config.load() creates config/ and data/ under home, so check where those really land."""
+    protected = ((ROOT / 'eval').resolve(), source)
+    targets = [home] + [(home / name).resolve() for name in ('config', 'data')]
+    return any(target == root or root in target.parents for target in targets for root in protected)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--home', type=Path)
@@ -325,7 +332,10 @@ def main():
         source, out = args.corpus.resolve(), args.out.resolve()
         if (ROOT / 'eval').resolve() in out.parents or source in out.parents or out == source:
             parser.error('--compare never writes inside an evaluation corpus; choose another --out')
-        os.environ['SKIM_HOME'] = str(args.home.expanduser().resolve())
+        home = args.home.expanduser().resolve()
+        if writes_into_corpus(home, source):
+            parser.error('--compare never writes inside an evaluation corpus; choose another --home')
+        os.environ['SKIM_HOME'] = str(home)
         compare(Config.load(), source, out)
         return 0
     corpus = ROOT / 'eval' / args.version

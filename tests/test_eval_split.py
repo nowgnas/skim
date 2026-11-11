@@ -257,3 +257,28 @@ class CorpusTests(unittest.TestCase):
                 with patch.object(sys, 'argv', argv[:-1] + [str(target)]), self.assertRaises(SystemExit) as raised:
                     evaluation.main()
                 self.assertEqual(raised.exception.code, 2)
+
+    def test_compare_cli_rejects_home_that_writes_under_eval(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            corpus = tmp / 'corpus'
+            corpus.mkdir()
+            linked = tmp / 'linked-home'
+            linked.symlink_to(ROOT / 'eval/skim-ko-5', target_is_directory=True)
+            derived = tmp / 'derived-home'
+            derived.mkdir()
+            (derived / 'config').symlink_to(ROOT / 'eval/skim-ko-5', target_is_directory=True)
+            homes = [ROOT / 'eval', ROOT / 'eval/skim-ko-5', ROOT / 'eval/skim-ko-5/nested', linked, derived, corpus]
+            for home in homes:
+                argv = ['eval_release.py', '--home', str(home), '--corpus', str(corpus), '--compare',
+                        '--out', str(tmp / 'comparison.json')]
+                with self.subTest(home=home), patch.object(sys, 'argv', argv), patch(
+                        'eval_release.Config.load') as load, patch('eval_release.compare') as compare, patch(
+                        'sys.stderr'), self.assertRaises(SystemExit) as raised:
+                    evaluation.main()
+                self.assertEqual(raised.exception.code, 2)
+                load.assert_not_called()
+                compare.assert_not_called()
+            self.assertFalse((ROOT / 'eval/skim-ko-5/config').exists())
+            self.assertFalse((ROOT / 'eval/skim-ko-5/nested').exists())
+            self.assertFalse((corpus / 'config').exists())
