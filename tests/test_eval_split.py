@@ -169,7 +169,7 @@ class SplitScoringTests(unittest.TestCase):
             (corpus / 'diffs').mkdir(parents=True)
             data = (CORPUS / case['diff']).read_bytes()
             (corpus / case['diff']).write_bytes(data)
-            manifest = dict(MANIFEST, cases=[case])
+            manifest = dict(MANIFEST, cases=[case], confirmed_by=None, confirmed_sha256=None, confirmed_at=None)
             report = dict(prompt_version='skim-ko-6', prompt_sha256=evaluation.prompt_hash(),
                           schema_version=evaluation.SCHEMA_VERSION, sanitization_policy=evaluation.SANITIZATION_POLICY,
                           model='fake', cli_version='fake', run_timestamp='2026-11-11T12:00:00+09:00', reviewed_by='test')
@@ -219,8 +219,9 @@ class CorpusTests(unittest.TestCase):
                     self.assertLess(len(data.splitlines()), 150)
                     subprocess.run(['git', 'apply', '--numstat', str(CORPUS / case['diff'])],
                                    check=True, capture_output=True)
-        for key in ('confirmed_by', 'confirmed_sha256', 'confirmed_at'):
-            self.assertIsNone(MANIFEST[key])
+        self.assertEqual(MANIFEST['confirmed_by'], 'sangwon')
+        self.assertEqual(MANIFEST['confirmed_at'], '2026-11-12')
+        self.assertEqual(MANIFEST['confirmed_sha256'], evaluation.confirmation_hash(MANIFEST, 'skim-ko-6'))
         self.assertFalse((CORPUS / 'results.json').exists())
 
     def test_historical_corpora_unchanged(self):

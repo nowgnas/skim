@@ -1,8 +1,8 @@
 {
   "prompt_version": "skim-ko-6",
-  "confirmed_by": null,
-  "confirmed_sha256": null,
-  "confirmed_at": null,
+  "confirmed_by": "sangwon",
+  "confirmed_sha256": "66f2c9f961a47f86bc5966e5208bb6cf7932313fa4224feac0e21fc28513836f",
+  "confirmed_at": "2026-11-12",
   "rule": "포착 = 지정 high_files의 어떤 단위를 모델이 high로 판단한 경우만. 규칙 후보·경로 힌트·강제 바닥·테스트 공백은 포착을 대신하지 않는다. not_high_files가 모델 high이면 거짓 높음으로 실패한다. location_hint_files는 위치 힌트가 붙되 모델 high·핵심이 아니면 먼저 볼 파일에 오르지 않아야 한다. kind_signal_files·floor_files는 먼저 볼 파일 또는 안전 확인 줄에 보여야 하며 이 노출은 중요도와 따로 잰다. no_floor_files는 바닥이 붙지 않아야 한다. not_mechanical_files는 기계적 변경으로 분류되거나 접히지 않아야 한다. core_files·related_of는 그룹 정확도로만 보고하고 실패로 세지 않는다. 상위 3개 precision/recall의 기준은 core_files와 high_files의 합집합이다.",
   "cases": [
     {
