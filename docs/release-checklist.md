@@ -81,9 +81,9 @@ watch는 지정 파일의 모델 플래그 존재 여부를 별도로 기록하�
 `check_release.py`가 모두 0건을 요구한다. `confirmation_hash`는 `skim-ko-6`부터 `cases`와 함께
 manifest의 `rule` 문구를 묶으므로 정책 문구가 바뀌어도 다시 확인해야 한다.
 
-manifest의 `confirmed_by`는 비어 있다. sangwon이 라벨과 `rule`을 확인해 `confirmed_by`,
-`confirmed_sha256`, `confirmed_at`을 기록하고, 실제 모델 실행 결과를 검토해 `reviewed_by`를 남기기
-전에는 `check_release.py`가 `skim-ko-6`을 계속 차단한다. 부정 기대(`not_high_files` 등)는 1회
+sangwon이 2026-11-12에 라벨과 `rule`을 확인해 manifest에 `confirmed_by`, `confirmed_sha256`,
+`confirmed_at`을 기록했다. 실제 모델 실행 결과를 `results.json`으로 남기고 검토해 `reviewed_by`를
+기록하기 전에는 `check_release.py`가 `skim-ko-6`을 계속 차단한다. 부정 기대(`not_high_files` 등)는 1회
 실행으로 단정하지 않고 반복 실행으로 확인한다.
 
 현재 분석기를 다른 코퍼스의 diff에 돌려 전후를 비교할 수 있다. 게이트와 무관한 보고서만 쓰고
