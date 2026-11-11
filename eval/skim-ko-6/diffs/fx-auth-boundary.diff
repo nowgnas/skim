@@ -1,0 +1,12 @@
+diff --git a/app/views/exports.py b/app/views/exports.py
+index 6204d6d..f788e80 100644
+--- a/app/views/exports.py
++++ b/app/views/exports.py
+@@ -13,7 +13,6 @@ def list_exports():
+ 
+ 
+ @bp.route("/<export_id>/download")
+-@login_required
+ def download_export(export_id):
+     export = exports.get(export_id)
+     if export is None:

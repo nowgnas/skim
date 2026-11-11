@@ -10,7 +10,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
 import check_release
-from eval_release import prompt_hash, sha256, SCHEMA_VERSION, SANITIZATION_POLICY, confirmation_hash, assess, summarize
+from eval_release import prompt_hash, sha256, SCHEMA_VERSION, SANITIZATION_POLICY, confirmation_hash, assess, summarize, SPLIT_SCORING
 from skim.analyze.units import parse_diff
 from skim.analyze.protocol import prompt
 
@@ -50,7 +50,7 @@ class ReleaseGateTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.check()
 
-    def realistic(self, mid=None, case_id='fx-multichunk', status='partial', hide=False):
+    def realistic(self, mid=None, case_id='fx-multichunk', status='partial', hide=False, version=None):
         """mid({case: 파일 집합})의 파일은 모델이 mid로 판단한 것처럼 만들어 미스를 재현한다.
         status·hide는 case_id에만 적용한다."""
         mid = mid or {}
@@ -68,8 +68,14 @@ class ReleaseGateTests(unittest.TestCase):
             recorded.update(raw_outputs=[dict(stage='chunk', raw='{}'), dict(stage='synthesis', raw='{"intent":"offline fixture"}')],
                             requests=[prompt('chunk', dict(units=units, metadata={})),
                                       prompt('synthesis', dict(metadata={}, items=[], uncertainties=[]))])
-            recorded.update(assess(expected, result, recorded['requests'], diff))
-        summarize(self.report)
+            if version in SPLIT_SCORING:
+                # 분리 채점은 규칙 후보가 아니라 단위별 모델 판단만 포착으로 센다.
+                for unit in units:
+                    unit['status'] = 'analyzed'
+                result['items'] = [dict(change_id=u['change_id'], importance='high', behavior='changed',
+                                        reason='합성 근거', risk_flags=[]) for u in units]
+            recorded.update(assess(expected, result, recorded['requests'], diff, version))
+        summarize(self.report, version)
 
     def test_pass_realistic_structure(self):
         self.realistic()
@@ -113,8 +119,8 @@ class ReleaseGateTests(unittest.TestCase):
             self.report[key] = original
 
     def test_hash_mismatch(self):
-        self.realistic()
         version = check_release.PROMPT_VERSION
+        self.realistic(version=version)
         target = self.root / 'eval' / version
         self.corpus.rename(target)
         self.corpus = target

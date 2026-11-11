@@ -1,0 +1,30 @@
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index c1efa67..01356ad 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -7,11 +7,11 @@ jobs:
+     runs-on: ubuntu-latest
+     strategy:
+       matrix:
+-        python: ["3.11", "3.12"]
++        python: ["3.11", "3.12", "3.13"]
+     steps:
+       - uses: actions/checkout@v4
+       - uses: actions/setup-python@v5
+         with:
+           python-version: ${{ matrix.python }}
+-      - run: ./scripts/install.sh
++      - run: ./scripts/install.sh --dev
+       - run: python -m pytest -q
+diff --git a/scripts/install.sh b/scripts/install.sh
+index d302ba8..35328fe 100644
+--- a/scripts/install.sh
++++ b/scripts/install.sh
+@@ -4,4 +4,7 @@ set -eu
+ python3 -m venv .venv
+ .venv/bin/pip install --upgrade pip
+ .venv/bin/pip install -r requirements.txt
++if [ "${1:-}" = "--dev" ]; then
++    .venv/bin/pip install -r requirements-dev.txt
++fi
+ echo "installed into .venv"

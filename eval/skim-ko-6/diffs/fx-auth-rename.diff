@@ -1,0 +1,49 @@
+diff --git a/src/auth/session.py b/src/auth/session.py
+index e9f6327..4b214f5 100644
+--- a/src/auth/session.py
++++ b/src/auth/session.py
+@@ -1,7 +1,7 @@
+ """Server-side session records."""
+-import uuid
+-import time
+ import logging
++import time
++import uuid
+ from datetime import timedelta
+ 
+ from src.storage import session_store
+@@ -12,24 +12,24 @@ IDLE_LIMIT = timedelta(minutes=30)
+ REMEMBER_LIMIT = timedelta(days=14)
+ 
+ 
+-def _calc(remember):
+-    d = REMEMBER_LIMIT if remember else IDLE_LIMIT
+-    return time.time() + d.total_seconds()
++def _expires_at(remember):
++    lifetime = REMEMBER_LIMIT if remember else IDLE_LIMIT
++    return time.time() + lifetime.total_seconds()
+ 
+ 
+ def open_session(user_id, remember=False):
+-    sid = uuid.uuid4().hex
+-    exp = _calc(remember)
+-    session_store.put(sid, dict(user_id=user_id, expires_at=exp))
++    session_id = uuid.uuid4().hex
++    expires_at = _expires_at(remember)
++    session_store.put(session_id, dict(user_id=user_id, expires_at=expires_at))
+     log.info("session opened for user %s", user_id)
+-    return sid
++    return session_id
+ 
+ 
+ def is_live(session_id):
+-    rec = session_store.get(session_id)
+-    if rec is None:
++    record = session_store.get(session_id)
++    if record is None:
+         return False
+-    return rec["expires_at"] > time.time()
++    return record["expires_at"] > time.time()
+ 
+ 
+ def close_session(session_id):

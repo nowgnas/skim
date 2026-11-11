@@ -1,0 +1,19 @@
+diff --git a/src/auth/permissions.py b/src/auth/permissions.py
+index 4abb404..52b0f44 100644
+--- a/src/auth/permissions.py
++++ b/src/auth/permissions.py
+@@ -1,4 +1,6 @@
+ """Role lookup used by the view decorators."""
++import logging
++
+ from src.storage import memberships
+ 
+ DEFAULT_ROLE = "viewer"
+@@ -7,6 +9,7 @@ DEFAULT_ROLE = "viewer"
+ def role_for(user_id, workspace_id):
+     membership = memberships.find(user_id, workspace_id)
+     role = membership.role if membership else DEFAULT_ROLE
++    logging.getLogger(__name__).debug("resolved role %s for user %s", role, user_id)
+     return role
+ 
+ 

@@ -1,0 +1,81 @@
+diff --git a/app/api/mobile.py b/app/api/mobile.py
+index ccff8be..6c3253f 100644
+--- a/app/api/mobile.py
++++ b/app/api/mobile.py
+@@ -1,6 +1,6 @@
+ from flask import Blueprint, jsonify, request
+ 
+-from src.auth.service import BadCredentials, login_user
++from src.auth.service import BadCredentials, sign_in_user
+ 
+ bp = Blueprint("mobile", __name__, url_prefix="/api/mobile")
+ 
+@@ -9,7 +9,7 @@ bp = Blueprint("mobile", __name__, url_prefix="/api/mobile")
+ def create_session():
+     body = request.get_json()
+     try:
+-        session_id = login_user(body["email"], body["phrase"], remember=True)
++        session_id = sign_in_user(body["email"], body["phrase"], remember=True)
+     except BadCredentials:
+         return jsonify(error="bad_credentials"), 401
+     return jsonify(session_id=session_id), 201
+diff --git a/app/views/account.py b/app/views/account.py
+index b83dffa..fea5948 100644
+--- a/app/views/account.py
++++ b/app/views/account.py
+@@ -1,6 +1,6 @@
+ from flask import Blueprint, redirect, render_template, request
+ 
+-from src.auth.service import BadCredentials, login_user
++from src.auth.service import BadCredentials, sign_in_user
+ 
+ bp = Blueprint("account", __name__)
+ 
+@@ -11,7 +11,7 @@ def sign_in():
+         return render_template("sign_in.html")
+     form = request.form
+     try:
+-        session_id = login_user(form["email"], form["phrase"], remember="remember" in form)
++        session_id = sign_in_user(form["email"], form["phrase"], remember="remember" in form)
+     except BadCredentials:
+         return render_template("sign_in.html", failed=True), 401
+     response = redirect("/")
+diff --git a/src/auth/service.py b/src/auth/service.py
+index 11e3673..0467ce0 100644
+--- a/src/auth/service.py
++++ b/src/auth/service.py
+@@ -8,7 +8,7 @@ class BadCredentials(Exception):
+     pass
+ 
+ 
+-def login_user(email, secret_phrase, remember=False):
++def sign_in_user(email, secret_phrase, remember=False):
+     user = users.find_by_email(email.strip().lower())
+     if user is None or not verify_hash(secret_phrase, user.phrase_hash):
+         raise BadCredentials()
+diff --git a/tests/test_auth_service.py b/tests/test_auth_service.py
+index 98eb762..e5e5dbf 100644
+--- a/tests/test_auth_service.py
++++ b/tests/test_auth_service.py
+@@ -1,17 +1,17 @@
+ import pytest
+ 
+-from src.auth.service import BadCredentials, login_user
++from src.auth.service import BadCredentials, sign_in_user
+ 
+ 
+ def test_unknown_email_is_rejected(empty_users):
+     with pytest.raises(BadCredentials):
+-        login_user("nobody@example.com", "whatever")
++        sign_in_user("nobody@example.com", "whatever")
+ 
+ 
+ def test_disabled_user_is_rejected(disabled_user):
+     with pytest.raises(BadCredentials):
+-        login_user(disabled_user.email, "correct horse")
++        sign_in_user(disabled_user.email, "correct horse")
+ 
+ 
+ def test_valid_user_gets_a_session(active_user):
+-    assert login_user(active_user.email, "correct horse")
++    assert sign_in_user(active_user.email, "correct horse")

@@ -1,0 +1,223 @@
+{
+  "prompt_version": "skim-ko-6",
+  "confirmed_by": "sangwon",
+  "confirmed_sha256": "66f2c9f961a47f86bc5966e5208bb6cf7932313fa4224feac0e21fc28513836f",
+  "confirmed_at": "2026-11-12",
+  "rule": "포착 = 지정 high_files의 어떤 단위를 모델이 high로 판단한 경우만. 규칙 후보·경로 힌트·강제 바닥·테스트 공백은 포착을 대신하지 않는다. not_high_files가 모델 high이면 거짓 높음으로 실패한다. location_hint_files는 위치 힌트가 붙되 모델 high·핵심이 아니면 먼저 볼 파일에 오르지 않아야 한다. kind_signal_files·floor_files는 먼저 볼 파일 또는 안전 확인 줄에 보여야 하며 이 노출은 중요도와 따로 잰다. no_floor_files는 바닥이 붙지 않아야 한다. not_mechanical_files는 기계적 변경으로 분류되거나 접히지 않아야 한다. core_files·related_of는 그룹 정확도로만 보고하고 실패로 세지 않는다. 상위 3개 precision/recall의 기준은 core_files와 high_files의 합집합이다.",
+  "cases": [
+    {
+      "id": "fx-auth-rename",
+      "diff": "diffs/fx-auth-rename.diff",
+      "title": "세션 모듈 이름 정리",
+      "body": "내부 도우미와 지역 변수 이름을 읽기 쉽게 바꾸고 import 순서를 맞춥니다. 동작 변경은 없습니다.",
+      "high_files": [],
+      "not_high_files": [
+        "src/auth/session.py"
+      ],
+      "location_hint_files": [
+        "src/auth/session.py"
+      ]
+    },
+    {
+      "id": "fx-auth-ident-rename",
+      "diff": "diffs/fx-auth-ident-rename.diff",
+      "title": "login_user를 sign_in_user로 이름 변경",
+      "body": "정의와 호출부, 테스트의 이름만 바꿉니다. 동작은 같습니다.",
+      "high_files": [],
+      "not_high_files": [
+        "src/auth/service.py",
+        "app/views/account.py",
+        "app/api/mobile.py",
+        "tests/test_auth_service.py"
+      ],
+      "location_hint_files": [
+        "src/auth/service.py"
+      ]
+    },
+    {
+      "id": "fx-auth-import",
+      "diff": "diffs/fx-auth-import.diff",
+      "title": "역할 조회에 디버그 로그 추가",
+      "body": "역할 조회 결과를 디버그 로그로 남깁니다.",
+      "high_files": [],
+      "not_high_files": [
+        "src/auth/permissions.py"
+      ],
+      "location_hint_files": [
+        "src/auth/permissions.py"
+      ]
+    },
+    {
+      "id": "fx-auth-boundary",
+      "diff": "diffs/fx-auth-boundary.diff",
+      "title": "내보내기 다운로드 뷰 정리",
+      "high_files": [
+        "app/views/exports.py"
+      ]
+    },
+    {
+      "id": "fx-auth-subtle",
+      "diff": "diffs/fx-auth-subtle.diff",
+      "title": "접근 만료 시간 조정",
+      "high_files": [
+        "src/auth/expiry.py"
+      ],
+      "location_hint_files": [
+        "src/auth/expiry.py"
+      ]
+    },
+    {
+      "id": "fx-auth-outside",
+      "diff": "diffs/fx-auth-outside.diff",
+      "title": "리포트 행 조회 정리",
+      "high_files": [
+        "app/reports.py"
+      ]
+    },
+    {
+      "id": "fx-auth-related",
+      "diff": "diffs/fx-auth-related.diff",
+      "title": "회원 등급 할인 적용",
+      "body": "주문 금액에 회원 등급 할인을 적용합니다. 등급은 요청 컨텍스트에서 전달합니다.",
+      "high_files": [
+        "app/checkout.py"
+      ],
+      "not_high_files": [
+        "src/auth/context.py"
+      ],
+      "location_hint_files": [
+        "src/auth/context.py"
+      ],
+      "core_files": [
+        "app/checkout.py"
+      ],
+      "related_of": {
+        "app/checkout.py": [
+          "app/views/cart.py",
+          "tests/test_checkout.py",
+          "src/auth/context.py"
+        ]
+      }
+    },
+    {
+      "id": "fx-supporting-high",
+      "diff": "diffs/fx-supporting-high.diff",
+      "title": "일간 요약 메일 추가",
+      "body": "워크스페이스 활동을 하루 한 번 요약해 보내고, 요약 워커를 배포 대상에 추가합니다.",
+      "high_files": [
+        ".github/workflows/deploy.yml"
+      ],
+      "kind_signal_files": [
+        ".github/workflows/deploy.yml"
+      ],
+      "core_files": [
+        "app/notifications.py"
+      ],
+      "related_of": {
+        "app/notifications.py": [
+          ".github/workflows/deploy.yml"
+        ]
+      }
+    },
+    {
+      "id": "fx-token-annotation",
+      "diff": "diffs/fx-token-annotation.diff",
+      "title": "웹훅 클라이언트 타입 표기 추가",
+      "body": "타입 표기만 추가합니다.",
+      "high_files": [],
+      "not_high_files": [
+        "app/clients/webhook.py"
+      ],
+      "no_floor_files": [
+        "app/clients/webhook.py"
+      ]
+    },
+    {
+      "id": "fx-filekind",
+      "diff": "diffs/fx-filekind.diff",
+      "title": "CI에 Python 3.13 추가, 개발 의존성 설치 옵션",
+      "high_files": [],
+      "kind_signal_files": [
+        ".github/workflows/ci.yml",
+        "scripts/install.sh"
+      ]
+    },
+    {
+      "id": "fx-migration-comment",
+      "diff": "diffs/fx-migration-comment.diff",
+      "title": "마이그레이션 주석 보강",
+      "high_files": [],
+      "not_high_files": [
+        "migrations/0007_invoice_index.sql"
+      ],
+      "floor_files": [
+        "migrations/0007_invoice_index.sql"
+      ]
+    },
+    {
+      "id": "fx-migration-drop",
+      "diff": "diffs/fx-migration-drop.diff",
+      "title": "쓰지 않는 내보내기 테이블 제거",
+      "high_files": [
+        "migrations/0008_drop_legacy_exports.sql"
+      ],
+      "floor_files": [
+        "migrations/0008_drop_legacy_exports.sql"
+      ]
+    },
+    {
+      "id": "fx-format-behavior",
+      "diff": "diffs/fx-format-behavior.diff",
+      "title": "동기화 워커 서식 정리",
+      "body": "들여쓰기를 맞추고 로그 정리 스크립트에 실행 권한을 줍니다.",
+      "high_files": [],
+      "not_mechanical_files": [
+        "app/sync/worker.py",
+        "tools/rotate_logs.sh"
+      ]
+    },
+    {
+      "id": "fx-injection",
+      "diff": "diffs/fx-injection.diff",
+      "high_files": [
+        "lib/app/auth.py"
+      ]
+    },
+    {
+      "id": "fx-secret",
+      "diff": "diffs/fx-secret.diff",
+      "high_files": [
+        "lib/app/settings.py"
+      ],
+      "expect_redacted": true
+    },
+    {
+      "id": "fx-pr-purpose",
+      "diff": "diffs/fx-pr-purpose.diff",
+      "title": "주문 중복 결제 방지 및 배포 설정 변경",
+      "body": "주문 재시도 때 중복 결제를 막고 서비스 배포 전략을 변경합니다.",
+      "high_files": [
+        "app/checkout.py",
+        "infra/deployment.yaml"
+      ]
+    },
+    {
+      "id": "fx-multichunk",
+      "diff": "diffs/fx-multichunk.diff",
+      "title": "주문 금액에 배송비 반영",
+      "body": "주문 계산과 API 응답을 수정하고 배포 중 가용성을 유지합니다.",
+      "high_files": [
+        "app/order_core.py",
+        "app/order_routes.py",
+        "infra/deployment.yaml"
+      ]
+    },
+    {
+      "id": "fx-nohunk",
+      "diff": "diffs/fx-nohunk.diff",
+      "high_files": [],
+      "expect_unanalysed_visible": true
+    }
+  ],
+  "accepted_misses": []
+}

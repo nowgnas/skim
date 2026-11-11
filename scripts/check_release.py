@@ -6,7 +6,7 @@ from pathlib import Path
 import re
 import sys
 
-from eval_release import ROOT, PROMPT_VERSION, SCHEMA_VERSION, prompt_hash, sha256, assess, confirmation_hash, saved_requests, summarize, validate_binding
+from eval_release import ROOT, PROMPT_VERSION, SCHEMA_VERSION, SPLIT_FAILURES, SPLIT_SCORING, prompt_hash, sha256, assess, confirmation_hash, saved_requests, summarize, validate_binding
 from skim.analyze.units import SANITIZATION_POLICY, parse_diff
 
 
@@ -45,7 +45,10 @@ def check(root=ROOT, version=PROMPT_VERSION):
     manifest = json.loads((corpus / 'manifest.json').read_text())
     if not isinstance(manifest.get('confirmed_by'), str) or not manifest['confirmed_by'].strip():
         raise ValueError('confirmed_by 누락: high_files 사람 확인 필요')
-    if manifest.get('confirmed_sha256') != confirmation_hash(manifest):
+    split = version in SPLIT_SCORING
+    if split and (not isinstance(manifest.get('rule'), str) or not manifest['rule'].strip()):
+        raise ValueError('rule 누락: 포착 정책 문구 필요')
+    if manifest.get('confirmed_sha256') != confirmation_hash(manifest, version):
         raise ValueError('confirmed_sha256 불일치: high_files 재확인 필요')
     accepted = accepted_misses(manifest)
     report = json.loads((corpus / 'results.json').read_text())
@@ -77,7 +80,7 @@ def check(root=ROOT, version=PROMPT_VERSION):
         shown_ids = {u['change_id']: u['file_path'] for u in units}
         if len(shown_ids) != len(units) or shown_ids != source_ids:
             raise ValueError(f"{case['id']}: unit set mismatch")
-        scores = assess(expected, case['displayed'], requests, diff)
+        scores = assess(expected, case['displayed'], requests, diff, version)
         if any(case.get(key) != value for key, value in scores.items()):
             raise ValueError(f"{case['id']}: stored scores mismatch")
         if case['displayed']['status'] not in ('completed', 'partial'):
@@ -91,24 +94,30 @@ def check(root=ROOT, version=PROMPT_VERSION):
         if (case['model'], case['cli_version']) != (report['model'], report['cli_version']):
             raise ValueError(f"{case['id']}: 모델 또는 CLI 버전 불일치")
         files = case['displayed']['files']
-        if any(not case['captured'].get(path) or not any(f['file_path'] == path and
-                   (f['importance'] == 'high' or f['candidates']) for f in files)
+        # 분리 채점에서는 규칙 후보가 포착을 대신하지 않는다. captured는 위에서 다시 계산해 대조했다.
+        if any(not case['captured'].get(path) or not (split or any(f['file_path'] == path and
+                   (f['importance'] == 'high' or f['candidates']) for f in files))
                for path in expected['high_files'] if path not in allowed):
             raise ValueError(f"{case['id']}: 지정 high 미포착")
+        if split:
+            for key in SPLIT_FAILURES:
+                if case[key]:
+                    raise ValueError(f"{case['id']}: {key} {', '.join(case[key])}")
         for key in ('expect_redacted', 'expect_unanalysed_visible', 'watch'):
             if expected.get(key) and case['expectations'].get(key, {}).get('met') is not True:
                 raise ValueError(f"{case['id']}: {key} 기대 불충족")
         if any(e.get('met') is not True for e in case['expectations'].values()):
             raise ValueError(f"{case['id']}: 기대 불충족")
     recomputed = dict(cases=report['cases'])
-    summarize(recomputed)
+    summarize(recomputed, version)
     if recomputed['summary'] != report['summary']:
         raise ValueError('평가 요약 불일치')
     summary = report['summary']
     # 다른 검사를 모두 통과했으므로 실패 case는 허용 미스만으로 실패한 case여야 한다.
     allowed_failures = [c['id'] for c in report['cases'] if c['id'] in accepted]
     if (summary['total_misses'] != sum(len(f) for f in accepted.values()) or summary['hidden_count'] != 0
-            or summary['failures'] != allowed_failures):
+            or summary['failures'] != allowed_failures
+            or any(summary[key] for key in SPLIT_FAILURES if split)):
         raise ValueError('평가 요약 실패')
 
 

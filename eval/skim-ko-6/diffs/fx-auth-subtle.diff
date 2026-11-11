@@ -1,0 +1,13 @@
+diff --git a/src/auth/expiry.py b/src/auth/expiry.py
+index 646b672..bb6e72f 100644
+--- a/src/auth/expiry.py
++++ b/src/auth/expiry.py
+@@ -1,7 +1,7 @@
+ """How long a signed-in browser stays signed in."""
+ from datetime import datetime, timedelta, timezone
+ 
+-ACCESS_TTL = timedelta(minutes=15)
++ACCESS_TTL = timedelta(days=30)
+ REFRESH_TTL = timedelta(days=7)
+ 
+ 

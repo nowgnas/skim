@@ -1,0 +1,65 @@
+diff --git a/app/checkout.py b/app/checkout.py
+index 22eb568..e18726c 100644
+--- a/app/checkout.py
++++ b/app/checkout.py
+@@ -3,14 +3,17 @@ from decimal import Decimal
+ 
+ from app.storage import orders
+ 
++TIER_DISCOUNT = {"standard": Decimal("0"), "plus": Decimal("0.05"), "staff": Decimal("0.30")}
+ 
+-def order_total(cart):
++
++def order_total(cart, tier="standard"):
+     subtotal = sum(line.unit_price * line.quantity for line in cart.lines)
+-    return (subtotal + cart.shipping_fee).quantize(Decimal("0.01"))
++    discounted = subtotal * (1 - TIER_DISCOUNT[tier])
++    return (discounted + cart.shipping_fee).quantize(Decimal("0.01"))
+ 
+ 
+-def submit_order(cart, payments):
+-    total = order_total(cart)
++def submit_order(cart, payments, tier="standard"):
++    total = order_total(cart, tier)
+     order = orders.create(cart.customer_id, cart.lines, total)
+     payments.charge(order.id, total)
+     return order
+diff --git a/app/views/cart.py b/app/views/cart.py
+index aaed8a4..5305fd1 100644
+--- a/app/views/cart.py
++++ b/app/views/cart.py
+@@ -10,5 +10,5 @@ bp = Blueprint("cart", __name__, url_prefix="/cart")
+ @bp.route("/submit", methods=["POST"])
+ def submit():
+     cart = carts.for_customer(g.context.user_id)
+-    order = checkout.submit_order(cart, payments)
++    order = checkout.submit_order(cart, payments, tier=g.context.tier)
+     return jsonify(order_id=order.id, total=str(order.total)), 201
+diff --git a/src/auth/context.py b/src/auth/context.py
+index 7c20d46..81a170c 100644
+--- a/src/auth/context.py
++++ b/src/auth/context.py
+@@ -8,8 +8,9 @@ from src.storage import users
+ class RequestContext:
+     user_id: int
+     email: str
++    tier: str = "standard"
+ 
+ 
+ def build_context(session_record):
+     user = users.get(session_record["user_id"])
+-    return RequestContext(user_id=user.id, email=user.email)
++    return RequestContext(user_id=user.id, email=user.email, tier=user.tier)
+diff --git a/tests/test_checkout.py b/tests/test_checkout.py
+index b966b79..7611e38 100644
+--- a/tests/test_checkout.py
++++ b/tests/test_checkout.py
+@@ -6,3 +6,8 @@ from app.checkout import order_total
+ def test_total_adds_shipping(cart_of):
+     cart = cart_of(("12.00", 2), shipping="3.00")
+     assert order_total(cart) == Decimal("27.00")
++
++
++def test_plus_tier_discounts_goods_but_not_shipping(cart_of):
++    cart = cart_of(("100.00", 1), shipping="3.00")
++    assert order_total(cart, "plus") == Decimal("98.00")

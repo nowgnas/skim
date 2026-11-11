@@ -58,3 +58,38 @@ watch는 지정 파일의 모델 플래그 존재 여부를 별도로 기록하�
 향후 배포 자동화에서도 이 명령의 성공을 필수로 확인해야 한다.
 
 `metrics`는 모델 high와 규칙 후보를 분리하고 메인 화면과 같은 순서의 상위 3개 및 precision/recall을 기록한다. 목적 요약은 사람이 검토해야 하며 이 수치만으로 정확도 개선을 판단하지 않는다. 변경 전후 비교에는 동일한 사람이 확인한 기준과 모델·CLI, 반복 실행 결과가 필요하다.
+
+## skim-ko-6 분리 채점
+
+`eval/skim-ko-6`은 경로만 보고 붙은 인증 힌트가 거짓 높음을 만드는지, 그러면서 실제 높음을
+놓치지 않는지를 재는 격리 fixture 18건이다(새 fixture 13건 + `skim-ko-5`에서 바이트 그대로
+복사한 `fx-secret`·`fx-injection`·`fx-pr-purpose`·`fx-multichunk`·`fx-nohunk`).
+`skim-ko-3`~`skim-ko-5`의 자료와 채점은 바꾸지 않는다. 채점은 코퍼스 버전으로 갈린다.
+
+| 라벨 | 채점 |
+| --- | --- |
+| `high_files` | 모델이 high로 본 경우만 포착. 규칙 후보·경로 힌트·강제 바닥·테스트 공백은 대신하지 않는다 |
+| `not_high_files` | 모델 high이면 `false_high`로 실패 |
+| `location_hint_files` | 위치 힌트가 없으면 `location_hint_missing`, 모델 high·핵심이 아닌데 먼저 볼 파일에 오르면 `location_hint_promoted` |
+| `kind_signal_files`, `floor_files` | 신호가 붙고 먼저 볼 파일이나 안전 확인 줄에 보여야 한다. 아니면 `signal_hidden`. 중요도와 따로 잰다 |
+| `no_floor_files` | 강제 바닥이 붙으면 `unexpected_floor` |
+| `not_mechanical_files` | 기계적 변경으로 분류되거나 접히면 `mechanical_folded` |
+| `core_files`, `related_of` | `metrics.core_hit`·`related_hit`로 보고만 하고 실패로 세지 않는다 |
+
+상위 3개 precision/recall의 기준은 `core_files`와 `high_files`의 합집합이며, 기준이 3개를 넘으면
+`top3_recall_ceiling`이 recall 상한을 알려 준다. 위 실패 목록은 사례별로 기록되고 요약과
+`check_release.py`가 모두 0건을 요구한다. `confirmation_hash`는 `skim-ko-6`부터 `cases`와 함께
+manifest의 `rule` 문구를 묶으므로 정책 문구가 바뀌어도 다시 확인해야 한다.
+
+sangwon이 2026-11-12에 라벨과 `rule`을 확인해 manifest에 `confirmed_by`, `confirmed_sha256`,
+`confirmed_at`을 기록했다. 실제 모델 실행 결과를 `results.json`으로 남기고 검토해 `reviewed_by`를
+기록하기 전에는 `check_release.py`가 `skim-ko-6`을 계속 차단한다. 부정 기대(`not_high_files` 등)는 1회
+실행으로 단정하지 않고 반복 실행으로 확인한다.
+
+현재 분석기를 다른 코퍼스의 diff에 돌려 전후를 비교할 수 있다. 게이트와 무관한 보고서만 쓰고
+`eval/` 아래에는 쓰지 않는다. 기존 `results.json`이 있으면 사례별 `baseline`(이전 미스·모델 high·
+상위 3개)을 함께 싣고, `model_only_misses`로 규칙 후보 없이 모델만으로 놓친 high를 보여 준다.
+
+```sh
+python3 scripts/eval_release.py --home "$SKIM_HOME" --corpus eval/skim-ko-5 --compare --out /tmp/skim-ko-5-compare.json
+```
