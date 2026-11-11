@@ -696,3 +696,19 @@ input[type=search]{-webkit-appearance:none;appearance:none}
 
 .file-search-controls .file-search-form input{background:var(--surface);border:1.5px solid var(--accent);box-shadow:0 0 0 3px var(--accent-weak)}
 .file-search-controls .file-search-form input:focus{border-color:var(--accent);box-shadow:0 0 0 4px var(--accent-weak)}
+/* 역할·경로 힌트는 무채색으로 둔다. 위험색은 모델이 높음으로 본 파일에만 쓴다. */
+.file-badges{display:inline-flex;flex-wrap:wrap;align-items:center;gap:4px;flex:none}
+.badge.role{background:var(--fill);color:var(--text-sub);flex:none}
+.badge.hint{background:transparent;box-shadow:inset 0 0 0 1px var(--line);color:var(--muted);font-weight:500;flex:none}
+.file-note .badge{min-height:20px}
+.safety-line{align-items:baseline}
+.safety-label{font-weight:600;color:var(--text-sub)}
+.safety-item{display:inline-flex;flex-wrap:wrap;align-items:center;gap:6px;color:var(--text);font-weight:400}
+.hint-line,.hint-line a{color:var(--muted)}
+.hint-line a{text-decoration:underline;text-underline-offset:2px}
+.detail-focus>.file-summary{margin:10px 2px 0}
+.focus-text>.badge.role{margin-top:6px}
+.related-files{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;font-size:13px;color:var(--text-sub)}
+.file-nav-fold{margin:4px 0 0;padding:0;border-radius:0;background:transparent;box-shadow:none}
+.file-nav-fold>summary{padding:8px 10px;font-size:13px;font-weight:500;color:var(--muted)}
+.file-nav-fold[open]>summary{margin-bottom:2px}
