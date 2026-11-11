@@ -897,6 +897,7 @@ def detail(pr, query, config, offline=False, analysis_panel="", csrf=None):
     rows = file_rows(shown)
     legacy = not rows or rows[0]['legacy']
     view = 'hints' if query.get('view') == ['hints'] else ''
+    hint_paths = {row['path'] for row in rows if row['hint']}
     units_by_file = {}
     for unit in pr['units']:
         units_by_file.setdefault(unit['file_path'], []).append(unit)
@@ -906,7 +907,8 @@ def detail(pr, query, config, offline=False, analysis_panel="", csrf=None):
         order = query.get('order', [''])[0]
         if order in ('priority', 'original'):
             params.append(('order', order))
-        if view:
+        # 필터 밖 파일로 가는 링크는 필터를 풀어야 목적 파일 패널이 열린다.
+        if view and path in hint_paths:
             params.append(('view', view))
         if preserve_search and query.get('unit_q', [''])[0]:
             params.append(('unit_q', query['unit_q'][0][:200]))

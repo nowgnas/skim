@@ -190,6 +190,20 @@ class RoleWebTests(unittest.TestCase):
         self.assertRegex(nav, r'href="\?view=hints&amp;file=auth%2Fsession\.py#')
         self.assertIn('?order=original&amp;view=hints#file-changes', body)
 
+    def test_hints_view_links_to_files_outside_the_filter_open_them(self):
+        body = self.request('/pr/1?view=hints&order=original')[2]
+        panel = body.split('data-file-path="auth/session.py"', 1)[1].split('</section>', 1)[0]
+        core = re.search(r'<strong>핵심 변경</strong><a href="([^"]+)">service\.py</a>', panel).group(1)
+        safety = re.search(r'<a class="safety-item" href="([^"]+)"><span class="file-path">\.env</span>', body).group(1)
+        for href, path in ((core, 'service.py'), (safety, '.env')):
+            href = href.replace('&amp;', '&')
+            # 필터만 풀고 나머지 쿼리는 그대로 둔다.
+            self.assertNotIn('view=hints', href)
+            self.assertIn('order=original', href)
+            target = self.request('/pr/1' + href.split('#')[0])[2]
+            self.assertRegex(target, r'<section class="detail-file"(?![^>]* hidden)[^>]* data-file-path="%s"' % re.escape(path))
+            self.assertNotIn('경로상 확인 파일 1개만 표시합니다.', target)
+
     def test_detail_badges_pair_role_with_importance(self):
         body = self.request('/pr/1')[2]
         nav = body.split('class="file-nav-links"', 1)[1].split('</nav>', 1)[0]
