@@ -1,4 +1,5 @@
 """Deterministic split scoring and corpus checks; no model calls."""
+import ast
 import copy
 import json
 from pathlib import Path
@@ -282,3 +283,39 @@ class CorpusTests(unittest.TestCase):
             self.assertFalse((ROOT / 'eval/skim-ko-5/config').exists())
             self.assertFalse((ROOT / 'eval/skim-ko-5/nested').exists())
             self.assertFalse((corpus / 'config').exists())
+
+    def test_auth_rename_fixture_preserves_behavior(self):
+        """The low label holds only if the diff renames private and local names and nothing else."""
+        before, after = [], []
+        for line in (CORPUS / 'diffs/fx-auth-rename.diff').read_text().splitlines():
+            if line.startswith(('diff ', 'index ', '--- ', '+++ ', '@@')):
+                continue
+            if line[:1] != '+':
+                before.append(line[1:])
+            if line[:1] != '-':
+                after.append(line[1:])
+        renames = dict(_calc='_expires_at', d='lifetime', sid='session_id', exp='expires_at', rec='record')
+
+        class Rename(ast.NodeTransformer):
+            def visit_Name(self, node):
+                node.id = renames.get(node.id, node.id)
+                return node
+
+            def visit_FunctionDef(self, node):
+                node.name = renames.get(node.name, node.name)
+                return self.generic_visit(node)
+
+        def shape(lines, rename=False):
+            # The last hunk stops at a bare `def` context line; give it a body so the excerpt parses.
+            tree = ast.parse('\n'.join(lines + ['    ...']))
+            if rename:
+                tree = Rename().visit(tree)
+            imports = sorted(ast.dump(n) for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom)))
+            rest = [ast.dump(n) for n in tree.body if not isinstance(n, (ast.Import, ast.ImportFrom))]
+            public = [n.name for n in tree.body if isinstance(n, ast.FunctionDef) and not n.name.startswith('_')]
+            signatures = [ast.dump(n.args) for n in tree.body if isinstance(n, ast.FunctionDef)]
+            return imports, rest, public, signatures
+
+        self.assertEqual(shape(before, rename=True), shape(after))
+        self.assertEqual(shape(before)[2:], shape(after)[2:])
+        self.assertEqual(shape(after)[2], ['open_session', 'is_live', 'close_session'])
