@@ -274,8 +274,16 @@ def comment_only(path, text):
     lines = [text[start:end].strip() for start, end in changed_spans(text)]
     if not prefixes or not lines:
         return False
-    return all(not line or line == '*/' or (line.startswith(prefixes) and not line.startswith('#!'))
-               for line in lines)
+    return all(not line or line == '*/' or _full_line_comment(line, prefixes) for line in lines)
+
+
+def _full_line_comment(line, prefixes):
+    if not line.startswith(prefixes) or line.startswith('#!'):
+        return False
+    if not line.startswith('/*'):
+        return True
+    # 블록 주석을 닫은 뒤에 남은 글자는 실행 코드일 수 있다.
+    return not line.partition('*/')[2].strip()
 
 
 SIGNAL_FIELDS = ('location_hints', 'kind_signals', 'content_hits', 'hard_floors', 'test_gap', 'mechanical_hints')

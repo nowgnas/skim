@@ -102,6 +102,7 @@ class RiskCandidatesTests(unittest.TestCase):
         for path, changed in (('app/order_core.py', ('-# prior note 1', '+# updated note 1')),
                               ('app/order_core.py', ('-    # prior', '+', '+    # updated')),
                               ('web/app.ts', ('-// prior', '+/* updated', '+*/')),
+                              ('web/app.ts', ('-/* prior */', '+/* updated */  ')),
                               ('db/report.sql', ('--- prior', '+-- updated'))):
             with self.subTest(path=path, changed=changed):
                 self.assertEqual(self.hunk(path, *changed)['mechanical_hints'], ['comment_only'])
@@ -110,6 +111,9 @@ class RiskCandidatesTests(unittest.TestCase):
                               ('app/order_core.py', ('-# prior note', '+# updated note', '+total += fee')),
                               ('app/sync/worker.py', ('-            queue.ack(job)', '+        queue.ack(job)')),
                               ('app/call.py', ('-run(args)', '+run(', '+    *args)')),
+                              ('web/app.ts', ('-/* note */ run(1);', '+/* note */ run(2);')),
+                              ('app/query.sql', ('-/* note */ SELECT 1;', '+/* note */ SELECT 2;')),
+                              ('web/app.ts', ('-/* a */ /* b */', '+/* a */ run(); /* b */')),
                               ('web/app.ts', ('-# prior', '+# updated')),
                               ('README.md', ('-# Old title', '+# New title')),
                               ('lib/util.c', ('-#include <a.h>', '+#include <b.h>')),
