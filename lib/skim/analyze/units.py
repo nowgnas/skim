@@ -5,31 +5,61 @@ import re
 from functools import lru_cache
 from pathlib import PurePosixPath
 
-SANITIZATION_POLICY = 'redact-v3'
+SANITIZATION_POLICY = 'redact-v4'
+
+REDACTED = '[민감 정보 제외]'
+# 값은 전부 가리되, 문자열 리터럴을 직접 대입한 줄이었다는 사실은 남긴다.
+REDACTED_LITERAL = '[민감 정보 제외: 직접 쓴 문자열 값]'
 
 # 모델 출력에서는 값 자체가 확인되는 토큰·개인 키만 가린다.
 SECRET_VALUE = re.compile(
     r'-----BEGIN (?:[A-Z ]*PRIVATE KEY)-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)'
     r'|(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|sk_(?:live|test)_[A-Za-z0-9]+'
     r'|(?:AKIA|ASIA)[A-Z0-9]{16}|xox[baprs]-[A-Za-z0-9-]+|AIza[A-Za-z0-9_-]{30,})')
-SECRET_ASSIGNMENT = re.compile(r"(?im:\b(?:api[_-]?key|[a-z0-9_]*(?:secret|password|token|private[_-]?key)[a-z0-9_]*|authorization)[\"']?\s*[=:][^\n]*)")
+SECRET_ASSIGNMENT = re.compile(r"(?im:\b(?P<head>(?:api[_-]?key|[a-z0-9_]*(?:secret|password|token|private[_-]?key)[a-z0-9_]*|authorization)[\"']?\s*[=:])(?P<value>[^\n]*))")
 
 # 이름과 값이 모두 정해진 사용량 설정만 예외로 둔다. 비밀값처럼 보이는 다른 대입은 계속 가린다.
 SAFE_COUNT_ASSIGNMENT = re.compile(r"""(?i)^(?:max_tokens|token_count|total_tokens|input_tokens|output_tokens|prompt_tokens|completion_tokens)["']?\s*[:=]\s*(?P<value>[0-9]{1,10}|true|false)\s*[,;]?\s*$""")
+
+# A value that is one whole quoted string. f-strings and concatenations do not match.
+LITERAL_VALUE = re.compile(r"""\s*[bBrRuU]{0,2}(?P<quote>["'])(?P<body>[^"'\\\n]+)(?P=quote)\s*[,;]?\s*""")
+# Quoted text that only refers to a value defined elsewhere (shell, template, CI placeholders).
+REFERENCE_BODY = re.compile(r'\$\{|\{\{|#\{|%\(|^\$|^<[^>]*>$|^%\w+%$|^\s*$')
+# The name is kept only when nothing but a declaration prefix precedes it on the line.
+# Anywhere else the matched "name" may be the tail of a value (e.g. a base64 run ending in '=').
+NAME_PREFIX = re.compile(r"""[+\- ]?\s*(?:-\s+)?(?:(?:export|const|let|var|final|static|public|private|val)\s+)*(?:(?:self|this)\.)?["']?""")
+
+
+# Partial diffs cannot establish string state; even closed markers suppress names.
+MULTILINE_CONTEXT = re.compile(r"`|\"{3}|'{3}|<<|:[ \t]*[|>]|\\\r?\n")
 
 
 EXCLUDED = ('.env', '.env.*', '*.pem', '*.key', '*credentials*', 'id_rsa*', 'id_ed25519*', '*.p12', '*.pfx')
 
 
 def sanitize(text, assignments=True):
-    cleaned = SECRET_VALUE.sub('[민감 정보 제외]', text or '')
+    text = text or ''
+    cleaned = SECRET_VALUE.sub(REDACTED, text)
     if not assignments:
         return cleaned
+    unsafe_context = MULTILINE_CONTEXT.search(text)
     def redact(match):
+        line_start = match.string.rfind('\n', 0, match.start()) + 1
+        if unsafe_context:
+            return REDACTED
+        safe_name = (len(match['head']) <= 80
+                     and NAME_PREFIX.fullmatch(match.string, line_start, match.start()))
         safe = SAFE_COUNT_ASSIGNMENT.fullmatch(match.group())
-        if safe and (not safe['value'].isdigit() or int(safe['value']) <= 2147483647):
+        if safe_name and safe and (not safe['value'].isdigit() or int(safe['value']) <= 2147483647):
             return match.group()
-        return '[민감 정보 제외]'
+        if match['value'].strip() == REDACTED_LITERAL:
+            return match.group() if safe_name else REDACTED
+        literal = LITERAL_VALUE.fullmatch(match['value'])
+        if not literal or REFERENCE_BODY.search(literal['body']):
+            return REDACTED
+        if safe_name:
+            return match['head'] + ' ' + REDACTED_LITERAL
+        return REDACTED
     return SECRET_ASSIGNMENT.sub(redact, cleaned)
 
 
@@ -192,6 +222,124 @@ def added_test_lines(text):
                 yield ''.join(masked)
 
 
+DEFINITION = re.compile(
+    r'^\s*(?:async\s+)?(?:def|function|func|fn|fun)\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)\s*[(<]'
+    r'|^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_]\w*)\s*=\s*(?:async\s*)?(?:function\b|\([^)]*\)\s*=>|\w+\s*=>)')
+CALL = re.compile(r'(?:(\.|->|::|\?\.)\s*|(?<![\w$.:>]))([A-Za-z_]\w*)\s*\(')
+# 여러 모듈에 같은 이름이 흔해 이름만으로 호출 대상을 특정할 수 없는 함수다.
+COMMON_CALLS = frozenset(
+    'main init setup teardown test run start stop open close read write load save dump send recv '
+    'get set put post delete patch head add remove update create build make find list show print format '
+    'parse render validate check handle process execute call apply reset clear copy merge filter sort '
+    'next iter enter exit wrapper inner callback handler helper decorator'.split())
+CALLS_CHANGED_LIMIT = 3
+CALLEE_EXCERPT_BYTES = 240
+
+
+def _definition_names(source):
+    return [first or second for first, second in DEFINITION.findall(source)]
+
+
+DEFINITION_NOISE = re.compile(
+    r"""\#[^\n]*|//[^\n]*|/\*[\s\S]*?(?:\*/|\Z)"""
+    r"""|"{3}[\s\S]*?(?:"{3}|\Z)|'{3}[\s\S]*?(?:'{3}|\Z)"""
+    r"""|"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'""")
+
+
+def definition_sections(text):
+    """Track each diff side separately so before/after definitions count only once."""
+    sides = []
+    for side in ('-', '+'):
+        records = []
+        for index, line in enumerate(text.splitlines()):
+            if line.startswith('@@'):
+                source = line.partition('@@')[2].partition('@@')[2]
+                records.append((index, line, ' ', source))
+            elif line[:1] in (' ', side):
+                records.append((index, line, line[0], line[1:]))
+        source = '\n'.join(record[3] for record in records)
+        masked = DEFINITION_NOISE.sub(lambda match: re.sub(r'[^\n]', ' ', match.group()), source)
+        sections = []
+        current = None
+        for (index, line, sign, _), code in zip(records, masked.split('\n')):
+            if line.startswith('@@'):
+                current = None
+            names = _definition_names(code)
+            if names:
+                current = dict(name=names[0], lines=[])
+                sections.append(current)
+            if current is not None and sign == side:
+                current['lines'].append((index, line))
+        sides.append(sections)
+    return sides
+
+
+def definitions(text):
+    sides = definition_sections(text)
+    seen = {section['name'] for sections in sides for section in sections}
+    changed = list(dict.fromkeys(section['name'] for sections in sides
+                                 for section in sections if section['lines']))
+    return seen, changed
+
+
+def definition_count(text, name):
+    return max(sum(section['name'] == name for section in sections)
+               for sections in definition_sections(text))
+
+
+def callee_changes(text, name):
+    lines = {index: line for sections in definition_sections(text) for section in sections
+             if section['name'] == name for index, line in section['lines']}
+    return '\n'.join(lines[index] for index in sorted(lines))
+
+
+def _specific_call(name):
+    return (len(name) >= 4 and not name.startswith(('__', 'test')) and name.lower() not in COMMON_CALLS)
+
+
+def _prose(path):
+    return path.lower().endswith(('.md', '.rst', '.txt'))
+
+
+def link_calls(units):
+    """Link bare-name call candidates only to unique definitions in changed units."""
+    local, owners, changed_names = {}, {}, {}
+    for unit in units:
+        unit['calls_changed'] = []
+        if (unit['excluded'] or unit['kind'] != 'hunk' or is_test(unit['file_path'])
+                or _prose(unit['file_path'])):
+            continue
+        local[unit['change_id']], changed = definitions(unit['diff'])
+        changed_names[unit['change_id']] = changed
+        for name in local[unit['change_id']]:
+            owners.setdefault(name, []).append(unit)
+    targets = {name: found[0] for name, found in owners.items()
+               if _specific_call(name) and len(found) == 1
+               and name in changed_names[found[0]['change_id']]
+               and definition_count(found[0]['diff'], name) == 1}
+    if not targets:
+        return
+    for unit in units:
+        if unit['change_id'] not in local:
+            continue
+        names = []
+        for line in added_test_lines(unit['diff']):
+            for dotted, name in CALL.findall(line):
+                target = targets.get(name)
+                if (target is not None and target is not unit and name not in names
+                        and name not in local[unit['change_id']]
+                        and not dotted):
+                    names.append(name)
+        for name in names[:CALLS_CHANGED_LIMIT]:
+            target = targets[name]
+            # Signs stay so the excerpt reads as before/after rather than two unrelated lines.
+            changed = callee_changes(target['diff'], name)
+            excerpt = changed.encode('utf-8')[:CALLEE_EXCERPT_BYTES].decode('utf-8', errors='ignore')
+            unit['calls_changed'].append(dict(
+                name=name, change_id=target['change_id'], file_path=target['file_path'],
+                excerpt=excerpt, excerpt_truncated=excerpt != changed))
+
+
 def signals(path, text, tests, test_diffs=None, *, test_lines=None):
     location = PurePosixPath(path.lower())
     # 경로 조각은 camelCase를 분리하고 확장자를 뗀 이름으로 통일한다.
@@ -293,6 +441,14 @@ def _full_line_comment(line, prefixes, code):
 SIGNAL_FIELDS = ('location_hints', 'kind_signals', 'content_hits', 'hard_floors', 'test_gap', 'mechanical_hints')
 
 
+def call_context(unit, excerpt=True):
+    """모델 입력에 싣는 교차 참조. 연결이 없으면 필드를 만들지 않는다."""
+    calls = unit.get('calls_changed') or []
+    if not excerpt:
+        calls = [{key: call[key] for key in ('name', 'change_id', 'file_path')} for call in calls]
+    return {'calls_changed': calls} if calls else {}
+
+
 def candidate_view(signals):
     flags = {flag for key in SIGNAL_FIELDS if key not in ('test_gap', 'mechanical_hints') for flag in signals[key]}
     if signals['test_gap']:
@@ -387,4 +543,5 @@ def parse_diff(diff, files=()):
                               exclusion_reason='민감 경로' if excluded else None,
                               redacted=redacted, redaction_reason='일부 민감 정보 가림' if redacted else None,
                               candidates=flags, **local))
+    link_calls(units)
     return units, tests
