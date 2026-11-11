@@ -41,7 +41,7 @@ def label(value):
 
 
 # 카드에는 내부 플래그 이름 대신 읽을 수 있는 말을 쓴다. 상세 화면의 원래 표기는 그대로 둔다.
-FLAG_LABELS = {'pure_rename': '내용 변경 없는 이름 변경', 'auth': '인증', 'payments': '결제', 'db_schema_migration': 'DB 스키마', 'config': '설정',
+FLAG_LABELS = {'pure_rename': '내용 변경 없는 이름 변경', 'comment_only': '주석만 변경', 'auth': '인증', 'payments': '결제', 'db_schema_migration': 'DB 스키마', 'config': '설정',
                'ci_workflow': 'CI 워크플로', 'dependency': '의존성', 'secrets': '민감 정보',
                'logic_without_tests': '관련 테스트 변경 미확인', 'install_script': '설치 스크립트'}
 

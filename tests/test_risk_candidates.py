@@ -95,6 +95,79 @@ class RiskCandidatesTests(unittest.TestCase):
         self.assertEqual(self.unit('b.py', body)['mechanical_hints'], ['pure_rename'])
         self.assertEqual(self.unit('b.py', body + 'old mode 100644\nnew mode 100755\n')['mechanical_hints'], [])
 
+    def hunk(self, path, *changed):
+        return self.unit(path, f'--- a/{path}\n+++ b/{path}\n@@ -1,2 +1,2 @@\n context\n' + '\n'.join(changed) + '\n')
+
+    def test_comment_only_hint_requires_every_changed_line_to_be_a_comment(self):
+        for path, changed in (('app/order_core.py', ('-# prior note 1', '+# updated note 1')),
+                              ('app/order_core.py', ('-    # prior', '+', '+    # updated')),
+                              ('web/app.ts', ('-// prior', '+/* updated', '+*/')),
+                              ('web/app.ts', ('-/* prior */', '+/* updated */  ')),
+                              ('db/report.sql', ('--- prior', '+-- updated')),
+                              ('src/OrderController.php', ('-# old note', '+# new note')),
+                              ('config/app.toml', ('-#[old]', '+#[new]'))):
+            with self.subTest(path=path, changed=changed):
+                self.assertEqual(self.hunk(path, *changed)['mechanical_hints'], ['comment_only'])
+        for path, changed in (('app/order_core.py', ('-    return order.subtotal', '+    return order.subtotal + order.delivery_fee')),
+                              ('app/order_core.py', ('-# prior note', '+return total  # updated note')),
+                              ('app/order_core.py', ('-# prior note', '+# updated note', '+total += fee')),
+                              ('app/sync/worker.py', ('-            queue.ack(job)', '+        queue.ack(job)')),
+                              ('app/call.py', ('-run(args)', '+run(', '+    *args)')),
+                              ('web/app.ts', ('-/* note */ run(1);', '+/* note */ run(2);')),
+                              ('app/query.sql', ('-/* note */ SELECT 1;', '+/* note */ SELECT 2;')),
+                              ('web/app.ts', ('-/* a */ /* b */', '+/* a */ run(); /* b */')),
+                              ('web/app.ts', ('-# prior', '+# updated')),
+                              ('src/OrderController.php', ("-#[Route('/old')]", "+#[Route('/new')]")),
+                              ('src/OrderController.php', ('-# old note', "+    #[Route('/new')]")),
+                              ('README.md', ('-# Old title', '+# New title')),
+                              ('lib/util.c', ('-#include <a.h>', '+#include <b.h>')),
+                              ('tools/run.sh', ('-#!/bin/sh', '+#!/bin/bash')),
+                              ('tools/run.sh', ('-    --dry-run \\', '+    --force \\'))):
+            with self.subTest(path=path, changed=changed):
+                self.assertEqual(self.hunk(path, *changed)['mechanical_hints'], [])
+
+    def test_php_attribute_change_keeps_default_priority(self):
+        from skim.analyze.units import priority
+        attribute = self.hunk('src/OrderController.php', "-#[Route('/old')]", "+#[Route('/new')]")
+        note = self.hunk('src/OrderController.php', '-# old note', '+# new note')
+        self.assertEqual(attribute['mechanical_hints'], [])
+        self.assertEqual(priority(attribute), priority(self.hunk('src/OrderController.php', '-run(1);', '+run(2);')))
+        self.assertEqual(note['mechanical_hints'], ['comment_only'])
+        self.assertGreater(priority(note), priority(attribute))
+
+    def test_comment_only_hint_ignores_units_without_a_hunk(self):
+        self.assertEqual(self.unit('tools/rotate_logs.sh', 'old mode 100644\nnew mode 100755\n')['mechanical_hints'], [])
+        fixture = (Path(__file__).resolve().parents[1] / 'eval/skim-ko-6/diffs/fx-format-behavior.diff').read_text()
+        self.assertEqual([u['mechanical_hints'] for u in parse_diff(fixture)[0]], [[], []])
+
+    def test_comment_only_hint_keeps_other_signals(self):
+        unit = self.hunk('db/migrations/001_orders.sql', '--- prior note', '+-- updated note')
+        self.assertEqual(unit['mechanical_hints'], ['comment_only'])
+        self.assertEqual(unit['hard_floors'], ['db_schema_migration'])
+        from skim.analyze.units import priority
+        self.assertEqual(priority(unit), 0)
+
+    def test_comment_only_hunks_are_allocated_after_real_changes(self):
+        from skim.analyze.protocol import chunk_units
+        from skim.analyze.units import allocation_key
+        fixture = (Path(__file__).resolve().parents[1] / 'eval/skim-ko-6/diffs/fx-multichunk.diff').read_text()
+        units, _ = parse_diff(fixture)
+        real = {path: [u['change_id'] for u in units if u['file_path'] == path and 'comment_only' not in u['mechanical_hints']]
+                for path in ('app/order_core.py', 'app/order_routes.py', 'infra/deployment.yaml')}
+        self.assertTrue(all(len(ids) == 1 for ids in real.values()), real)
+        fillers = [u for u in units if u['file_path'] in ('app/order_core.py', 'app/order_routes.py')
+                   and u['mechanical_hints'] == ['comment_only']]
+        self.assertGreater(len(fillers), 100)
+        ordered = sorted(units, key=allocation_key)
+        first_filler = next(i for i, u in enumerate(ordered) if u['mechanical_hints'])
+        self.assertTrue(all(not u['mechanical_hints'] for u in ordered[:first_filler]))
+        self.assertTrue(all(u['mechanical_hints'] == ['comment_only'] for u in ordered[first_filler:]))
+        # Without an overview there is no focus list, so packing alone has to keep these together.
+        chunks = chunk_units(units, {})
+        self.assertEqual(sum(len(c['units']) for c in chunks), len(units))
+        first = [u['change_id'] for u in chunks[0]['units']]
+        self.assertLessEqual({ids[0] for ids in real.values()}, set(first[:first_filler]))
+
     def test_usage_counts_remain_visible_but_secrets_are_redacted(self):
         from skim.analyze.units import sanitize
         for line in ('max_tokens = 100', 'token_count: 3', 'input_tokens = 2147483647'):

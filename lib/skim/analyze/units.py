@@ -252,6 +252,44 @@ def signals(path, text, tests, test_diffs=None, *, test_lines=None):
                 test_gap=test_gap, mechanical_hints=[])
 
 
+HASH_COMMENTS = ('#',)
+SLASH_COMMENTS = ('//', '/*')
+# Keyed by suffix because the same prefix is code elsewhere: '#' opens a Markdown
+# heading or a C include, and '--' is an ordinary flag in a shell script.
+COMMENT_PREFIXES = {
+    **dict.fromkeys(('.py', '.rb', '.sh', '.yaml', '.yml', '.toml', '.tf'), HASH_COMMENTS),
+    **dict.fromkeys(('.js', '.jsx', '.ts', '.tsx', '.java', '.kt', '.go', '.rs', '.c', '.h', '.cpp', '.cs', '.swift'),
+                    SLASH_COMMENTS),
+    '.php': HASH_COMMENTS + SLASH_COMMENTS,
+    '.sql': ('--', '/*'),
+}
+# 주석 접두어로 시작하지만 실행에 영향을 주는 코드다. PHP 8 속성은 라우팅·권한 같은 동작을 바꾼다.
+CODE_PREFIXES = {'.php': ('#[',)}
+
+
+def comment_only(path, text):
+    """변경 줄이 모두 빈 줄이거나 한 줄 전체가 주석일 때만 참이다.
+
+    블록 주석 안의 ' * ' 줄은 *args 같은 코드와 구분할 수 없어 주석으로 보지 않는다.
+    """
+    suffix = PurePosixPath(path).suffix.lower()
+    prefixes = COMMENT_PREFIXES.get(suffix)
+    code = ('#!',) + CODE_PREFIXES.get(suffix, ())
+    lines = [text[start:end].strip() for start, end in changed_spans(text)]
+    if not prefixes or not lines:
+        return False
+    return all(not line or line == '*/' or _full_line_comment(line, prefixes, code) for line in lines)
+
+
+def _full_line_comment(line, prefixes, code):
+    if not line.startswith(prefixes) or line.startswith(code):
+        return False
+    if not line.startswith('/*'):
+        return True
+    # 블록 주석을 닫은 뒤에 남은 글자는 실행 코드일 수 있다.
+    return not line.partition('*/')[2].strip()
+
+
 SIGNAL_FIELDS = ('location_hints', 'kind_signals', 'content_hits', 'hard_floors', 'test_gap', 'mechanical_hints')
 
 
@@ -336,6 +374,8 @@ def parse_diff(diff, files=()):
             if (not old and old_path and 'similarity index 100%' in body
                     and not re.search(r'(?m)^(?:old|new) mode ', body)):
                 local['mechanical_hints'] = ['pure_rename']
+            if old and comment_only(path, text):
+                local['mechanical_hints'].append('comment_only')
             flags = candidate_view(local)
             cleaned = sanitize(text)
             redacted = not excluded and cleaned != text

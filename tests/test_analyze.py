@@ -506,7 +506,12 @@ new mode 100755
     def test_prompt_states_priority_and_partial_context(self):
         text = prompt('chunk', {'metadata': {'title': 'PR 목적'}, 'units': []})
         for phrase in ('권한 검사 제거·변경', '운영 인프라', '파일 경로, 이름이나 단어',
-                       '청크는 PR 전체가 아닐 수 있다', 'uncertainties', '지정 JSON만 반환'):
+                       '청크는 PR 전체가 아닐 수 있다', 'uncertainties', '지정 JSON만 반환',
+                       '금액을 계산하거나 반환하는 식 자체가 바뀌면 결제 금액 변경이며 high다',
+                       '이 청크에 보이지 않는다는 이유만으로 mid로 내리지 마라',
+                       'return order.subtotal + order.delivery_fee', '제목만으로 high를 주지 마라',
+                       'location_hints는 위치 추정일 뿐', 'mid는 일반 업무 로직, API 동작·오류 처리',
+                       '함수 이름·import 정리는 low, unchanged다'):
             self.assertIn(phrase, text)
 
     def test_chunk_limits_prioritize_rules_and_count_metadata(self):
