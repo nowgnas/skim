@@ -17,7 +17,7 @@ from skim.config import Config
 
 class EvalEvidenceTests(unittest.TestCase):
     def test_overview_paired_metrics(self):
-        from skim.analyze.units import parse_diff
+        from skim.analyze.units import parse_diff, SIGNAL_FIELDS
         from skim.analyze.protocol import chunk_units
         corpus = ROOT / 'eval/skim-ko-5'
         manifest = json.loads((corpus / 'manifest.json').read_text())
@@ -43,9 +43,15 @@ class EvalEvidenceTests(unittest.TestCase):
         self.assertEqual(len(chunk_units(single_units, dict(title=single['title'], body=single['body'], tests=[]))), 1)
         comparison = dict(units=single_units, items=[], files=[], intent='별도 목적')
         baseline = assess(single, comparison, [], single_diff)['metrics']
-        self.assertEqual(baseline['top3'], ['app/checkout.py', 'docs/checkout.md'])
-        self.assertEqual(baseline['top3_precision'], 0.5)
-        self.assertEqual(baseline['top3_recall'], 0.5)
+        # 분석 결과가 없으면 경로 힌트만으로는 먼저 볼 파일에 오르지 않는다.
+        self.assertEqual(baseline['top3'], [])
+        self.assertIsNone(baseline['top3_precision'])
+        self.assertEqual(baseline['top3_recall'], 0.0)
+        legacy_units = [{k: v for k, v in u.items() if k not in SIGNAL_FIELDS} for u in single_units]
+        legacy = assess(single, dict(comparison, units=legacy_units), [], single_diff)['metrics']
+        self.assertEqual(legacy['top3'], ['app/checkout.py', 'docs/checkout.md'])
+        self.assertEqual(legacy['top3_precision'], 0.5)
+        self.assertEqual(legacy['top3_recall'], 0.5)
         self.assertEqual(baseline['intent'], '별도 목적')
         low = dict(units=[dict(change_id='h1', file_path='docs/readme.md', candidates=[])],
                    items=[dict(change_id='h1', importance='low', reason='문서', behavior='changed', risk_flags=[])],

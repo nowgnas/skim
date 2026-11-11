@@ -41,9 +41,17 @@ def label(value):
 
 
 # 카드에는 내부 플래그 이름 대신 읽을 수 있는 말을 쓴다. 상세 화면의 원래 표기는 그대로 둔다.
-FLAG_LABELS = {'auth': '인증', 'payments': '결제', 'db_schema_migration': 'DB 스키마', 'config': '설정',
+FLAG_LABELS = {'pure_rename': '내용 변경 없는 이름 변경', 'auth': '인증', 'payments': '결제', 'db_schema_migration': 'DB 스키마', 'config': '설정',
                'ci_workflow': 'CI 워크플로', 'dependency': '의존성', 'secrets': '민감 정보',
                'logic_without_tests': '관련 테스트 변경 미확인', 'install_script': '설치 스크립트'}
+
+
+RELATION_LABELS = {'caller': '호출부', 'test': '테스트', 'wiring': '연결', 'rename': '이름 변경', 'import': '임포트',
+                   'docs': '문서', 'config': '설정', 'other': '기타'}
+ROLE_LABELS = {'core': '핵심', 'supporting': '연관', 'mechanical': '기계적'}
+SIGNAL_KEYS = ('location_hints', 'kind_signals', 'content_hits', 'hard_floors', 'mechanical_hints')
+TOP_LIMIT = 6
+SAFETY_LIMIT = 3
 
 
 def file_anchor(path):
@@ -54,55 +62,222 @@ def priority_rules(row):
     return row['rule'] - {'logic_without_tests'}
 
 
+def is_current(pr):
+    """홈과 상세가 같이 쓰는 판정. 이전 SHA·미허용·실패 결과는 현재 중요도로 쓰지 않는다."""
+    return bool(pr.get('analysis', True) and not pr.get('stale') and pr.get('allowed', True)
+                and (pr.get('status', 'completed') in ('completed', 'partial') or pr.get('previous_result')))
+
+
+def current_view(pr):
+    return pr if is_current(pr) else dict(pr, items={}, result={})
+
+
+def level_of(row):
+    return {3: 'high', 2: 'mid', 1: 'low'}.get(row['rank'], 'unanalyzed')
+
+
+def valid_groups(result, items):
+    groups = result.get('groups', [])
+    return [group for group in groups if isinstance(group, dict) and group.get('core_change_id') in items
+            and isinstance(group.get('reason'), str) and isinstance(group.get('related'), list)] if isinstance(groups, list) else []
+
+
+def foldable(row):
+    """접어도 되는 기계적 변경. 높음·바닥·종류 신호·불확실성·미분석이 섞이면 접지 않는다."""
+    return (row['role'] == 'mechanical' and not row['hint'] and not row['partial'] and not row['uncertain']
+            and row['rank'] < 3 and not row['hard_floors'] and not row['kind_signals'])
+
+
+def review_bucket(row):
+    core = row['role'] == 'core'
+    if row['rank'] == 3:
+        return 0 if core else 1
+    if core:
+        return 2
+    if row['kind_signals'] or row['hard_floors']:
+        return 3
+    if row['rank'] == 2:
+        return 4
+    if row['role'] == 'supporting':
+        return 5
+    if row['hint'] or (not row['rank'] and row['location_hints']):
+        return 6
+    return 8 if foldable(row) else 7
+
+
 def file_rows(pr):
     """변경 단위를 파일로 묶는다. 파일 중요도는 그 파일 단위 중 가장 높은 값이다."""
     files = {}
     result = pr.get('result') or {}
-    focus = result.get('focus', []) if isinstance(result, dict) and not pr.get('stale') and pr.get('allowed', True) else []
+    usable = isinstance(result, dict) and not pr.get('stale') and pr.get('allowed', True)
+    focus = result.get('focus', []) if usable else []
     if not isinstance(focus, list):
         focus = []
     focus_by_id = {item['change_id']: (index, item['reason']) for index, item in enumerate(focus)
                    if isinstance(item, dict) and isinstance(item.get('change_id'), str)
                    and isinstance(item.get('reason'), str) and item['change_id'] in pr['items']}
+    # 구조화 신호가 없는 단위만 있으면 스키마 2 결과다. 예전 선정과 문구를 그대로 쓴다.
+    legacy = not any('location_hints' in unit or 'kind_signals' in unit for unit in pr['units'])
+    paths = {unit['change_id']: unit['file_path'] for unit in pr['units']}
+    core, supports = {}, {}
+    groups = valid_groups(result, pr['items']) if usable and not legacy else []
+    for index, group in enumerate(groups):
+        related = [dict(path=paths[entry['change_id']], relation=entry.get('relation'))
+                   for entry in group['related'] if isinstance(entry, dict) and entry.get('change_id') in paths]
+        core[group['core_change_id']] = (index, group['reason'], related)
+        for entry in group['related']:
+            if isinstance(entry, dict) and entry.get('change_id') in paths:
+                supports.setdefault(entry['change_id'], []).append(paths[group['core_change_id']])
+    if groups:
+        for change_id, (position, reason) in focus_by_id.items():
+            core.setdefault(change_id, (len(groups) + position, reason, []))
+    uncertain = {entry.get('change_id') for entry in result.get('uncertainties', []) if isinstance(entry, dict)} if usable and isinstance(result.get('uncertainties', []), list) else set()
     for unit in pr['units']:
         item = pr['items'].get(unit['change_id'])
-        row = files.setdefault(unit['file_path'], dict(path=unit['file_path'], rank=0, reason='', rule=set(), model=set(), focus_rank=None, focus_reason=''))
+        row = files.setdefault(unit['file_path'], dict(
+            path=unit['file_path'], rank=0, reason='', rule=set(), model=set(), focus_rank=None, focus_reason='',
+            legacy=legacy, test_gap=False, role='', hint=False, partial=False, uncertain=False,
+            group_rank=None, group_reason='', related=[], supports=[], behaviors=[],
+            **{key: set() for key in SIGNAL_KEYS}))
         row['rule'].update(unit.get('candidates', []))
+        for key in SIGNAL_KEYS:
+            row[key].update(unit.get(key) or [])
+        row['test_gap'] = row['test_gap'] or bool(unit.get('test_gap'))
+        row['uncertain'] = row['uncertain'] or unit['change_id'] in uncertain
         if not item:
+            row['partial'] = True
             continue
         if unit['change_id'] in focus_by_id:
             position, focus_reason = focus_by_id[unit['change_id']]
             if row['focus_rank'] is None or position < row['focus_rank']:
                 row['focus_rank'], row['focus_reason'] = position, focus_reason
+        if unit['change_id'] in core:
+            position, group_reason, related = core[unit['change_id']]
+            if row['group_rank'] is None or position < row['group_rank']:
+                row['group_rank'], row['group_reason'] = position, group_reason
+            row['related'] += related
+        row['supports'] += supports.get(unit['change_id'], [])
         rank = RANK.get(item['importance'], 0)
         if rank > row['rank'] or (rank == row['rank'] and not row['reason']):
             row['rank'], row['reason'] = rank, item.get('reason') or ''
         row['model'].update(item.get('risk_flags', []))
-    return sorted(files.values(), key=lambda r: (-r['rank'], r['focus_rank'] if r['focus_rank'] is not None else 999999,
-                                                  -bool(r['rule']), r['path']))
+        row['behaviors'].append(item.get('behavior'))
+    if legacy:
+        return sorted(files.values(), key=lambda r: (-r['rank'], r['focus_rank'] if r['focus_rank'] is not None else 999999,
+                                                      -bool(r['rule']), r['path']))
+    for row in files.values():
+        seen = {row['path']}
+        row['related'] = [entry for entry in row['related'] if not (entry['path'] in seen or seen.add(entry['path']))]
+        row['supports'] = [path for path in dict.fromkeys(row['supports']) if path != row['path']]
+        if row['group_rank'] is not None:
+            row['role'] = 'core'
+        elif row['supports']:
+            row['role'] = 'supporting'
+        elif row['behaviors'] and all(b == 'unchanged' for b in row['behaviors']) and row['rank'] < 3 and not row['hard_floors']:
+            row['role'] = 'mechanical'
+        # 경로만 보고 붙은 힌트다. 종류 신호·바닥·내용 근거가 있으면 그쪽으로 보여 준다.
+        row['hint'] = bool(row['rank'] == 1 and row['location_hints'] and row['role'] != 'core'
+                           and not (row['kind_signals'] or row['content_hits'] or row['hard_floors']))
+    return sorted(files.values(), key=lambda r: (review_bucket(r), -r['rank'],
+                                                  r['group_rank'] if r['group_rank'] is not None else
+                                                  r['focus_rank'] if r['focus_rank'] is not None else 999999, r['path']))
 
 
 def file_counts(rows):
     counts = {'high': 0, 'mid': 0, 'low': 0, 'unanalyzed': 0}
     for row in rows:
-        counts[{3: 'high', 2: 'mid', 1: 'low'}.get(row['rank'], 'unanalyzed')] += 1
+        counts[level_of(row)] += 1
     return counts
 
 
 def top_file_rows(rows):
-    # 낮음·미분석 파일은 규칙 후보가 없으면 숫자로만 보여준다.
-    return [row for row in rows if row['rank'] >= 2 or row['rule']][:3]
+    if not rows or rows[0].get('legacy', True):
+        # 낮음·미분석 파일은 규칙 후보가 없으면 숫자로만 보여준다.
+        return [row for row in rows if row['rank'] >= 2 or row['rule']][:3]
+    cores = sorted((row for row in rows if row['role'] == 'core'), key=lambda r: (-r['rank'], r['group_rank']))[:3]
+    if not cores:
+        return [row for row in rows if row['rank'] >= 2][:3]
+    chosen = {row['path'] for row in cores}
+    # 그룹에 못 든 높음도 같은 목록에 둔다. 역할 판단이 틀려도 높음이 사라지지 않는다.
+    return (cores + [row for row in rows if row['rank'] == 3 and row['path'] not in chosen])[:TOP_LIMIT]
 
 
-def file_card(pr):
-    rows = file_rows(pr)
+def first_look(rows):
+    """홈 카드와 상세 ‘먼저 볼 파일’이 같이 쓰는 선정 결과."""
     top = top_file_rows(rows)
+    shown = {row['path'] for row in top}
+    safety = [row for row in rows if row['path'] not in shown
+              and (row['kind_signals'] or row['hard_floors'] or (not row['rank'] and row['location_hints']))]
+    return dict(top=top, more_high=sum(row['rank'] == 3 and row['path'] not in shown for row in rows),
+                safety=safety[:SAFETY_LIMIT], safety_more=max(0, len(safety) - SAFETY_LIMIT),
+                hints=sum(row['hint'] for row in rows), mechanical=sum(foldable(row) for row in rows))
+
+
+def related_summary(row):
+    tests = sum(entry['relation'] == 'test' for entry in row['related'])
+    others = len(row['related']) - tests
+    return ' · '.join(([f'연관 {others}'] if others else []) + ([f'테스트 {tests}'] if tests else []))
+
+
+def signal_names(row):
+    flags = sorted(row['kind_signals'] | row['hard_floors']) or sorted(row['location_hints'])
+    return ', '.join(FLAG_LABELS.get(flag, flag) for flag in flags)
+
+
+def file_badges(row, prefix=''):
+    """역할과 중요도를 나란히 적는다. 위험색은 모델이 높음으로 본 파일에만 쓴다."""
+    level = level_of(row)
+    if row.get('legacy', True):
+        return f'<span class="badge {level}">{prefix}{esc(label(level))}</span>'
+    signalled = row['kind_signals'] or row['hard_floors'] or row['location_hints']
+    name = ('확인' if signalled else '미분석') if level == 'unanalyzed' else prefix + label(level)
+    chips = ''
+    if row['role'] in ('core', 'supporting') or (row['role'] == 'mechanical' and not row['hint']):
+        chips += f'<span class="badge role">{ROLE_LABELS[row["role"]]}</span>'
+    if row['hint']:
+        chips += '<span class="badge hint">경로 확인</span>'
+    return f'<span class="file-badges">{chips}<span class="badge {level}">{esc(name)}</span></span>'
+
+
+def look_footer(look, file_href, base=''):
+    """목록에 못 든 종류 신호·바닥은 ‘안전 확인’ 줄로, 경로 힌트와 기계적 변경은 숫자로 남긴다."""
+    body = ''
+    if look['safety']:
+        body += '<p class="file-summary safety-line"><span class="safety-label">안전 확인</span>'
+        for row in look['safety']:
+            body += (f'<a class="safety-item" href="{esc(file_href(row["path"]))}"><span class="file-path">{esc(row["path"])}</span>'
+                     f'<span class="badge hint">{esc(signal_names(row))}</span>'
+                     + ('' if row['rank'] else '<span class="badge unanalyzed">확인</span>') + '</a>')
+        body += (f'<span>외 {look["safety_more"]}개</span>' if look['safety_more'] else '') + '</p>'
+    parts = ([f'<a href="{esc(base)}?view=hints#file-changes">경로상 확인 {look["hints"]}</a>'] if look['hints'] else []) + (
+        [f'기계적 변경 {look["mechanical"]}'] if look['mechanical'] else [])
+    if parts:
+        body += '<p class="file-summary hint-line">' + ' · '.join(parts) + '</p>'
+    return body
+
+
+def distribution(rows, shown):
+    # CSP가 style 속성을 막으므로 비율을 20칸으로 나눠 그린다. 0이 아닌 값은 최소 한 칸을 받는다.
     counts = file_counts(rows)
-    body = '<div class="pr-files"><h3>먼저 볼 파일</h3>'
+    cells = []
+    for key in ('high', 'mid', 'low', 'unanalyzed'):
+        if counts[key]:
+            cells += [key] * max(1, round(20 * counts[key] / len(rows)))
+    bar = ''.join(f'<span class="seg {key}"></span>' for key in cells[:20])
+    rest = len(rows) - shown
+    return (f'<p class="file-summary"><span class="dist" role="img" aria-label="파일 {len(rows)}개 중요도 분포">{bar}</span>'
+            f'<span>파일 {len(rows)}개' + (f' (외 {rest}개)' if rest and shown else '') + '</span>'
+            + ''.join(f'<span>{label(k)} {counts[k]}</span>' for k in ('high', 'mid', 'low', 'unanalyzed') if counts[k] or k != 'unanalyzed')
+            + '</p>')
+
+
+def legacy_file_card(pr, rows):
+    top = top_file_rows(rows)
+    body = ''
     if not top:
         body += '<p class="muted">높음, 보통 파일이 없습니다.</p>' if pr['items'] else '<p class="muted">분석 전입니다.</p>'
     for row in top:
-        level = {3: 'high', 2: 'mid', 1: 'low'}.get(row['rank'], 'unanalyzed')
+        level = level_of(row)
         name = '확인' if level == 'unanalyzed' else label(level)
         href = f'/pr/{int(pr["id"])}?' + urlencode([('file', row['path'])]) + '#' + file_anchor(row['path'])
         notes = ([('목적 관련: ' + row['focus_reason'])] if row['focus_reason'] else []) + ([row['reason']] if row['reason'] else []) + (
@@ -110,21 +285,39 @@ def file_card(pr):
             ['모델 판단: ' + ', '.join(FLAG_LABELS.get(f, f) for f in sorted(row['model']))] if row['model'] else [])
         body += (f'<a class="file-row" href="{esc(href)}"><span class="badge {level}">{name}</span>'
                  f'<span class="file-path">{esc(row["path"])}</span><span class="file-note">' + ''.join(f'<span>{esc(n)}</span>' for n in notes) + '</span></a>')
-    rest = len(rows) - len(top)
     other_candidates = sum(bool(priority_rules(row)) for row in rows if row not in top)
     if other_candidates:
         body += f'<p class="file-summary"><a href="/pr/{int(pr["id"])}?order=priority">그 외 규칙 기반 후보 {other_candidates}개 확인</a></p>'
-    # CSP가 style 속성을 막으므로 비율을 20칸으로 나눠 그린다. 0이 아닌 값은 최소 한 칸을 받는다.
-    cells = []
-    for key in ('high', 'mid', 'low', 'unanalyzed'):
-        if counts[key]:
-            cells += [key] * max(1, round(20 * counts[key] / len(rows)))
-    bar = ''.join(f'<span class="seg {key}"></span>' for key in cells[:20])
-    body += (f'<p class="file-summary"><span class="dist" role="img" aria-label="파일 {len(rows)}개 중요도 분포">{bar}</span>'
-             f'<span>파일 {len(rows)}개' + (f' (외 {rest}개)' if rest and top else '') + '</span>'
-             + ''.join(f'<span>{label(k)} {counts[k]}</span>' for k in ('high', 'mid', 'low', 'unanalyzed') if counts[k] or k != 'unanalyzed')
-             + '</p></div>') if rows else '</div>'
-    return body
+    return body + (distribution(rows, len(top)) if rows else '')
+
+
+def file_card(pr):
+    shown = current_view(pr)
+    rows = file_rows(shown)
+    body = '<div class="pr-files"><h3>먼저 볼 파일</h3>'
+    if rows and rows[0]['legacy']:
+        return body + legacy_file_card(shown, rows) + '</div>'
+    base = f'/pr/{int(pr["id"])}'
+    def file_href(path):
+        return base + '?' + urlencode([('file', path)]) + '#' + file_anchor(path)
+    look = first_look(rows)
+    if not look['top']:
+        body += ('<p class="muted">높음, 보통 파일이 없습니다.</p>' if shown['items'] else
+                 '<p class="muted">최신 변경의 분석 결과가 없습니다.</p>' if pr['items'] else '<p class="muted">분석 전입니다.</p>')
+    for row in look['top']:
+        core = row['role'] == 'core'
+        reason = (row['group_reason'] if core else '') or row['reason']
+        summary = related_summary(row)
+        notes = (('<span class="badge role">핵심</span>' if core else '') + (f'<span>{esc(reason)}</span>' if reason else '')
+                 + (f'<span class="badge role">{esc(summary)}</span>' if summary else '')
+                 + ('<span>모델 판단: ' + esc(', '.join(FLAG_LABELS.get(f, f) for f in sorted(row['model']))) + '</span>' if row['model'] else ''))
+        level = level_of(row)
+        body += (f'<a class="file-row" href="{esc(file_href(row["path"]))}"><span class="badge {level}">{label(level)}</span>'
+                 f'<span class="file-path">{esc(row["path"])}</span><span class="file-note">{notes}</span></a>')
+    if look['more_high']:
+        body += f'<p class="file-summary"><a href="{base}?order=priority#file-changes">높음 파일 {look["more_high"]}개 더 보기</a></p>'
+    body += look_footer(look, file_href, base)
+    return body + (distribution(rows, len(look['top'])) if rows else '') + '</div>'
 
 
 def constant_equal(left, right):
@@ -644,16 +837,22 @@ def file_nav(neighbors):
             + '<span class="file-step-hint">단축키 j 다음, k 이전</span>' + link(following, '다음 파일 →', 'next') + '</nav>')
 
 
-def file_panel(row, members, items, github_link, *, active=True, neighbors=None, inline=False, position=None, known_symbols=()):
+def file_panel(row, members, items, github_link, *, active=True, neighbors=None, inline=False, position=None, known_symbols=(), file_href=None):
     path = row['path']
-    level = {3: 'high', 2: 'mid', 1: 'low'}.get(row['rank'], 'unanalyzed')
     attributes = '' if inline else (f' id="{file_anchor(path)}" tabindex="-1" data-file-panel'
                                     + (f' data-file-position="{position}"' if position else '')
                                     + f' data-file-path="{esc(path)}"'
                                     + ('' if active else ' hidden'))
-    content = f'<section class="detail-file"{attributes}><header class="detail-file-heading"><h3 class="file-title">{full_path_title(path)}</h3><span class="badge {level}">중요도 {esc(label(level))}</span><span class="file-count">변경 {len(members)}개</span></header>'
-    if row['focus_reason']:
-        content += '<p class="file-focus-reason"><strong>중요한 이유</strong> ' + esc(row['focus_reason']) + '</p>'
+    content = f'<section class="detail-file"{attributes}><header class="detail-file-heading"><h3 class="file-title">{full_path_title(path)}</h3>{file_badges(row, '중요도 ')}<span class="file-count">변경 {len(members)}개</span></header>'
+    if row['group_reason'] or row['focus_reason']:
+        content += '<p class="file-focus-reason"><strong>중요한 이유</strong> ' + esc(row['group_reason'] or row['focus_reason']) + '</p>'
+    # 연관 경로는 합성 결과의 변경 ID에서만 가져온다.
+    for title, entries in (('연관 파일', row['related']), ('핵심 변경', [dict(path=p, relation=None) for p in row['supports']])):
+        if entries and file_href:
+            content += f'<p class="related-files"><strong>{title}</strong>' + ''.join(
+                f'<a href="{esc(file_href(entry["path"]))}">{esc(entry["path"])}</a>'
+                + (f'<span class="badge hint">{esc(RELATION_LABELS.get(entry["relation"], "기타"))}</span>' if title == '연관 파일' else '')
+                for entry in entries) + '</p>'
     if 'logic_without_tests' in row['rule'] and (row['rank'] >= 2 or row['focus_rank'] is not None):
         content += ('<details class="test-change-note"><summary>관련 테스트 변경 미확인</summary>'
                     '<p>이번 PR의 diff에서 이 파일과 연결되는 테스트 변경을 확인하지 못했습니다. 기존 테스트의 유무나 실행 결과는 확인하지 않았습니다.</p></details>')
@@ -670,12 +869,18 @@ def file_panel(row, members, items, github_link, *, active=True, neighbors=None,
             content += render_diff(unit['diff'], numbered=True, line_numbers=not unit.get('redacted'),
                                    symbol_unit=unit['change_id'] if re.fullmatch(r'h[0-9]+', unit.get('change_id', '')) else None,
                                    symbol_ids=not inline, known_symbols=known_symbols)
-        flags = [flag for flag in unit.get('candidates', []) if flag != 'logic_without_tests']
+        if 'location_hints' in unit or 'kind_signals' in unit:
+            sources = [(title, unit.get(key) or []) for title, key in (
+                ('경로상 확인', 'location_hints'), ('파일 종류 신호', 'kind_signals'), ('변경 내용 신호', 'content_hits'),
+                ('안전 확인', 'hard_floors'), ('기계적 힌트', 'mechanical_hints'))]
+        else:
+            sources = [('규칙 후보', [flag for flag in unit.get('candidates', []) if flag != 'logic_without_tests'])]
         model_flags = item.get('risk_flags', []) if item else []
-        if flags or model_flags:
+        if any(flags for _, flags in sources) or model_flags:
             content += '<details class="change-details"><summary>분석 근거 더보기</summary>'
-            if flags:
-                content += '<p>규칙 후보: ' + esc(', '.join(FLAG_LABELS.get(flag, flag) for flag in flags)) + '</p>'
+            for title, flags in sources:
+                if flags:
+                    content += f'<p>{title}: ' + esc(', '.join(FLAG_LABELS.get(flag, flag) for flag in flags)) + '</p>'
             if model_flags:
                 content += '<p>모델 판단: ' + esc(', '.join(FLAG_LABELS.get(flag, flag) for flag in model_flags)) + '</p>'
             content += '</details>'
@@ -687,9 +892,11 @@ def file_panel(row, members, items, github_link, *, active=True, neighbors=None,
 def detail(pr, query, config, offline=False, analysis_panel="", csrf=None):
     a, snapshot = pr['analysis'], pr['snapshot']
     latest = pr.get('latest_analysis') or a
-    current = bool(a and not pr['stale'] and pr.get('allowed', True) and (pr['status'] in ('completed', 'partial') or pr.get('previous_result')))
-    shown = dict(pr, items=pr['items'] if current else {}, result=pr.get('result') if current else {})
+    current = is_current(pr)
+    shown = current_view(pr)
     rows = file_rows(shown)
+    legacy = not rows or rows[0]['legacy']
+    view = 'hints' if query.get('view') == ['hints'] else ''
     units_by_file = {}
     for unit in pr['units']:
         units_by_file.setdefault(unit['file_path'], []).append(unit)
@@ -699,6 +906,8 @@ def detail(pr, query, config, offline=False, analysis_panel="", csrf=None):
         order = query.get('order', [''])[0]
         if order in ('priority', 'original'):
             params.append(('order', order))
+        if view:
+            params.append(('view', view))
         if preserve_search and query.get('unit_q', [''])[0]:
             params.append(('unit_q', query['unit_q'][0][:200]))
         return '?' + urlencode(params) + '#' + file_anchor(path)
@@ -744,22 +953,29 @@ def detail(pr, query, config, offline=False, analysis_panel="", csrf=None):
         content += (f'<p class="test-summary">관련 테스트 변경 미확인 파일 {missing_tests}개</p>'
                     '<p class="muted test-summary-help">이번 PR의 diff 기준이며 기존 테스트의 유무나 실행 결과는 확인하지 않았습니다.</p>')
     content += '</article></section>' + analysis_panel
-    top = [row for row in rows if row['rank'] >= 2 or
-           (row['rank'] and (priority_rules(row) or row['focus_rank'] is not None))][:3] if current else []
+    look = first_look(rows) if not legacy else None
+    # 스키마 2 결과는 보존 기간 동안 예전 선정 그대로 보여 준다.
+    top = ([] if not current else look['top'] if look else
+           [row for row in rows if row['rank'] >= 2 or (row['rank'] and (priority_rules(row) or row['focus_rank'] is not None))][:3])
     content += '<section class="detail-focus"><div class="section-heading"><h2>먼저 볼 파일</h2><p>PR 목적과 중요도를 기준으로 확인할 변경입니다.</p></div>'
     if top:
         content += '<div class="focus-list">'
         for row in top:
-            level = {3: 'high', 2: 'mid', 1: 'low'}.get(row['rank'], 'unanalyzed')
-            reason = row['focus_reason'] or row['reason'] or '규칙에 따라 확인이 필요한 변경입니다.'
-            content += (f'<details class="focus-entry"><summary class="focus-file">'
-                        f'<span class="badge {level}">{esc(label(level))}</span>'
-                        f'<span class="focus-text">{file_label(row["path"])}<span class="focus-reason">{esc(reason)}</span></span>'
+            reason = row['group_reason'] or row['focus_reason'] or row['reason'] or '규칙에 따라 확인이 필요한 변경입니다.'
+            summary = related_summary(row)
+            content += (f'<details class="focus-entry"><summary class="focus-file">' + file_badges(row)
+                        + f'<span class="focus-text">{file_label(row["path"])}<span class="focus-reason">{esc(reason)}</span>'
+                        + (f'<span class="badge role">{esc(summary)}</span>' if summary else '') + '</span>'
                         '<span class="focus-toggle" aria-hidden="true">⌄</span></summary>'
-                        '<div class="focus-inline">' + file_panel(row, units_by_file[row['path']], shown['items'], link, inline=True, known_symbols=candidates) + '</div></details>')
+                        '<div class="focus-inline">' + file_panel(row, units_by_file[row['path']], shown['items'], link, inline=True,
+                                                                   known_symbols=candidates, file_href=file_href) + '</div></details>')
         content += '</div>'
+        if look and look['more_high']:
+            content += f'<p class="file-summary"><a href="?order=priority#file-changes">높음 파일 {look["more_high"]}개 더 보기</a></p>'
     else:
         content += '<p class="muted">' + ('높음 또는 보통으로 분석된 파일이 없습니다.' if current else '분석 후 중요한 파일과 선정 이유를 확인할 수 있습니다.') + '</p>'
+    if look:
+        content += look_footer(look, file_href)
     content += '</section>'
     issues = [u for u in pr['units'] if u.get('excluded') or u.get('omission_reason') or (current and u['change_id'] not in shown['items'])]
     stats = json.loads(snapshot['coverage']).get('analysis', {}) if snapshot else {}
@@ -820,7 +1036,7 @@ def detail(pr, query, config, offline=False, analysis_panel="", csrf=None):
                                   ('?order=priority', '검토 우선순위', query.get('order', [''])[0] != 'original' and query.get('diff') != ['1']),
                                   ('?diff=1', '전체 diff', query.get('diff', [''])[0] == '1')]:
         params = parse_qs(href[1:])
-        for key in ('unit_q', 'file'):
+        for key in ('unit_q', 'file', 'view'):
             if query.get(key, [''])[0]:
                 params[key] = query[key][:1]
         content += f'<a class="btn ghost sm" href="?{esc(urlencode(params, doseq=True))}#file-changes"' + (' aria-current="true"' if selected else '') + f'>{title}</a>'
@@ -831,6 +1047,11 @@ def detail(pr, query, config, offline=False, analysis_panel="", csrf=None):
         files = json.loads(snapshot['coverage']).get('files', [])
         file_order = {entry['filename']: index for index, entry in enumerate(files)}
         rows.sort(key=lambda row: file_order.get(row['path'], len(files)))
+    if view:
+        rows = [row for row in rows if row['hint']]
+        params = [(key, value) for key, values in query.items() if key in ('order', 'unit_q') for value in values]
+        content += (f'<p class="file-summary hint-line">경로상 확인 파일 {len(rows)}개만 표시합니다. 경로만으로 붙은 힌트이며 중요도 판단은 아닙니다.'
+                    f'<a href="?{esc(urlencode(params))}#file-changes">전체 파일 보기</a></p>')
     selected_file = query.get('file', [''])[0]
     term = query.get('unit_q', [''])[0][:200]
     def file_text(row):
@@ -871,15 +1092,20 @@ def detail(pr, query, config, offline=False, analysis_panel="", csrf=None):
             active = row['path'] == selected_file
             content += f'<option value="{file_anchor(row["path"])}"' + (' selected' if active else '') + f'>{esc(row["path"])}</option>'
         content += '</select></label><div class="file-nav-links">'
-        for row in rows:
+        def nav_link(row):
             active = row['path'] == selected_file
-            level = {3: 'high', 2: 'mid', 1: 'low'}.get(row['rank'], 'unanalyzed')
             params = [(key, value) for key, values in page_query.items() if key not in ('file', 'diff') for value in values]
             params.append(('file', row['path']))
             href = '?' + urlencode(params) + '#' + file_anchor(row['path'])
-            content += (f'<a href="{esc(href)}" data-select-file="{file_anchor(row["path"])}"' + (' aria-current="true"' if active else '')
-                        + f'>{file_label(row["path"])}<span class="file-nav-meta"><span class="badge {level}">{esc(label(level))}</span>'
-                        + f'<span>변경 단위 {len(units_by_file[row["path"]])}개</span></span></a>')
+            return (f'<a href="{esc(href)}" data-select-file="{file_anchor(row["path"])}"' + (' aria-current="true"' if active else '')
+                    + f'>{file_label(row["path"])}<span class="file-nav-meta">{file_badges(row)}'
+                    + f'<span>변경 단위 {len(units_by_file[row["path"]])}개</span></span></a>')
+        # 검토 우선순위에서는 기계적 변경이 맨 뒤에 모인다. 그 묶음만 접는다.
+        folded = [row for row in rows if not legacy and not view and query.get('order', [''])[0] != 'original' and foldable(row)]
+        content += ''.join(nav_link(row) for row in rows if row not in folded)
+        if folded:
+            content += ('<details class="file-nav-fold"' + (' open' if any(row['path'] == selected_file for row in folded) else '')
+                        + f'><summary>기계적 변경 {len(folded)}개</summary>' + ''.join(nav_link(row) for row in folded) + '</details>')
         content += ('</div>' + navigation + '</nav><div class="detail-file-list">'
                     f'<p class="file-position" data-file-position-label>파일 {selected_position} / {total}</p>'
                     '<p class="sr-only" role="status" aria-live="polite" data-selected-file>선택한 파일: ' + esc(selected_file) + '</p>')
@@ -890,11 +1116,13 @@ def detail(pr, query, config, offline=False, analysis_panel="", csrf=None):
                           for step in (-1, 1))
         content += file_panel(row, units_by_file[row['path']], shown['items'], link,
                               active=row['path'] == selected_file, neighbors=neighbors,
-                              position=f'{index + 1} / {len(filtered)}', known_symbols=candidates)
+                              position=f'{index + 1} / {len(filtered)}', known_symbols=candidates, file_href=file_href)
     if rows:
         content += '</div></div>'
     elif not pr['units']:
         content += '<article>수집된 변경 파일이 없습니다.</article>'
+    elif view and not term:
+        content += '<p class="muted">경로상 확인 파일이 없습니다.</p>'
     return content + ('' if rows else navigation) + '</section>'
 
 

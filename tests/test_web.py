@@ -332,12 +332,14 @@ class WebTests(unittest.TestCase):
                         if any(i['change_id'] == u['change_id'] for i in result['items']))
             item = next(i for i in result['items'] if i['change_id'] == unit['change_id'])
             unit['candidates'] = ['logic_without_tests', 'install_script']
+            unit['kind_signals'] = ['install_script']
             item['risk_flags'] = ['config']
             conn.execute('UPDATE analyses SET output_json=? WHERE id=?', (json.dumps(result), row['id']))
         body = self.request('/pr/1')[2]
         panel = next(part.split('</section>')[0] for part in body.split('<section class="detail-file"')
                      if 'data-file-path="' + unit['file_path'] + '"' in part)
-        self.assertIn('<p>규칙 후보: 설치 스크립트</p>', panel)
+        self.assertIn('<p>파일 종류 신호: 설치 스크립트</p>', panel)
+        self.assertNotIn('규칙 후보:', panel)
         self.assertIn('관련 테스트 변경 미확인 파일', body)
         self.assertIn('<p>모델 판단: 설정</p>', panel)
         self.assertIn('분석 근거 더보기', panel)
