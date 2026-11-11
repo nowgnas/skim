@@ -38,19 +38,23 @@ def sanitize(text, assignments=True):
     if not assignments:
         return cleaned
     def redact(match):
+        line_start = match.string.rfind('\n', 0, match.start()) + 1
+        # A partial diff cannot establish string state after a triple-quote delimiter.
+        if any(quote in match.string[:line_start] for quote in ('"' * 3, "'" * 3)):
+            return REDACTED
+        safe_name = (len(match['head']) <= 80
+                     and NAME_PREFIX.fullmatch(match.string, line_start, match.start()))
         safe = SAFE_COUNT_ASSIGNMENT.fullmatch(match.group())
-        if safe and (not safe['value'].isdigit() or int(safe['value']) <= 2147483647):
+        if safe_name and safe and (not safe['value'].isdigit() or int(safe['value']) <= 2147483647):
             return match.group()
         if match['value'].strip() == REDACTED_LITERAL:
-            # Already cleaned: cleaning twice must not erase the name again.
-            return match.group()
+            return match.group() if safe_name else REDACTED
         literal = LITERAL_VALUE.fullmatch(match['value'])
         if not literal or REFERENCE_BODY.search(literal['body']):
             return REDACTED
-        line_start = match.string.rfind('\n', 0, match.start()) + 1
-        if len(match['head']) <= 80 and NAME_PREFIX.fullmatch(match.string, line_start, match.start()):
+        if safe_name:
             return match['head'] + ' ' + REDACTED_LITERAL
-        return REDACTED_LITERAL
+        return REDACTED
     return SECRET_ASSIGNMENT.sub(redact, cleaned)
 
 
@@ -214,9 +218,9 @@ def added_test_lines(text):
 
 
 DEFINITION = re.compile(
-    r'\b(?:def|function|func|fn|fun)\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)\s*[(<]'
-    r'|\b(?:const|let|var)\s+([A-Za-z_]\w*)\s*=\s*(?:async\s*)?(?:function\b|\([^)]*\)\s*=>|\w+\s*=>)')
-CALL = re.compile(r'(?:(\.)\s*|(?<![\w$.]))([A-Za-z_]\w*)\s*\(')
+    r'^\s*(?:async\s+)?(?:def|function|func|fn|fun)\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)\s*[(<]'
+    r'|^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_]\w*)\s*=\s*(?:async\s*)?(?:function\b|\([^)]*\)\s*=>|\w+\s*=>)')
+CALL = re.compile(r'(?:(\.|->|::|\?\.)\s*|(?<![\w$.:>]))([A-Za-z_]\w*)\s*\(')
 # 여러 모듈에 같은 이름이 흔해 이름만으로 호출 대상을 특정할 수 없는 함수다.
 COMMON_CALLS = frozenset(
     'main init setup teardown test run start stop open close read write load save dump send recv '
@@ -231,40 +235,61 @@ def _definition_names(source):
     return [first or second for first, second in DEFINITION.findall(source)]
 
 
-def definitions(text):
-    """hunk에서 정의 줄이 보이는 이름과, 그중 변경 줄이 정의 범위에 있는 이름을 돌려준다.
+DEFINITION_NOISE = re.compile(
+    r"""\#[^\n]*|//[^\n]*|/\*[\s\S]*?(?:\*/|\Z)"""
+    r"""|"{3}[\s\S]*?(?:"{3}|\Z)|'{3}[\s\S]*?(?:'{3}|\Z)"""
+    r"""|"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'""")
 
-    들여쓰기는 해석하지 않는다. 정의 줄 자체가 추가·삭제됐거나, 문맥·hunk 머리의 정의 뒤에
-    다음 정의가 나오기 전 변경 줄이 있으면 그 정의가 바뀐 것으로 본다.
-    """
-    seen, changed, pending = set(), [], None
-    for line in text.splitlines():
-        if line.startswith('@@'):
-            sign, source = ' ', line.partition('@@')[2].partition('@@')[2]
-        elif line[:1] in ('+', '-', ' '):
-            sign, source = line[0], line[1:]
-        else:
-            continue
-        names = _definition_names(source)
-        seen.update(names)
-        if names and sign == ' ':
-            pending = names[-1]
-            continue
-        if sign == ' ':
-            continue
-        for name in names or ([pending] if pending else []):
-            if name not in changed:
-                changed.append(name)
-        pending = None
+
+def definition_sections(text):
+    """Track each diff side separately so before/after definitions count only once."""
+    sides = []
+    for side in ('-', '+'):
+        records = []
+        for index, line in enumerate(text.splitlines()):
+            if line.startswith('@@'):
+                source = line.partition('@@')[2].partition('@@')[2]
+                records.append((index, line, ' ', source))
+            elif line[:1] in (' ', side):
+                records.append((index, line, line[0], line[1:]))
+        source = '\n'.join(record[3] for record in records)
+        masked = DEFINITION_NOISE.sub(lambda match: re.sub(r'[^\n]', ' ', match.group()), source)
+        sections = []
+        current = None
+        for (index, line, sign, _), code in zip(records, masked.split('\n')):
+            if line.startswith('@@'):
+                current = None
+            names = _definition_names(code)
+            if names:
+                current = dict(name=names[0], lines=[])
+                sections.append(current)
+            if current is not None and sign == side:
+                current['lines'].append((index, line))
+        sides.append(sections)
+    return sides
+
+
+def definitions(text):
+    sides = definition_sections(text)
+    seen = {section['name'] for sections in sides for section in sections}
+    changed = list(dict.fromkeys(section['name'] for sections in sides
+                                 for section in sections if section['lines']))
     return seen, changed
+
+
+def definition_count(text, name):
+    return max(sum(section['name'] == name for section in sections)
+               for sections in definition_sections(text))
+
+
+def callee_changes(text, name):
+    lines = {index: line for sections in definition_sections(text) for section in sections
+             if section['name'] == name for index, line in section['lines']}
+    return '\n'.join(lines[index] for index in sorted(lines))
 
 
 def _specific_call(name):
     return (len(name) >= 4 and not name.startswith(('__', 'test')) and name.lower() not in COMMON_CALLS)
-
-
-def _multiword(name):
-    return '_' in name.strip('_') or bool(re.search(r'[a-z0-9][A-Z]', name))
 
 
 def _prose(path):
@@ -272,25 +297,21 @@ def _prose(path):
 
 
 def link_calls(units):
-    """추가 줄이 호출하는 함수의 정의가 같은 PR의 다른 변경 단위에 있으면 그 단위를 가리킨다.
-
-    이름이 정확히 같은 경우만 연결한다. 흔한 이름과 여러 파일에서 정의가 바뀐 이름은
-    대상을 특정할 수 없어 연결하지 않는다. 수신 객체를 알 수 없는 obj.name() 호출은
-    여러 단어로 된 이름만 연결한다. 테스트와 문서는 정의와 호출 어느 쪽으로도 쓰지 않는다:
-    테스트의 가짜 메서드가 제품 코드의 호출 대상으로 잡히고, 테스트의 호출은 동작 전파가 아니다.
-    중요도를 정하지 않는 문맥 신호다.
-    """
-    local, owners = {}, {}
+    """Link bare-name call candidates only to unique definitions in changed units."""
+    local, owners, changed_names = {}, {}, {}
     for unit in units:
         unit['calls_changed'] = []
         if (unit['excluded'] or unit['kind'] != 'hunk' or is_test(unit['file_path'])
                 or _prose(unit['file_path'])):
             continue
         local[unit['change_id']], changed = definitions(unit['diff'])
-        for name in changed:
+        changed_names[unit['change_id']] = changed
+        for name in local[unit['change_id']]:
             owners.setdefault(name, []).append(unit)
     targets = {name: found[0] for name, found in owners.items()
-               if _specific_call(name) and len({unit['file_path'] for unit in found}) == 1}
+               if _specific_call(name) and len(found) == 1
+               and name in changed_names[found[0]['change_id']]
+               and definition_count(found[0]['diff'], name) == 1}
     if not targets:
         return
     for unit in units:
@@ -302,12 +323,12 @@ def link_calls(units):
                 target = targets.get(name)
                 if (target is not None and target is not unit and name not in names
                         and name not in local[unit['change_id']]
-                        and (not dotted or _multiword(name))):
+                        and not dotted):
                     names.append(name)
         for name in names[:CALLS_CHANGED_LIMIT]:
             target = targets[name]
             # Signs stay so the excerpt reads as before/after rather than two unrelated lines.
-            changed = '\n'.join(line for line in target['diff'].splitlines() if line.startswith(('+', '-')))
+            changed = callee_changes(target['diff'], name)
             excerpt = changed.encode('utf-8')[:CALLEE_EXCERPT_BYTES].decode('utf-8', errors='ignore')
             unit['calls_changed'].append(dict(
                 name=name, change_id=target['change_id'], file_path=target['file_path'],

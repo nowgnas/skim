@@ -892,10 +892,10 @@ class CallReferenceTests(unittest.TestCase):
         caller = hunk('lib/use.py', ' def use(x):\n+    return compute_total(x)\n')
         self.assertEqual(self.calls(context_only + caller)['lib/use.py'], [])
 
-    def test_attribute_calls_need_a_multiword_name(self):
+    def test_attribute_calls_are_not_linked(self):
         core = hunk('lib/core.py', ' def submit_order(x):\n-    return 1\n+    return 2\n def serve(x):\n-    a\n+    b\n')
-        caller = hunk('lib/use.py', ' def use(x):\n+    checkout.submit_order(x)\n+    server.serve(x)\n')
-        self.assertEqual(self.calls(core + caller)['lib/use.py'], [('submit_order', 'h1')])
+        caller = hunk('lib/use.py', ' def use(x):\n+    checkout.submit_order(x)\n+    server.serve(x)\n+    $client->submit_order(x)\n+    Client::submit_order(x)\n+    client?.submit_order(x)\n')
+        self.assertEqual(self.calls(core + caller)['lib/use.py'], [])
         bare = hunk('lib/use.py', ' def use(x):\n+    serve(x)\n')
         self.assertEqual(self.calls(core + bare)['lib/use.py'], [('serve', 'h1')])
 
@@ -929,3 +929,78 @@ class CallReferenceTests(unittest.TestCase):
         self.assertEqual([call['name'] for call in linked], ['load_client'])
         self.assertNotIn(value, linked[0]['excerpt'])
 
+
+    def test_comments_and_duplicate_definitions_are_not_targets(self):
+        caller = hunk('lib/use.py', ' def use(x):\n+    return compute_total(x)\n')
+        for body in (
+            '+# def compute_total(x):\n+value = 2\n',
+            '+// function compute_total(x) {\n+value = 2\n',
+            ' /*\n function compute_total(x) {\n-    return 1;\n+    return 2;\n */\n',
+            ' class A:\n     def compute_total(x):\n-        return 1\n+        return 2\n'
+            ' class B:\n     def compute_total(x):\n-        return 1\n+        return 3\n',
+        ):
+            with self.subTest(body=body):
+                self.assertEqual(self.calls(hunk('lib/core.py', body) + caller)['lib/use.py'], [])
+        core = (hunk('lib/core.py', ' def compute_total(x):\n-    return 1\n+    return 2\n')
+                + '@@ -20,2 +20,2 @@\n def compute_total(x):\n-    return 1\n+    return 3\n')
+        self.assertEqual(self.calls(core + caller)['lib/use.py'], [])
+
+    def test_excerpt_contains_only_target_function_changes(self):
+        core = hunk('lib/core.py',
+                    ' def charge_card(x):\n-    charge(1)\n+    charge(999)\n'
+                    ' def display_name(x):\n-    return x.old_name\n+    return x.new_name\n'
+                    ' def other_work(x):\n-    erase(1)\n+    erase(2)\n')
+        caller = hunk('lib/use.py', ' def use(x):\n+    return display_name(x)\n')
+        call = parse_diff(core + caller)[0][-1]['calls_changed'][0]
+        self.assertEqual(call['excerpt'], '-    return x.old_name\n+    return x.new_name')
+        self.assertFalse(call['excerpt_truncated'])
+
+    def test_excerpt_handles_header_and_replaced_definition(self):
+        caller = hunk('lib/use.py', ' def use(x):\n+    return compute_total(x)\n')
+        for body in (
+            '@@ -1,2 +1,2 @@ def compute_total(x):\n-    return 1\n+    return 2\n',
+            '@@ -1,2 +1,2 @@\n-def compute_total(old):\n-    return 1\n'
+            '+def compute_total(new):\n+    return 2\n',
+        ):
+            core = 'diff --git a/lib/core.py b/lib/core.py\n--- a/lib/core.py\n+++ b/lib/core.py\n' + body
+            call = parse_diff(core + caller)[0][-1]['calls_changed'][0]
+            self.assertEqual(call['excerpt'], '\n'.join(
+                line for line in body.splitlines() if line.startswith(('+', '-'))))
+        unknown = hunk('lib/core.py', '-    return 1\n+    return 2\n')
+        self.assertEqual(self.calls(unknown + caller)['lib/use.py'], [])
+
+    def test_calls_survive_wire_overview_and_synthesis(self):
+        from skim.analyze.protocol import wire, SYSTEM
+        from skim.analyze.context import overview_input, synthesis_input
+        units, _ = parse_diff(ORDER_DIFF)
+        expected = units[1]['calls_changed']
+        self.assertEqual(wire(units[1])['calls_changed'], expected)
+        overview = overview_input(units, {})
+        sample = next(row for row in overview['samples'] if row['change_id'] == 'h2')
+        self.assertEqual(sample['calls_changed'], expected)
+        items = [dict(change_id=u['change_id'], importance='mid', reason='검토',
+                      risk_flags=[], behavior='changed') for u in units]
+        synthesis = synthesis_input(units, {}, items, {})
+        row = next(row for row in synthesis['items'] if row['change_id'] == 'h2')
+        self.assertEqual(row['calls_changed'], [
+            {key: call[key] for key in ('name', 'change_id', 'file_path')} for call in expected])
+        self.assertIn('이름이 같은 정의가 같은 PR에서 바뀐 호출 후보', SYSTEM)
+        self.assertIn('calls_changed가 있다는 사실만으로 high나 위험 플래그를 주지 마라', SYSTEM)
+
+
+class SecretStringContextRegressionTests(unittest.TestCase):
+    def test_multiline_string_names_and_values_are_redacted(self):
+        from skim.analyze.units import sanitize, REDACTED
+        for quote in ('"' * 3, "'" * 3):
+            for value in ('"hidden"', '[민감 정보 제외: 직접 쓴 문자열 값]'):
+                source = '+password = ' + quote + '\n+opaqueTOKENfragment=' + value + '\n+' + quote
+                cleaned = sanitize(source)
+                self.assertNotIn('opaqueTOKENfragment', cleaned)
+                self.assertNotIn('hidden', cleaned)
+                self.assertIn('\n+' + REDACTED + '\n', cleaned)
+
+    def test_spoofed_marker_does_not_bypass_name_checks(self):
+        from skim.analyze.units import sanitize, REDACTED_LITERAL
+        for prefix in ('+blob = "prefix ', '+blob = "x"; ', '+' + 'x' * 90):
+            cleaned = sanitize(prefix + 'opaqueTOKENfragment=' + REDACTED_LITERAL)
+            self.assertNotIn('opaqueTOKENfragment', cleaned)
