@@ -175,7 +175,10 @@ class RiskCandidatesTests(unittest.TestCase):
         for line in ('token = "secret-value"', 'password = "abc"',
                      'max_tokens = "secret-value"', 'token_count = 2147483648',
                      'max_tokens = 100; password = "abc"'):
-            self.assertIn('[민감 정보 제외]', sanitize(line))
+            cleaned = sanitize(line)
+            self.assertIn('[민감 정보 제외', cleaned)
+            self.assertNotIn('secret-value', cleaned)
+            self.assertNotIn('abc', cleaned)
 
     def test_pr13_provider_schema(self):
         diff = '''diff --git a/lib/skim/analyze/codex.py b/lib/skim/analyze/codex.py
@@ -725,3 +728,204 @@ diff --git a/tests/test_codex.py b/tests/test_codex.py
                     {path: '@@ -1 +1 @@\n+import skim.' + stem}))
                 self.assertNotIn('logic_without_tests', candidates(
                     'lib/' + stem + '.py', '+change()', ['tests/test_' + stem + '.py']))
+
+    def test_hard_coded_literal_keeps_name_and_hides_value(self):
+        from skim.analyze.units import REDACTED_LITERAL, sanitize
+        value = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY'
+        cases = {
+            f'+AWS_SECRET_ACCESS_KEY = "{value}"': '+AWS_SECRET_ACCESS_KEY = ' + REDACTED_LITERAL,
+            f"  export DB_PASSWORD='{value}';": '  export DB_PASSWORD= ' + REDACTED_LITERAL,
+            f'+    "api_key": "{value}",': '+    "api_key": ' + REDACTED_LITERAL,
+            f'+  - password: "{value}"': '+  - password: ' + REDACTED_LITERAL,
+            f'+self.token = b"{value}"': '+self.token = ' + REDACTED_LITERAL,
+        }
+        for line, expected in cases.items():
+            with self.subTest(line=line):
+                self.assertEqual(sanitize(line), expected)
+        # A known token format inside the literal is replaced first and stays hidden.
+        token = 'ghp_' + 'a' * 36
+        cleaned = sanitize(f'+GITHUB_TOKEN = "{token}"')
+        self.assertEqual(cleaned, '+GITHUB_TOKEN = ' + REDACTED_LITERAL)
+        self.assertNotIn(token, cleaned)
+
+    def test_non_literal_secret_assignments_keep_the_plain_marker(self):
+        from skim.analyze.units import REDACTED, REDACTED_LITERAL, sanitize
+        value = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY'
+        for line in ('+API_TOKEN = os.environ["API_TOKEN"]',
+                     '+API_TOKEN = os.environ.get("API_TOKEN", "")',
+                     '+password = config.db_password',
+                     '+token = secrets.token_urlsafe(32)',
+                     '+  password: "${DB_PASSWORD}"',
+                     '+  token: "{{ vault_token }}"',
+                     '+export API_TOKEN="$CI_TOKEN"',
+                     '+api_key = "<your-key>"',
+                     '+password = ""',
+                     f'+token = f"{value}{{suffix}}"',
+                     f'+token = "{value}" + salt',
+                     f'+SECRET_KEY={value}',
+                     f'+connect(password="{value}")',
+                     '+def check(token: str, expected):',
+                     f'+if password == "{value}":'):
+            with self.subTest(line=line):
+                cleaned = sanitize(line)
+                self.assertIn(REDACTED, cleaned)
+                self.assertNotIn(REDACTED_LITERAL, cleaned)
+                self.assertNotIn(value, cleaned)
+
+    def test_literal_marker_never_keeps_text_that_may_be_a_value(self):
+        from skim.analyze.units import REDACTED_LITERAL, SECRET_ASSIGNMENT, SECRET_VALUE, sanitize
+        value = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY'
+        # Here the matched "name" is not a declaration at the start of the line, so it is dropped too.
+        for line in (f'+headers = {{"x": 1}}; token = "{value}"',
+                     f'+url = "https://example.test/?access_token={value}"',
+                     f'+blob = "x"; abcTOKENxyz= "{value}"',
+                     '+' + 'x' * 90 + f'_token = "{value}"'):
+            with self.subTest(line=line):
+                cleaned = sanitize(line)
+                self.assertNotIn(value, cleaned)
+                self.assertNotIn('abcTOKENxyz', cleaned)
+                self.assertNotIn('x' * 90, cleaned)
+        diff = (f'+AWS_SECRET_ACCESS_KEY = "{value}"\n+aws_key = "AKIAABCDEFGHIJKLMNOP"\n'
+                f'+password: \'{value}\'\n+token = "sk_live_{"a" * 24}"\n')
+        cleaned = sanitize(diff)
+        self.assertNotIn(value, cleaned)
+        self.assertIsNone(SECRET_VALUE.search(cleaned))
+        # Whatever still looks like an assignment after cleaning holds only a marker.
+        for match in SECRET_ASSIGNMENT.finditer(cleaned):
+            self.assertEqual(match['value'].strip(), REDACTED_LITERAL)
+        self.assertEqual(sanitize(cleaned), cleaned)
+
+    def test_fx_secret_unit_is_redacted_and_names_the_literal(self):
+        from skim.analyze.units import REDACTED_LITERAL
+        value = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY'
+        unit = self.unit('lib/app/settings.py', '@@ -1,3 +1,4 @@\n import os\n'
+                         f'+AWS_SECRET_ACCESS_KEY = "{value}"\n REGION = os.environ.get("REGION", "ap-northeast-2")\n')
+        self.assertTrue(unit['redacted'])
+        self.assertIn('+AWS_SECRET_ACCESS_KEY = ' + REDACTED_LITERAL, unit['diff'])
+        self.assertNotIn(value, unit['diff'])
+        self.assertIn('secrets', unit['content_hits'])
+        self.assertEqual(unit['hard_floors'], [])
+
+
+ORDER_DIFF = '''diff --git a/app/order_core.py b/app/order_core.py
+--- a/app/order_core.py
++++ b/app/order_core.py
+@@ -1,2 +1,2 @@
+ def calculate_order(order):
+-    return order.subtotal
++    return order.subtotal + order.delivery_fee
+diff --git a/app/order_routes.py b/app/order_routes.py
+--- a/app/order_routes.py
++++ b/app/order_routes.py
+@@ -196,2 +196,2 @@
+ def order_total(order):
+-    return order.subtotal
++    return calculate_order(order)
+'''
+
+
+def hunk(path, body, start=1):
+    return (f'diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n'
+            f'@@ -{start},2 +{start},2 @@\n' + body)
+
+
+class CallReferenceTests(unittest.TestCase):
+    def calls(self, diff):
+        return {unit['file_path']: [(call['name'], call['change_id']) for call in unit['calls_changed']]
+                for unit in parse_diff(diff)[0]}
+
+    def test_added_call_points_at_the_changed_definition(self):
+        units, _ = parse_diff(ORDER_DIFF)
+        core, routes = units
+        self.assertEqual(core['calls_changed'], [])
+        self.assertEqual(routes['calls_changed'], [dict(
+            name='calculate_order', change_id='h1', file_path='app/order_core.py',
+            excerpt='-    return order.subtotal\n+    return order.subtotal + order.delivery_fee',
+            excerpt_truncated=False)])
+        # The signal is context only: it adds no candidate, floor, or other rule signal.
+        for key in ('location_hints', 'kind_signals', 'content_hits', 'hard_floors', 'mechanical_hints'):
+            self.assertEqual(routes[key], [])
+        self.assertEqual(routes['candidates'], ['logic_without_tests'])
+
+    def test_definition_forms(self):
+        from skim.analyze.units import definitions
+        cases = {
+            '@@ -1 +1 @@ def from_header(a):\n-    x\n+    y\n': ['from_header'],
+            '@@ -1 +1 @@\n+async def added_def(a):\n+    pass\n': ['added_def'],
+            '@@ -1 +1 @@\n function jsFunc(a) {\n-  a\n+  b\n': ['jsFunc'],
+            '@@ -1 +1 @@\n+const arrowFunc = async (a) => a\n': ['arrowFunc'],
+            '@@ -1 +1 @@\n func (s *Server) GoMethod(a int) {\n+  b()\n': ['GoMethod'],
+            # The change sits under the second definition; the first is untouched context.
+            '@@ -1 +1 @@\n def untouched(a):\n     pass\n def touched(a):\n-    x\n+    y\n': ['touched'],
+            '@@ -1 +1 @@\n+value = 1\n def later(a):\n     pass\n': [],
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(definitions(text)[1], expected)
+
+    def test_common_short_and_ambiguous_names_are_not_linked(self):
+        for name in ('get', 'run', 'validate', 'handler', '__init__', 'test_total', 'abc'):
+            with self.subTest(name=name):
+                diff = (hunk('lib/core.py', f' def {name}(x):\n-    return 1\n+    return 2\n')
+                        + hunk('lib/use.py', f' def use(x):\n-    return 1\n+    return {name}(x)\n'))
+                self.assertEqual(self.calls(diff)['lib/use.py'], [])
+        # The same name changes in two files, so the call target is unknown.
+        diff = (hunk('lib/a.py', ' def compute_total(x):\n-    return 1\n+    return 2\n')
+                + hunk('lib/b.py', ' def compute_total(x):\n-    return 1\n+    return 3\n')
+                + hunk('lib/use.py', ' def use(x):\n-    return 1\n+    return compute_total(x)\n'))
+        self.assertEqual(self.calls(diff)['lib/use.py'], [])
+
+    def test_only_added_code_calls_to_changed_definitions_are_linked(self):
+        core = hunk('lib/core.py', ' def compute_total(x):\n-    return 1\n+    return 2\n')
+        for body in (' def use(x):\n-    return compute_total(x)\n+    return 1\n',
+                     ' def use(x):\n     compute_total(x)\n+    return 1\n',
+                     ' def use(x):\n+    # compute_total(x) is called elsewhere\n',
+                     ' def use(x):\n+    log("compute_total(x)")\n',
+                     ' def use(x):\n+    return compute_total\n',
+                     ' def use(x):\n+    return other_total(x)\n',
+                     # A local definition with the same name shadows the other file.
+                     ' def compute_total(x):\n+    return compute_total(x - 1)\n'):
+            with self.subTest(body=body):
+                self.assertEqual(self.calls(core + hunk('lib/use.py', body))['lib/use.py'], [])
+        # Unchanged definitions that only appear as context are not call targets.
+        context_only = hunk('lib/core.py', '+LIMIT = 3\n def compute_total(x):\n     return 1\n')
+        caller = hunk('lib/use.py', ' def use(x):\n+    return compute_total(x)\n')
+        self.assertEqual(self.calls(context_only + caller)['lib/use.py'], [])
+
+    def test_attribute_calls_need_a_multiword_name(self):
+        core = hunk('lib/core.py', ' def submit_order(x):\n-    return 1\n+    return 2\n def serve(x):\n-    a\n+    b\n')
+        caller = hunk('lib/use.py', ' def use(x):\n+    checkout.submit_order(x)\n+    server.serve(x)\n')
+        self.assertEqual(self.calls(core + caller)['lib/use.py'], [('submit_order', 'h1')])
+        bare = hunk('lib/use.py', ' def use(x):\n+    serve(x)\n')
+        self.assertEqual(self.calls(core + bare)['lib/use.py'], [('serve', 'h1')])
+
+    def test_tests_docs_and_excluded_files_are_not_linked(self):
+        core = hunk('lib/core.py', ' def compute_total(x):\n-    return 1\n+    return 2\n')
+        call = ' def use(x):\n+    return compute_total(x)\n'
+        for path in ('tests/test_core.py', 'docs/guide.md', '.env'):
+            with self.subTest(path=path):
+                self.assertEqual(self.calls(core + hunk(path, call))[path], [])
+        # A fake defined in a test is not the target of a product call.
+        fake = hunk('tests/test_core.py', ' def compute_total(x):\n-    return 1\n+    return 2\n')
+        self.assertEqual(self.calls(fake + hunk('lib/use.py', call))['lib/use.py'], [])
+
+    def test_link_count_and_excerpt_are_capped(self):
+        names = ['first_step', 'second_step', 'third_step', 'fourth_step']
+        long_line = '+    return ' + ' + '.join(['value'] * 80) + '\n'
+        core = ''.join(hunk(f'lib/core{index}.py', f' def {name}(x):\n-    return 1\n' + long_line)
+                       for index, name in enumerate(names))
+        caller = hunk('lib/use.py', ' def use(x):\n' + ''.join(f'+    {name}(x)\n' for name in names))
+        linked = [unit for unit in parse_diff(core + caller)[0] if unit['file_path'] == 'lib/use.py'][0]['calls_changed']
+        self.assertEqual([call['name'] for call in linked], names[:3])
+        for call in linked:
+            self.assertLessEqual(len(call['excerpt'].encode()), 240)
+            self.assertTrue(call['excerpt_truncated'])
+
+    def test_excerpt_of_the_target_is_sanitized(self):
+        value = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY'
+        core = hunk('lib/core.py', f' def load_client(x):\n-    return 1\n+    api_token = "{value}"\n')
+        caller = hunk('lib/use.py', ' def use(x):\n+    return load_client(x)\n')
+        linked = parse_diff(core + caller)[0][1]['calls_changed']
+        self.assertEqual([call['name'] for call in linked], ['load_client'])
+        self.assertNotIn(value, linked[0]['excerpt'])
+
