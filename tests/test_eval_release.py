@@ -16,6 +16,20 @@ from skim.config import Config
 
 
 class EvalEvidenceTests(unittest.TestCase):
+    def test_top3_excludes_expected_fourth_model_high_file(self):
+        paths = [f'f{i}.py' for i in range(1, 5)]
+        result = dict(
+            units=[dict(change_id=path, file_path=path, candidates=[], location_hints=[],
+                        status='analyzed') for path in paths],
+            items=[dict(change_id=path, importance='high', reason='핵심',
+                        behavior='changed', risk_flags=[]) for path in paths],
+            files=[dict(file_path=path, importance='high', candidates=[]) for path in paths])
+        metrics = assess(dict(high_files=[paths[3]]), result, [], '')['metrics']
+        self.assertEqual(metrics['model_high_files'], paths)
+        self.assertEqual(metrics['top3'], paths[:3])
+        self.assertEqual(metrics['top3_precision'], 0.0)
+        self.assertEqual(metrics['top3_recall'], 0.0)
+
     def test_overview_paired_metrics(self):
         from skim.analyze.units import parse_diff, SIGNAL_FIELDS
         from skim.analyze.protocol import chunk_units
